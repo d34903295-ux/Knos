@@ -568,14 +568,14 @@ already does.
 
 | | measured |
 |---|---|
-| the compare-and-swap that refuses a claim | 0.25 ms |
-| one MCP tool call, which opens the store and closes it | 3.9 ms |
-| a cold `knos` command, the slowest path here | 12 ms |
-| one real source file of this repo, read and parsed | 2.5 ms |
+| the compare-and-swap that refuses a claim | 0.29 ms |
+| one MCP tool call, which opens the store and closes it | 4.2 ms |
+| a cold `knos` command, the slowest path here | 14 ms |
+| one real source file of this repo, read and parsed | 2.7 ms |
 <!-- /measured -->
 
-So a tool call pays for itself once it prevents **1.5** files of
-duplicated work, and a cold command at **4.8**. Below that,
+So a tool call pays for itself once it prevents **1.6** files of
+duplicated work, and a cold command at **5.2**. Below that,
 coordinating costs more than colliding, which is the honest shape of this and
 is why the break-even is published rather than the ratio alone.
 
