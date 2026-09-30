@@ -162,8 +162,10 @@ class Memory:
     def __init__(self, repo: Path) -> None:
         self.repo = Path(repo).resolve()
         self.db_path = paths.store_for(self.repo)
-        born = born_marker(self.db_path)
-        if not self.db_path.exists() and born.exists():
+        self.tenant = paths.tenant_for(self.repo)
+        born = paths.born_for(self.repo)
+        legacy = paths.legacy_store_for(self.repo)
+        if not self.db_path.exists() and born.exists() and not legacy.exists():
             raise StoreGone(
                 f"knos's memory of {self.repo.name} is gone ({self.db_path} was "
                 "deleted). knos will not answer from an empty store as if "
@@ -172,7 +174,8 @@ class Memory:
         from sibyl_memory_client import MemoryClient
 
         self.storage = _open(self.db_path)
-        self.client = MemoryClient(self.storage, cap_gate=self._cap_gate())
+        self.migrated = migrate_legacy(self.storage, legacy, self.tenant) if legacy.exists() else 0
+        self.client = MemoryClient(self.storage, tenant_id=self.tenant, cap_gate=self._cap_gate())
         if not born.exists():
             born.write_text(
                 "a knos store was created here; if it goes missing, knos "
@@ -432,7 +435,8 @@ class Memory:
         """How many notes have been dropped."""
         try:
             with self.storage.connection() as conn:
-                row = conn.execute("SELECT COUNT(*) FROM archived_entities").fetchone()
+                row = conn.execute("SELECT COUNT(*) FROM archived_entities WHERE tenant_id = ?",
+                                   (self.tenant,)).fetchone()
             return int(row[0]) if row else 0
         except Exception:
             return 0
@@ -455,15 +459,78 @@ class Memory:
         before = self.footprint()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).strftime("%Y-%m-%dT%H:%M:%S")
         with self.storage.transaction() as conn:
-            dropped = conn.execute("DELETE FROM archived_entities WHERE archived_at < ?", (cutoff,)).rowcount
+            dropped = conn.execute("DELETE FROM archived_entities WHERE tenant_id = ? AND archived_at < ?",
+                                   (self.tenant, cutoff)).rowcount
         with self.storage.connection() as conn:
             twice = conn.execute(
-                "SELECT COALESCE(SUM(n - 1), 0) FROM (SELECT COUNT(*) AS n FROM journal_events "
-                "GROUP BY evaluated, acted, extra HAVING n > 1)").fetchone()[0]
+                "SELECT COALESCE(SUM(n - 1), 0) FROM (SELECT COUNT(*) AS n FROM journal_events WHERE tenant_id = ? "
+                "GROUP BY evaluated, acted, extra HAVING n > 1)", (self.tenant,)).fetchone()[0]
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("VACUUM")
         return {"dropped": int(dropped or 0), "duplicates": int(twice or 0), "before": before,
                 "after": self.footprint()}
+
+
+_TENANT_TABLES = ("entities", "entity_relations", "state_documents", "journal_events", "revenue_events",
+                  "error_events", "reference_documents", "archived_entities", "flagged_actors", "skill_proposals",
+                  "learning_runs")
+
+
+def migrate_legacy(storage: Storage, legacy: Path, tenant: str) -> int:
+    """Move a 0.1-0.2 per-repo store into the shared store as this repo's tenant, once.
+
+    Those stores sat outside Sibyl's account-wide cap. The rows are copied as they are (same ids, same text, the
+    search index rebuilt by Sibyl's own triggers) and the old file is renamed `memory.db.migrated`, never deleted.
+    Returns the bytes moved, so the caller can say what now counts toward Sibyl's free 5 MB."""
+    size = legacy.stat().st_size
+    with storage.connection() as conn:
+        conn.execute("ATTACH DATABASE ? AS old", (str(legacy),))
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            old_tables = {r[0] for r in conn.execute("SELECT name FROM old.sqlite_master WHERE type='table'")}
+            for table in _TENANT_TABLES:
+                if table not in old_tables:
+                    continue
+                cols = [r[1] for r in conn.execute(f"PRAGMA old.table_info({table})")]
+                here = {r[1] for r in conn.execute(f"PRAGMA main.table_info({table})")}
+                cols = [c for c in cols if c in here]
+                pick = ", ".join("?" if c == "tenant_id" else c for c in cols)
+                conn.execute(f"INSERT OR IGNORE INTO main.{table} ({', '.join(cols)}) SELECT {pick} FROM old.{table}",
+                             (tenant,))
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.execute("DETACH DATABASE old")
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(legacy) + suffix)
+        if p.exists():
+            p.replace(Path(str(legacy) + ".migrated" + suffix))
+    return size
+
+
+def drop_tenant(storage: Storage, tenant: str) -> None:
+    """Remove one repo's rows from the shared store (knos reset); other repos and Sibyl's own tenants untouched."""
+    try:
+        from sibyl_memory_client.shadow import SHADOW_TABLE
+    except ImportError:
+        SHADOW_TABLE = ""
+    with storage.transaction() as conn:
+        for table in _TENANT_TABLES:
+            try:
+                conn.execute(f"DELETE FROM {table} WHERE tenant_id = ?", (tenant,))
+            except sqlite3.OperationalError:
+                continue
+        # The journal's search index and search shadow are append-only (insert triggers only): clear them for this
+        # tenant too, or the next journal row would collide with an index entry left behind.
+        for index in ("journal_events_fts", SHADOW_TABLE):
+            if not index:
+                continue
+            try:
+                conn.execute(f"DELETE FROM {index} WHERE tenant_id = ?", (tenant,))
+            except sqlite3.OperationalError:
+                continue
 
 
 def _flatten(hit: dict[str, Any]) -> dict[str, Any]:

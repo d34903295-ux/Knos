@@ -131,10 +131,11 @@ def test_no_jargon_anywhere(name, screen):
 
 
 def test_the_one_screen_states_both_halves_of_the_product():
-    """The claim has to be in the product, not only in the README: shared memory, and who is changing what."""
+    """The claim has to be in the product, not only in the README: who works on what, what is known (shared memory),
+    and what each may spend."""
     screen = help_text.main()
-    assert "one local memory every coding agent on this machine shares" in screen
-    assert "which files each of them is changing right now" in screen
+    assert "coordination and memory for every agent you run" in screen
+    assert "who works on" in screen and "what each may spend" in screen
 
 
 def _commands() -> list[str]:
@@ -204,7 +205,7 @@ def test_every_flag_a_help_page_shows_exists(page, command, flag, known):
 def test_help_runs(capsys):
     rc, said = run(capsys, "help")
     assert rc == 0
-    assert "which files each of them is changing right now" in said
+    assert "who works on" in said and "what each may spend" in said
 
 
 def test_help_for_one_command(capsys):
@@ -592,7 +593,9 @@ def test_init_codex_adds_one_table_and_keeps_the_rest(capsys):
 
     rc, said = _init(capsys, "--hosts", "codex")
     assert rc == 0, said
-    assert "Codex: memory server (Codex has no edit hook" in said
+    assert "Codex: memory server, edit guard (apply_patch and shell writes)" in said
+    hooks = json.loads((config.parent / "hooks.json").read_text(encoding="utf-8"))
+    assert hooks["hooks"]["PreToolUse"][0]["matcher"] == "apply_patch|Bash"
 
     text = config.read_text(encoding="utf-8")
     assert text.startswith(original)

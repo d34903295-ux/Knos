@@ -120,9 +120,34 @@ def worktrees(repo: Path) -> list[Path]:
 SIBYL_STORE = "memory.db"
 
 
+def shared_store() -> Path:
+    """The one Sibyl store every repo's memory lives in, as a tenant of its own: `$SIBYL_MEMORY_DB`, or Sibyl's own
+    default ~/.sibyl-memory/memory.db. That is where Sibyl's account-wide free-tier cap measures it; a store kept
+    anywhere else would escape the cap, and knos does not route around Sibyl's cap."""
+    override = os.environ.get("SIBYL_MEMORY_DB")
+    p = Path(override).expanduser() if override else Path.home() / ".sibyl-memory" / SIBYL_STORE
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def store_for(repo: Path) -> Path:
-    """The Sibyl store holding memory for one repo, worktrees included."""
+    """The Sibyl store holding memory for one repo (the shared store; the repo is a tenant in it)."""
+    return shared_store()
+
+
+def tenant_for(repo: Path) -> str:
+    """This repo's tenant in the shared store, worktrees included."""
+    return "knos-" + slug(shared_root(repo))
+
+
+def legacy_store_for(repo: Path) -> Path:
+    """Where 0.1-0.2 kept one store per repo (outside Sibyl's cap). Migrated on first open."""
     return work_root(repo) / SIBYL_STORE
+
+
+def born_for(repo: Path) -> Path:
+    """Marks that this repo's memory was created here, so a vanished store is refused rather than replaced."""
+    return work_root(repo) / "memory.born"
 
 
 @lru_cache(maxsize=64)
@@ -183,7 +208,8 @@ def pointed_repo() -> Path | None:
 
 def has_store(repo: Path) -> bool:
     """Whether knos has read this repo. Does not create anything."""
-    return (home() / slug(shared_root(repo)) / SIBYL_STORE).exists()
+    d = home() / slug(shared_root(repo))
+    return (d / "memory.born").exists() or (d / SIBYL_STORE).exists()
 
 
 def current_repo() -> Path | None:

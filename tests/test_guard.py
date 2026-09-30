@@ -70,7 +70,7 @@ def test_the_refusal_is_one_line_that_names_holder_time_and_way_out(claimed):
     assert "\n" not in reason
     assert re.fullmatch(
         r"knos: src/auth\.py is claimed by claude/alice123 since \d\d:\d\d \(auth rework\)\. "
-        r"Ask them, or take other work; the claim lapses in \d+ min\. A person can release it: knos done --all",
+        r"Ask them, or take other work; the claim lapses in \d+ min\. A person can release it: knos done --all \(Knos\)",
         reason,
     ), reason
 
@@ -188,6 +188,9 @@ def _payload(client: str, target: str, cwd: Path, session: str = "zed00000-someo
         return {"session_id": session, "tool_name": "Edit", "tool_input": {"file_path": target}, "cwd": str(cwd)}
     if client == "cursor":
         return {"conversation_id": session, "tool_name": "edit_file", "file_path": target, "cwd": str(cwd)}
+    if client == "codex":
+        return {"session_id": session, "tool_name": "apply_patch", "cwd": str(cwd),
+                "tool_input": {"command": f"*** Begin Patch\n*** Update File: {target}\n*** End Patch"}}
     return {"session_id": session, "args": {"filePath": target}, "cwd": str(cwd)}
 
 
@@ -211,7 +214,7 @@ def test_each_client_is_refused_in_its_own_words(claimed):
         out, code = guard.run(client, json.dumps(_payload(client, target, claimed)))
         assert code == guard.REFUSE, client
         said = json.loads(out)
-        if client == "claude":
+        if client in ("claude", "codex"):
             hso = said["hookSpecificOutput"]
             assert hso["hookEventName"] == "PreToolUse"
             assert hso["permissionDecision"] == "deny"
@@ -228,7 +231,7 @@ def test_each_client_is_refused_in_its_own_words(claimed):
 
 @pytest.mark.parametrize("client", guard.CLIENTS)
 def test_the_holders_own_session_is_allowed_through_the_hook(client, knos_home, repo):
-    host = {"claude": "claude", "cursor": "cursor", "opencode": "opencode"}[client]
+    host = {"claude": "claude", "cursor": "cursor", "opencode": "opencode", "codex": "codex"}[client]
     _take(repo, Agent(host=host, session="mine0000-session"), "auth", ["src/auth.py"])
     out, code = guard.run(client, json.dumps(_payload(client, str(repo / "src" / "auth.py"), repo,
                                                       session="mine0000-session")))
@@ -356,12 +359,14 @@ def test_install_then_uninstall_leaves_nothing_behind(knos_home):
     guard.install_claude()
     guard.install_cursor()
     guard.install_opencode()
-    assert guard.installed() == {"claude": True, "cursor": True, "opencode": True}
+    guard.install_codex()
+    assert guard.installed() == {"claude": True, "cursor": True, "opencode": True, "codex": True}
 
     assert guard.uninstall_claude()
     assert guard.uninstall_cursor()
     assert guard.uninstall_opencode()
-    assert guard.installed() == {"claude": False, "cursor": False, "opencode": False}
+    assert guard.uninstall_codex()
+    assert guard.installed() == {"claude": False, "cursor": False, "opencode": False, "codex": False}
     assert not guard.uninstall_opencode()
 
     kept = json.loads(settings.read_text(encoding="utf-8"))

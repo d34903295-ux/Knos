@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.3.0 (Oct 2026)
+
+Knos becomes the coordination and memory layer for the agent economy: who works on what (claims), what is known
+(Sibyl memory), what each agent may spend (budgets the chain enforces) and who did what (records anyone can verify).
+
+### Teams on Solana, with no server
+- `knos team create|add|remove|leave|status`, `knos team key export|import`. A team is one Solana Attestation Service
+  credential (`knos-<16 hex>`), with its own schemas `knos.claim.v1`, `knos.renew.v1`, `knos.member.v1` and
+  `knos.record.v1`, and `.knos/team.json` committed to the repo.
+- Claims across machines and vendors. A claim is an attestation whose address comes from a salted hash of the unit,
+  so two creates cannot both succeed. Overlapping units are ordered by (slot, address). Closes are
+  compare-then-close with Lighthouse. Renewals never re-create. Lapsed claims are swept by chain time only.
+- Property-tested on a local validator running the devnet-deployed SAS and Lighthouse: five signers, overlapping files
+  and folders, a lagging RPC, dust on claim addresses and crashing claimers. Zero double winners and zero blocks of a
+  winner (see docs/BENCH.md).
+- Nothing in plaintext on chain: paths, repo, names and descriptions are salted hashes or sealed boxes.
+- If the chain cannot be reached, edits go ahead locally with a one-line warning. Knos never blocks work on an
+  outage.
+- `knos mirror`: a background copy of the team's claims, so the guard reads a local table and not the chain.
+
+### Guards everywhere
+- Codex: a `PreToolUse` hook on `apply_patch` and Bash writes (`~/.codex/hooks.json`, and `.codex/hooks.json` in
+  the repo).
+- A git pre-commit and pre-push guard for anything no hook sees. Edit-time for hook tools; commit-time for raw shell
+  writes.
+- `knos init --team` commits the guard with the repo: `.claude/settings.json` hooks (cloud sessions run these), the
+  plugin at project scope, `.codex/hooks.json` and the git hooks. `init --undo` restores every file byte for byte.
+- A template for the Copilot cloud agent (`.github/hooks/knos.json.example`). One answer per `tool_use_id` when the
+  plugin and repo hooks both run.
+- Refusals end with "(Knos)".
+
+### Budgets the chain enforces (Pro)
+- `knos budget set <agent> 5/day --chain tempo` authorizes a Tempo AccountKeychain access key with a periodic limit
+  and a single allowed call (`transferWithMemo`). `knos budget show` reads `getRemainingLimitWithPeriod`.
+  `knos budget revoke` calls `revokeKey`.
+- `knos budget set <agent> 20 --chain solana` sets an SPL delegate on a per-agent vault.
+- Root keys are encrypted at rest (scrypt N=2^17 + AES-256-GCM). Passphrases are read only at an interactive terminal,
+  never inside an agent or CI.
+
+### Records
+- One `knos.record.v1` per agent per day: counters plus a Merkle root over its salted events and new Sibyl journal
+  entries. `knos agent record <agent>` checks them against the chain.
+
+### Sibyl, load-bearing, and bought in the same command
+- `knos learn` (Sibyl's self-learning into team playbooks under `.knos/playbooks/`, imported by every machine) and
+  `knos lint` (Sibyl's linter, plus a cross-agent contradiction check built on Sibyl's multi_record search). Both
+  call only `MemoryClient`, and on the free tier they say how to get Pro.
+- Memory moved into Sibyl's own store (`~/.sibyl-memory/memory.db`, one tenant per repo), where Sibyl's account-wide
+  free cap counts it. 0.2 stores are migrated once and kept as `memory.db.migrated`.
+- `knos pro buy` then gets Sibyl Pro through Sibyl's own `sibyl upgrade` if Sibyl says you are on the free tier, and
+  skips it for Pro and Staker accounts.
+
+### Agents beyond code
+- `knos.sdk`: `claim`, `release`, `remember`, `recall`, `budget`, `record`, with generic units (`task:`, `market:`,
+  `wallet:`).
+- `examples/langgraph_team.py`: two LangGraph agents on Sibyl's own `BaseStore`, never working the same task.
+
+### Public numbers
+- `scripts/network_stats.py` and the `network` workflow publish every Knos team on Solana to GitHub Pages,
+  split by devnet and mainnet.
+- `knos doctor` shows what is guarded and what is not.
+
 ## 0.2.1 (30 Sep 2026)
 
 - macOS: a `ctags` that is not Universal Ctags (macOS ships BSD ctags) is no longer used; knos reads the code

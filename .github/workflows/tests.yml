@@ -38,3 +38,31 @@ jobs:
           echo "init took $(( $(date +%s) - start ))s"
           test $(( $(date +%s) - start )) -le 30
           knos init --undo --hosts cursor
+
+  # The team registry against the real programs: a local validator with the devnet-deployed Solana Attestation Service
+  # and Lighthouse cloned into it (scripts/devchain.sh). The claim protocol's property test runs 200 rounds here.
+  chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: git config --global user.email ci@example.invalid && git config --global user.name ci
+      - name: Solana CLI (Anza installer)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - run: bash scripts/devchain.sh start
+      - run: pytest -q tests/test_sas.py tests/test_team_protocol.py tests/test_team_two_homes.py tests/test_team_records.py tests/test_chain_budgets.py tests/test_bench_chain.py tests/test_network_stats.py tests/test_bundle.py tests/test_team_property.py
+        env:
+          KNOSTEST_PROPERTY_N: "200"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: TypeScript SDK (two agents over the Knos MCP server)
+        run: |
+          cd sdk/ts && npm install --no-audit --no-fund
+          R="$RUNNER_TEMP/tsrepo"; mkdir -p "$R" && cd "$R" && git init -q && echo x > a.txt && git add -A && git commit -qm init
+          cd "$GITHUB_WORKSPACE/sdk/ts" && KNOS_TEST_REPO="$R" node test.mjs

@@ -194,7 +194,7 @@ class Agent:
 
 def for_hook(client: str, event: dict) -> Agent:
     host = {"claude": "claude", "cursor": "cursor", "opencode": "opencode", "codex": "codex"}.get(client, client)
-    session = str(event.get("session_id") or event.get("conversation_id") or "")
+    session = str(event.get("session_id") or event.get("sessionId") or event.get("conversation_id") or "")
     return Agent(host=host, session=session, anchor=anchor_for(host))
 
 

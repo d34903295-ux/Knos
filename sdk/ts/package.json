@@ -1,0 +1,15 @@
+{
+  "name": "knos-sdk",
+  "version": "0.3.0",
+  "description": "Knos for TypeScript agents: claims, shared Sibyl memory, over the Knos MCP server",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "eliza.js", "solana-agent-kit.js", "README.md"],
+  "license": "MIT",
+  "author": "drexthealpha",
+  "repository": {"type": "git", "url": "https://github.com/drexthealpha/Knos", "directory": "sdk/ts"},
+  "engines": {"node": ">=18"},
+  "dependencies": {"@modelcontextprotocol/sdk": "^1.17.0", "zod": "^3.23.0"},
+  "scripts": {"test": "node test.mjs"}
+}

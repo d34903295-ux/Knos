@@ -2,28 +2,29 @@
 
 from __future__ import annotations
 
-MAIN = """  knos - one local memory every coding agent on this machine shares,
-         and the list of which files each of them is changing right now
+MAIN = """  knos - coordination and memory for every agent you run: who works on
+         what, what is known, and what each may spend
 
   Once:
       knos init                  wire Claude Code, Codex, Cursor, OpenCode
-      knos demo                  the whole product on a throwaway repo
+      knos team create           share claims across machines, on Solana
 
   Every day (mostly your agents do this for you):
       knos ask "why did we drop redis?"
       knos claim "the parser" -p src/parser/**    other agents' edits refused
       knos done                  give your claims back
-      knos status                what it holds, who is working where
-      knos board                 the same, live, in your browser
+      knos status, board         what it holds, who is working where
 
   More
       knos remember, notes, forget    things you tell your agents
       knos private <path>             keep a path from your agents
       knos point, compact             catch up now; make room in memory
-      knos worth, bench               what it has done; measure it
-      knos spend, report, budget      Pro: spend, one cap across agents
+      knos worth, bench, doctor       what it did; measure it; what is unguarded
+      knos learn, lint                Sibyl Pro: team playbooks; memory health
+      knos budget, spend, report      Pro: caps; budgets the chain enforces
       knos pay, pro                   Pro: agent wallets; buy or check Pro
-      knos serve                      Team: share claims across machines
+      knos agent record <agent>       what an agent did, verified on chain
+      knos demo, serve                a throwaway demo; a self-hosted server
       knos help <cmd>                 more about one command"""
 
 
@@ -112,6 +113,10 @@ PER_COMMAND = {
   knos budget set 5 --repo .        count and cap only this repo
   knos budget raise 10
   knos budget clear
+  knos budget set claude 5/day --chain tempo    Tempo enforces it per day
+  knos budget set claude 20 --chain solana      a Solana delegate of 20
+  knos budget show                  every chain limit, read live
+  knos budget revoke claude --chain tempo
   knos budget fund --agent claude 5 --chain tempo    an agent's own wallet
   knos budget agents                each wallet: cap, spent, balance
   knos budget sweep --agent claude --to <your address>
@@ -149,6 +154,51 @@ PER_COMMAND = {
   Knos Team. On each machine:  knos init --remote http://knos.lan:8766
   --token <seat token>. Claims, notes and spend are then shared: a claim
   on one machine blocks an edit on another. Leave: knos init --leave-team""",
+    "team": """\
+  knos team create --cluster devnet   a registry on Solana; commit its file
+  knos team add <join code>           a teammate (their knos init prints it)
+  knos team add x --cloud ci          a revocable key for a cloud sandbox
+  knos team status | remove <who> | leave
+  knos team key export | import       your key on your other machines
+
+  A claim on one machine refuses a conflicting edit on every other machine
+  in the team, from any agent, with no server. The chain holds only salted
+  hashes. If the chain is unreachable, edits go ahead locally (warned).""",
+    "doctor": """\
+  knos doctor                        which agents and machines are guarded
+
+  Each agent host's edit guard, this repo's commit guard and committed repo
+  hooks; in a team, this key's float and members quiet on chain.""",
+    "stats": """\
+  knos stats                         claims and refused conflicts, in counts
+  knos stats --share                 the same as one line to paste anywhere
+
+  Counts only: no path, repo detail or name leaves in the shared line.""",
+    "prove": """\
+  knos prove "decided to shard by tenant"   an inclusion proof: that fact was
+                                            in an agent's record on chain
+
+  The leaf, its Merkle path and the record's root, all checkable by anyone
+  holding the salted log.""",
+    "learn": """\
+  knos learn                         one pass of Sibyl's self-learning here
+  knos learn --show                  pending proposals
+  knos learn --accept <id>           it becomes .knos/playbooks/<slug>.md
+
+  Sibyl Pro (knos pro buy gets it in the same command). Commit accepted
+  playbooks: every machine imports them into Sibyl at session start.""",
+    "lint": """\
+  knos lint                          Sibyl's memory linter, plus agents that
+                                     recorded opposite things
+
+  Sibyl Pro (knos pro buy gets it in the same command).""",
+    "agent": """\
+  knos agent record codex             claims taken, finished, abandoned, and
+                                      collisions, checked against the chain
+
+  In a team, each agent's day is written to Solana as a record: counters and
+  a Merkle root over its salted log, signed by its member key. Anyone can read
+  it; this machine's log proves each line of it.""",
     "compact": """\
   knos compact
   knos compact --older-than 7

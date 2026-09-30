@@ -25,6 +25,9 @@ from knos.pro import agentpay, budget, licence, team
 def server(tmp_path, monkeypatch):
     host_home = tmp_path / "server-home"
     monkeypatch.setenv("KNOS_HOME", str(host_home))
+    # The product waits 2 s for its server before failing open; a loaded test machine (parallel workers) can take
+    # longer to answer from the in-thread server, and these tests are about the answer, not the patience.
+    monkeypatch.setattr(team._call, "__defaults__", (None, 30.0))
     token_a, token_b = team.seat_add("alice"), team.seat_add("bob")
     srv, url = team.run_in_thread()
     yield {"url": url, "a": token_a, "b": token_b, "home": host_home}

@@ -16,7 +16,7 @@ import pytest
 
 from knos import paths, refresh
 from knos.cli import main
-from knos.memory import TOPIC, Fact, Memory, StoreGone, born_marker
+from knos.memory import TOPIC, Fact, Memory, StoreGone
 
 
 def _born_then_deleted(repo):
@@ -27,7 +27,7 @@ def _born_then_deleted(repo):
                         about="storage"))
         mem.note_thing(TOPIC, "storage", {"note": "we chose sqlite over redis", "when": now[:10]})
     db = paths.store_for(repo)
-    assert db.exists() and born_marker(db).exists()
+    assert db.exists() and paths.born_for(repo).exists()
     db.unlink()
     for extra in ("-wal", "-shm"):
         db.with_name(db.name + extra).unlink(missing_ok=True)
@@ -112,14 +112,16 @@ def test_reset_starts_over_on_purpose_and_keeps_a_backup(knos_home, repo, capsys
         conn.close()
     assert any("we chose sqlite over redis" in str(k) for k in kept), "the backup does not hold what the store held"
 
-    for gone in (db, born_marker(db), read_log, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+    # The store is shared by every repo (as tenants, where Sibyl's cap counts it): reset takes out this repo's
+    # tenant, its birth marker and its read log.
+    for gone in (paths.born_for(repo), read_log):
         assert not gone.exists(), gone
 
     # Started over: the next open is a new, empty store, and it is born again.
     with Memory(repo) as mem:
         assert not mem.remembered("storage")
         assert mem.journal() == []
-    assert born_marker(db).exists()
+    assert paths.born_for(repo).exists()
 
 
 def test_reset_recovers_a_store_that_was_deleted_by_hand(knos_home, repo, capsys) -> None:
@@ -129,6 +131,6 @@ def test_reset_recovers_a_store_that_was_deleted_by_hand(knos_home, repo, capsys
 
     assert main(["reset", "--yes"]) == 0
     assert "There was no store." in capsys.readouterr().out
-    assert not born_marker(db).exists()
+    assert not paths.born_for(repo).exists()
     with Memory(repo) as mem:
         assert mem.notes() == []

@@ -302,6 +302,7 @@ def _claude_cli_remove() -> bool:
 _HOOKS = {
     "claude": (guard.claude_settings, guard.install_claude, guard.uninstall_claude),
     "cursor": (guard.cursor_hooks, guard.install_cursor, guard.uninstall_cursor),
+    "codex": (guard.codex_hooks, guard.install_codex, guard.uninstall_codex),
     "opencode": (guard.opencode_plugin, guard.install_opencode, guard.uninstall_opencode),
 }
 
@@ -356,9 +357,15 @@ def pick(hosts: str | None) -> list[str]:
     return wanted
 
 
-def install(hosts: list[str]) -> Report:
+def install(hosts: list[str], team_repo: Path | None = None) -> Report:
     rep = Report()
     backups = Backups()
+    if team_repo is not None:
+        from . import team_setup
+        try:
+            rep.done.extend(team_setup.install(team_repo, backups))
+        except (guard.Unreadable, OSError, UnicodeDecodeError) as why:
+            rep.problems.append(f"team setup: {why}")
     for host in hosts:
         name = NAMES[host]
         try:
@@ -370,8 +377,8 @@ def install(hosts: list[str]) -> Report:
         except (guard.Unreadable, OSError, UnicodeDecodeError) as why:
             rep.problems.append(f"{name}: {why}")
             continue
-        rep.done.append(f"{name}: memory server" + (", edit guard and session notice" if hooked else "")
-                        + (" (Codex has no edit hook, so its edits are not guarded)" if host == "codex" else ""))
+        what = ", edit guard (apply_patch and shell writes)" if host == "codex" else ", edit guard and session notice"
+        rep.done.append(f"{name}: memory server" + (what if hooked else ""))
         if host in RESTART:
             rep.restart.append(RESTART[host])
     backups.seal()
@@ -379,10 +386,17 @@ def install(hosts: list[str]) -> Report:
     return rep
 
 
-def undo(hosts: list[str]) -> Report:
+def undo(hosts: list[str], repo: Path | None = None) -> Report:
     """Byte-for-byte where the file is as knos left it; otherwise only knos's own entries come out."""
     rep = Report()
     exact = restore_exact()
+    if repo is not None:
+        from . import team_setup
+        try:
+            if team_setup.uninstall(repo):
+                rep.done.append("the team guard in this repo")
+        except (guard.Unreadable, OSError, UnicodeDecodeError) as why:
+            rep.problems.append(f"team setup: {why}")
     backups = Backups("undo")
     for host in hosts:
         name = NAMES[host]

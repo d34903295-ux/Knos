@@ -28,3 +28,4 @@ id_rsa*
 
 # Machine-specific agent config: `knos init` writes the right one for whoever cloned this
 .mcp.json
+node_modules/

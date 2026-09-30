@@ -238,7 +238,7 @@ def remember(fact: str, about: str, claiming: bool = False, paths: list[str] | N
         written = mem.record(Fact(text=fact, source="note", where=f"{agent.label} said so, {now[:10]}", when=now, about=about))
         if written is None:
             return FULL
-        mem.note_thing(TOPIC, about, {"note": fact, "when": now[:10]})
+        mem.note_thing(TOPIC, about, {"note": fact, "when": now[:10], "who": agent.label})
     _share_with_team(fact, about, agent.label, repo)
     with Memory(repo) as mem:
         holds = 30

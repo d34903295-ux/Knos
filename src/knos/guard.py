@@ -39,13 +39,14 @@ from .identity import Agent
 REFUSE = 2
 ALLOW = 0
 
-CLIENTS = ("claude", "cursor", "opencode")
+CLIENTS = ("claude", "codex", "cursor", "opencode")
 
 
 @dataclass(frozen=True)
 class Verdict:
     allow: bool
     reason: str = ""
+    warning: str = ""  # shown to the person on an allowed edit (team mode: "working in local-only mode")
 
     @property
     def code(self) -> int:
@@ -182,19 +183,49 @@ def refusal(rel: str, claim, was: str | None = None) -> str:
     what = f"{rel} (renamed from {was})" if was else rel
     left = max(1, round(claim.minutes_left))
     return (f"knos: {what} is claimed by {claim.label} since {_since(claim.taken_at)} ({claim.description}). "
-            f"Ask them, or take other work; the claim lapses in {left} min. A person can release it: knos done --all")
+            f"Ask them, or take other work; the claim lapses in {left} min. A person can release it: knos done --all (Knos)")
 
 
 def check(repo: Path, target: str, who: Agent | str) -> Verdict:
     """Whether `who` may edit `target` in `repo`, and the one-line reason if not."""
-    from .claims import Claims, claims_db
-
     agent = _as_agent(who)
     repo = Path(repo).resolve()
     try:
         rel = Path(target).resolve().relative_to(repo).as_posix()
     except (ValueError, OSError):
         return Verdict(True)  # outside the repo: nothing recorded, nothing to refuse
+    local = _check_local(repo, rel, agent)
+    if not local.allow:
+        return local
+    return _check_team(repo, rel, agent)
+
+
+def _check_team(repo: Path, rel: str, agent: Agent) -> Verdict:
+    """Team mode (`.knos/team.json` in the repo): the claims every machine in the team placed on Solana."""
+    if not (repo / ".knos" / "team.json").exists():
+        return Verdict(True)
+    try:
+        from .team import live
+    except ImportError as exc:  # solders or PyNaCl missing: say so once per edit, never block
+        return Verdict(True, warning=f"team mode needs knos's Solana extras ({exc.name}); local-only (Knos)")
+    try:
+        rt = live.runtime(repo)
+        if rt is None:
+            return Verdict(True, warning="this machine has not joined the team yet: run `knos init` (Knos)")
+        d = live.check(rt, rel, agent.host, agent.session or (f"pid{agent.anchor}" if agent.anchor else ""))
+    except Exception as exc:
+        log(f"team guard allowed {rel}: {type(exc).__name__}: {exc}")
+        return Verdict(True, warning="team registry check failed: working in local-only mode (Knos)")
+    if not d.allow:
+        return Verdict(False, d.reason)
+    if d.warning:
+        log(f"team guard: {d.warning}")
+    return Verdict(True, warning=d.warning)
+
+
+def _check_local(repo: Path, rel: str, agent: Agent) -> Verdict:
+    from .claims import Claims, claims_db
+
     if not claims_db(repo).exists() and not (paths.home() / "team.json").exists():
         return Verdict(True)  # no local claims and no team server: nothing can be held
     try:
@@ -241,33 +272,150 @@ def target_of(client: str, event: dict) -> str:
     return str(got.get("filePath") or got.get("file_path") or got.get("path") or "")
 
 
+_PATCH_FILE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$|^\*\*\* Move to: (.+?)\s*$", re.MULTILINE)
+
+
+def patch_paths(patch: str) -> list[str]:
+    """Every file an apply_patch body touches: updated, added, deleted, and the destination of a move."""
+    return [a or b for a, b in _PATCH_FILE.findall(patch or "")]
+
+
+_WRITERS_ALL = {"rm", "touch", "truncate", "unlink", "shred", "mv"}  # every non-flag argument (mv: sources vanish)
+_WRITERS_LAST = {"cp", "install", "ln"}                               # the last argument is written
+
+
+def shell_writes(command: str) -> list[str]:
+    """Files a shell command visibly writes: redirections, tee, sed -i/perl -i, cp/mv/rm/touch/truncate, git mv/rm, dd.
+    Best effort by design: a script that writes files is not seen, and the commit guard is the backstop for those."""
+    import shlex
+
+    try:
+        lex = shlex.shlex(command or "", posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return []
+    out: list[str] = []
+    seg: list[str] = []
+
+    def flush() -> None:
+        words = list(seg)
+        while words and "=" in words[0] and not words[0].startswith("-"):  # FOO=bar cmd
+            words.pop(0)
+        if words and words[0] in ("sudo", "command", "env", "nohup", "time"):
+            words.pop(0)
+        if not words:
+            return
+        cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
+        plain = [a for a in args if not a.startswith("-")]
+        if cmd == "git" and args[:1] in (["mv"], ["rm"]):
+            out.extend(a for a in args[1:] if not a.startswith("-"))
+        elif cmd in _WRITERS_ALL:
+            out.extend(plain)
+        elif cmd in _WRITERS_LAST and len(plain) >= 2:
+            out.append(plain[-1])
+        elif cmd == "tee":
+            out.extend(plain)
+        elif cmd in ("sed", "perl") and any(a == "-i" or a.startswith("-i") or a == "--in-place" for a in args):
+            out.extend(plain[1:])  # the first plain word is the script
+        elif cmd == "dd":
+            out.extend(a[3:] for a in args if a.startswith("of="))
+
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t in (">", ">>", ">|", "&>", "&>>") and i + 1 < len(tokens):
+            target = tokens[i + 1]
+            if not target.startswith("&"):
+                out.append(target)
+            i += 2
+            continue
+        if t in (";", "&&", "||", "|", "&", "(", ")", ";;"):
+            flush()
+            seg = []
+        elif t.isdigit() and i + 1 < len(tokens) and tokens[i + 1].startswith(">"):
+            pass  # 2>file: the fd number
+        else:
+            seg.append(t)
+        i += 1
+    flush()
+    return [p for p in dict.fromkeys(out) if p and not p.startswith("/dev/")]
+
+
+def targets_of(client: str, event: dict) -> list[str]:
+    """Every path an edit hook payload writes. Codex sends apply_patch bodies and shell commands."""
+    if client == "codex":
+        tool = str(event.get("tool_name") or "")
+        got = event.get("tool_input") or {}
+        if not isinstance(got, dict):
+            got = {"command": got}
+        command = got.get("command")
+        if isinstance(command, list):
+            command = " ".join(str(c) for c in command)
+        if tool == "apply_patch":
+            return patch_paths(str(command or got.get("input") or ""))
+        if tool in ("Bash", "shell", "exec_command", "local_shell"):
+            return shell_writes(str(command or got.get("cmd") or ""))
+        if got.get("file_path"):
+            return [str(got["file_path"])]
+        return []
+    if client == "copilot":  # Copilot cloud agent / CLI: camelCase toolName + toolArgs (VS Code shape also accepted)
+        tool = str(event.get("toolName") or event.get("tool_name") or "").lower()
+        args = event.get("toolArgs") if "toolArgs" in event else event.get("tool_input")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = {"command": args}
+        if not isinstance(args, dict):
+            return []
+        if tool in ("bash", "powershell", "shell"):
+            return shell_writes(str(args.get("command") or ""))
+        if tool in ("edit", "create", "write", "str_replace_editor"):
+            got = args.get("path") or args.get("file_path") or args.get("filePath")
+            return [str(got)] if got else []
+        return []
+    one = target_of(client, event)
+    return [one] if one else []
+
+
 def render(client: str, verdict: Verdict) -> str:
     if verdict.allow:
+        if verdict.warning and client in ("claude", "codex"):
+            return json.dumps({"systemMessage": verdict.warning})
         return ""
-    if client == "claude":
+    if client in ("claude", "codex"):
         return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                   "permissionDecisionReason": verdict.reason}})
     if client == "cursor":
         return json.dumps({"permission": "deny", "user_message": verdict.reason, "agent_message": verdict.reason})
+    if client == "copilot":
+        return json.dumps({"permissionDecision": "deny", "permissionDecisionReason": verdict.reason})
     return json.dumps({"deny": True, "reason": verdict.reason})
 
 
 def decide(client: str, event: dict, repo: Path | None = None) -> Verdict:
     from . import identity
 
-    target = target_of(client, event)
-    if not target:
+    targets = targets_of(client, event)
+    if not targets:
         return Verdict(True)
-    root = Path(repo or event.get("cwd") or Path.cwd())
-    found = paths.repo_here(root)
-    if found is not None:
-        root = found
-    if not Path(target).is_absolute():
-        target = str(root / target)
+    cwd = Path(repo or event.get("cwd") or Path.cwd())
+    found = paths.repo_here(cwd)
+    root = found if found is not None else cwd
     capped = _over_budget(root)
     if capped:
         return Verdict(False, capped)
-    return check(root, target, identity.for_hook(client, event))
+    who = identity.for_hook(client, event)
+    warning = ""
+    for target in targets:
+        if not Path(target).is_absolute():
+            target = str((root if client not in ("codex", "copilot") else cwd) / target)
+        got = check(root, target, who)
+        if not got.allow:
+            return got
+        warning = warning or got.warning
+    return Verdict(True, warning=warning)
 
 
 def _over_budget(repo: Path | None = None) -> str | None:
@@ -283,6 +431,46 @@ def _over_budget(repo: Path | None = None) -> str | None:
     return (budget.refusal(repo) if mine else None) or (budget.team_refusal(budget.CHECK_EVERY) if team else None)
 
 
+def once(event: dict, compute) -> Verdict:
+    """One answer per tool call. A plugin hook and the repo's settings hook both run for the same edit (their commands
+    differ); the first to arrive decides, and the second waits for and returns that answer, so a claim is never
+    placed twice. Keyed by the host's `tool_use_id`; without one, every call decides."""
+    import hashlib
+    import time
+
+    tid = str(event.get("tool_use_id") or "")
+    if not tid:
+        return compute()
+    d = paths.home() / "hookcache"
+    d.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(tid.encode()).hexdigest()[:32]
+    result, lock = d / f"{key}.json", d / f"{key}.lock"
+    try:
+        os.close(os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        end = time.monotonic() + 40
+        while time.monotonic() < end:
+            try:
+                got = json.loads(result.read_text(encoding="utf-8"))
+                return Verdict(bool(got["allow"]), str(got.get("reason", "")), str(got.get("warning", "")))
+            except (OSError, ValueError, KeyError):
+                time.sleep(0.05)
+        return compute()
+    verdict = compute()
+    tmp = result.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"allow": verdict.allow, "reason": verdict.reason, "warning": verdict.warning}),
+                   encoding="utf-8")
+    os.replace(tmp, result)
+    try:  # tidy answers older than ten minutes
+        cutoff = time.time() - 600
+        for old in d.iterdir():
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+    except OSError:
+        pass
+    return verdict
+
+
 def run(client: str, stdin_text: str) -> tuple[str, int]:
     """Read one payload, return what to print and what to exit with."""
     try:
@@ -293,7 +481,7 @@ def run(client: str, stdin_text: str) -> tuple[str, int]:
     if not isinstance(event, dict):
         return "", ALLOW
     try:
-        verdict = decide(client, event)
+        verdict = once(event, lambda: decide(client, event))
     except Exception as exc:
         log(f"guard ({client}) allowed: {type(exc).__name__}: {exc}")
         return "", ALLOW
@@ -341,6 +529,10 @@ def claude_settings() -> Path:
 
 def cursor_hooks() -> Path:
     return Path.home() / ".cursor" / "hooks.json"
+
+
+def codex_hooks() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "hooks.json"
 
 
 def opencode_plugin() -> Path:
@@ -413,6 +605,40 @@ def install_cursor() -> Path:
             hooks.pop(event, None)
     _save(path, data)
     return path
+
+
+def install_codex() -> Path:
+    """Codex PreToolUse on apply_patch (its file edits) and Bash (shell writes). Codex asks the person to review and
+    trust a new hook once before it runs."""
+    path = codex_hooks()
+    data = _load(path)
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = data["hooks"] = {}
+    pre = [h for h in (hooks.get("PreToolUse") or []) if MARK not in json.dumps(h)]
+    pre.append({"matcher": "apply_patch|Bash",
+                "hooks": [{"type": "command", "command": hook_cmd("guard", "codex") + f" #{MARK}", "timeout": 30,
+                           "statusMessage": "Knos: checking claims"}]})
+    hooks["PreToolUse"] = pre
+    _save(path, data)
+    return path
+
+
+def uninstall_codex() -> bool:
+    path = codex_hooks()
+    data = _peek(path)
+    hooks = data.get("hooks") or {}
+    kept = [h for h in (hooks.get("PreToolUse") or []) if MARK not in json.dumps(h)]
+    if len(kept) == len(hooks.get("PreToolUse") or []):
+        return False
+    if kept:
+        hooks["PreToolUse"] = kept
+    else:
+        hooks.pop("PreToolUse", None)
+    if not hooks:
+        data.pop("hooks", None)
+    _save(path, data)
+    return True
 
 
 _OPENCODE_JS = """// knos-guard - installed by `knos init`, removed by `knos init --undo`.
@@ -489,4 +715,5 @@ def uninstall_opencode() -> bool:
 def installed() -> dict[str, bool]:
     return {"claude": MARK in json.dumps(_peek(claude_settings()).get("hooks") or {}),
             "cursor": MARK in json.dumps(_peek(cursor_hooks()).get("hooks") or {}),
+            "codex": MARK in json.dumps(_peek(codex_hooks()).get("hooks") or {}),
             "opencode": opencode_plugin().exists()}

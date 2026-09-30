@@ -57,7 +57,7 @@ def test_search_finds_a_recorded_fact(knos_home, repo):
 # this would succeed and the guarantee would be worthless.
 
 
-def _raw_insert(db_path: str, queue) -> None:
+def _raw_insert(db_path: str, tenant: str, queue) -> None:
     conn = sqlite3.connect(db_path, timeout=20)
     try:
         conn.execute(
@@ -65,7 +65,7 @@ def _raw_insert(db_path: str, queue) -> None:
             " VALUES (?, ?, ?, ?, ?, ?)",
             (
                 str(uuid.uuid4()),
-                "00000000-0000-0000-0000-000000000001",
+                tenant,
                 TOPIC,
                 "redis",
                 '{"decision": "smuggled in"}',
@@ -85,10 +85,10 @@ def _raw_insert(db_path: str, queue) -> None:
 def test_schema_rejects_a_conflicting_write_from_another_process(knos_home, repo):
     with Memory(repo) as m:
         m.note_thing(TOPIC, "redis", {"decision": "dropped"})
-        db = str(m.db_path)
+        db, tenant = str(m.db_path), m.tenant
 
     queue = multiprocessing.Queue()
-    proc = multiprocessing.Process(target=_raw_insert, args=(db, queue))
+    proc = multiprocessing.Process(target=_raw_insert, args=(db, tenant, queue))
     proc.start()
     proc.join(60)
     # Sixty, not ten. What this test asserts is that the conflicting write is
@@ -108,14 +108,14 @@ def test_the_counter_test_can_fail(knos_home, repo):
     """A different name is accepted, so the test above is testing something."""
     with Memory(repo) as m:
         m.note_thing(TOPIC, "redis", {"decision": "dropped"})
-        db = str(m.db_path)
+        db, tenant = str(m.db_path), m.tenant
         conn = sqlite3.connect(db, timeout=20)
         conn.execute(
             "INSERT INTO entities (id, tenant_id, category, name, body, status)"
             " VALUES (?, ?, ?, ?, ?, ?)",
             (
                 str(uuid.uuid4()),
-                "00000000-0000-0000-0000-000000000001",
+                tenant,
                 TOPIC,
                 "memcached",
                 "{}",

@@ -1,53 +1,62 @@
 # Contributing
 
-Knos is one local MCP server, three tools, one SQLite file. Changes that
-delete something are the most welcome kind.
+Knos is the coordination and memory layer for agents: claims, Sibyl memory, budgets and records. Changes that delete
+something are the most welcome kind.
 
 ## Run the tests
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-pytest                      # the critical path, ~25s; a throwaway store each
-pytest -m ""                # all of it, ~4 minutes; what CI runs
-pytest tests/test_no_network.py     # the one that proves it stays local
-cd contracts && forge test  # the Base contract, if you have Foundry
+pytest                               # everything that needs no chain
+bash scripts/devchain.sh start       # a local validator with the devnet-deployed SAS and Lighthouse
+pytest tests/test_team_*.py tests/test_sas.py tests/test_chain_budgets.py   # now these run too
+KNOSTEST_PROPERTY_N=200 pytest tests/test_team_property.py                  # the claim protocol's property test
 ```
 
-The suite is slow because it reads real repos and drives a real MCP server
-over stdio rather than mocking either. Please keep it that way.
+The suite is offline apart from the local validator: `tests/conftest.py` refuses every non-loopback connection and
+gives each test its own home. It reads real repos, drives a real MCP server over stdio and sends real transactions
+rather than mocking them. Please keep it that way.
 
 ## Add an agent adapter
 
-This is the most useful first change, and it is three edits:
+The most useful first change. There are three kinds.
 
-1. `src/knos/cli.py`, `_config_files()` — add `(name, path)` for the client's
-   MCP config. Use its own environment variable if it has one.
-2. `src/knos/cli.py`, `_write_configs()` — if the client uses a different
-   shape, add a branch. OpenCode is the worked example: key `mcp`, not
-   `mcpServers`, `"type": "local"`, and one command array.
-3. `tests/test_cli.py` — a test that writes a throwaway config and asserts
-   the exact shape that client reads. `test_opencode_gets_the_shape_opencode_reads`
-   is the pattern. **Copy the shape from the client's own docs and link them
-   in the PR.** A config written in the wrong shape looks like it worked and
-   does nothing.
+**1. A host's memory server (MCP config).** Edit `src/knos/init.py`:
+- `mcp_files()` gets the path of the host's MCP config. Use the host's own environment variable if it has one.
+- `_add_mcp()` / `_remove_mcp()` get a branch if the host uses a different shape. OpenCode is the worked example:
+  key `mcp`, `"type": "local"`, one command array.
 
-If the client has a CLI that registers a server with a running session, wire
-that first and skip the file — see `_add_via_claude_cli`. That is the
-difference between "restart your editor" and no step at all.
+Then add a test in `tests/test_cli.py` asserting the exact shape the host reads. **Copy the shape from the host's own
+docs and link them in the PR.** A config written in the wrong shape looks like it worked and does nothing.
+
+**2. A host's edit guard.** Edit `src/knos/guard.py`:
+- `targets_of()`: which paths this host's pre-tool payload writes. Codex is the worked example: it parses
+  `apply_patch` bodies and the write targets of shell commands.
+- `render()`: how this host wants a refusal said. Exit 2 is always the refusal.
+- `install_<host>()` / `uninstall_<host>()`: add them to `_HOOKS` in `init.py`, so `init --undo` restores every
+  byte.
+
+`tests/test_codex_guard.py` is the pattern: a real subprocess, a real payload in the host's documented shape, and the
+exit code. Link the host's hook docs.
+
+**3. A framework adapter (agents beyond code).** Use `knos.sdk.Knos`: `claim`, `release`, `remember`, `recall`.
+Units are generic (`task:`, `market:`, `wallet:`). For memory, hand the framework Sibyl's own adapter, backed by
+`Knos.memory_client()`. `examples/langgraph_team.py` is the pattern. It must run in CI with no API key, using scripted
+models.
 
 ## What a good first PR looks like
 
 - One thing, with a test that fails before it and passes after.
 - A comment that says *why*, not *what*. The code says what.
 - No new dependency without saying what it replaces.
-- No new MCP tool unless something is impossible without it. Three is the
-  ceiling; every tool is one more thing an agent has to choose between.
 - Numbers measured on your machine, with the command you used.
 
 ## Things deliberately not wanted
 
-- A daemon, watcher, or anything on a schedule. `knos` runs when a person or
-  their agent asks it to, and the README says so.
-- Install-time code execution.
-- Anything that makes a network request on the read or answer path.
+- A server anyone has to run. Teams coordinate through the chain.
+- Anything on the edit path that waits on the network. The guard reads the local mirror, and makes at most one read
+  of about a second when the mirror is stale. `knos mirror` is the only background process: it starts on demand and
+  exits after 30 idle minutes.
+- Plaintext on chain: paths, repo names, user names, descriptions.
+- Routing around Sibyl's tier gate or cap: only `MemoryClient` methods, never `tier=` (a test greps for it).
 - Summarising. Knos returns what somebody actually said, with its source.

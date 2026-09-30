@@ -101,7 +101,7 @@ def test_the_repo_you_are_standing_in_answers_not_the_last_one_pointed_at(
     """
     other = tmp_path / "other"
     (other / ".git").mkdir(parents=True)
-    paths.store_for(other).write_text("", encoding="utf-8")
+    paths.born_for(other).write_text("", encoding="utf-8")  # knos has read it
 
     paths.remember_pointed(repo)
     monkeypatch.chdir(other)

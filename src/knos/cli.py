@@ -118,6 +118,7 @@ def init(
     remote: str = typer.Option(None, "--remote", help="Team: join this knos serve (with --token)"),
     token: str = typer.Option(None, "--token", help="Team: this machine's seat token"),
     leave_team: bool = typer.Option(False, "--leave-team", help="Team: stop sharing claims with the team server"),
+    team: bool = typer.Option(False, "--team", help="also guard this repo for everyone: repo hooks, plugin, git hooks"),
 ) -> None:
     """Wire knos into every agent on this machine (memory server, edit guard, session notice)."""
     from . import init as setup
@@ -154,7 +155,7 @@ def init(
         return
 
     if undo:
-        rep = setup.undo(chosen or list(setup.HOSTS))
+        rep = setup.undo(chosen or list(setup.HOSTS), paths.repo_here())
         for name in rep.done:
             out.print(f"Removed from {name}.")
         if not rep.done:
@@ -182,9 +183,19 @@ def init(
         except Exception as why:  # reading is a convenience here; wiring the agents is the job
             out.print(f"[yellow]![/yellow] could not read {here.name} yet ({type(why).__name__}); "
                       "the first question reads it")
-    rep = setup.install(chosen)
+    if team and here is None:
+        raise Stop("--team guards a repo: run it inside one.")
+    rep = setup.install(chosen, here if team else None)
     for line in rep.done:
         out.print(f"[green]+[/green] {line}")
+    if here is not None and (here / ".knos" / "team.json").exists():
+        try:
+            from .team.cli import join_hint
+
+            for line in join_hint(here):
+                out.print(line, markup=False)
+        except Exception as why:  # the team is an extra; wiring the agents is the job
+            out.print(f"[yellow]![/yellow] team setup skipped ({type(why).__name__}: {why})")
     for p in rep.problems:
         out.print(f"[yellow]![/yellow] {p}")
     if rep.backups:
@@ -208,7 +219,7 @@ def init(
 @app.command("connect", hidden=True)
 def connect(show: bool = typer.Option(False, "--print"), hosts: str = typer.Option(None, "--hosts")) -> None:
     """Old name for `knos init`."""
-    init(undo=False, hosts=hosts, show=show, test=True, read=True, remote=None, token=None, leave_team=False)
+    init(undo=False, hosts=hosts, show=show, test=True, read=True, remote=None, token=None, leave_team=False, team=False)
 
 
 @app.command("guard", hidden=True)
@@ -217,10 +228,10 @@ def guard_cmd(install: bool = typer.Option(False, "--install"), uninstall: bool 
     from . import guard
 
     if install:
-        init(undo=False, hosts=None, show=False, test=True, read=True, remote=None, token=None, leave_team=False)
+        init(undo=False, hosts=None, show=False, test=True, read=True, remote=None, token=None, leave_team=False, team=False)
         return
     if uninstall:
-        init(undo=True, hosts=None, show=False, test=False, read=False, remote=None, token=None, leave_team=False)
+        init(undo=True, hosts=None, show=False, test=False, read=False, remote=None, token=None, leave_team=False, team=False)
         return
     for name, on in guard.installed().items():
         out.print(f"  {name:<10} {'guarding' if on else 'not wired'}")
@@ -503,6 +514,20 @@ def status() -> None:
 
 
 @app.command()
+def doctor() -> None:
+    """What is guarded and what is not: agent hosts, the commit guard, the team key's float, quiet members."""
+    from . import doctor as doc
+
+    rows = doc.run(paths.repo_here())
+    for name, ok, detail in rows:
+        mark = "[green]ok[/green]" if ok else "[yellow]!![/yellow]"
+        out.print(f"  {mark}  {name}: ", end="")
+        _quote(detail)
+    if not rows:
+        out.print("No agent host found on this machine.")
+
+
+@app.command()
 def worth() -> None:
     """What knos has actually done here: claims, releases, edits refused."""
     from . import worth as tally
@@ -520,6 +545,37 @@ def worth() -> None:
 
 
 @app.command()
+def stats(share: bool = typer.Option(False, "--share", help="one line to paste anywhere; counts only, no paths")) -> None:
+    """What Knos did in this repo, in counts: claims, collisions refused, team claims on chain."""
+    from . import worth as tally
+
+    repo = _repo()
+    got = tally.tally(repo)
+    team_claims = team_refused = 0
+    if (repo / ".knos" / "team.json").exists():
+        try:
+            from .team import live
+            rt = live.runtime(repo, fetch_salt=False)
+            if rt is not None:
+                ev = live.events(rt)
+                team_claims = sum(1 for e in ev if e["kind"] == "claim")
+                team_refused = sum(1 for e in ev if e["kind"] in ("blocked", "lost"))
+        except Exception:  # noqa: BLE001
+            pass
+    line = (f"My agents: {got['claimed'] + team_claims} claims across {max(got['agents'], 1)} agent(s), "
+            f"{got['blocked'] + team_refused} conflicting edits refused before they happened"
+            + (f", {team_claims} of them arbitrated on Solana" if team_claims else "")
+            + " — Knos, github.com/drexthealpha/Knos")
+    if share:
+        _quote(line)
+        return
+    out.print(f"[bold]{repo.name}[/bold]")
+    out.print(f"  claims {got['claimed']} local, {team_claims} on chain; refused {got['blocked']} local, "
+              f"{team_refused} across machines")
+    out.print("  Share it:  knos stats --share")
+
+
+@app.command()
 def who() -> None:
     """Which agents finish what they claim, and what hold that has earned them."""
     from . import record
@@ -533,6 +589,58 @@ def who() -> None:
     out.print("[bold]who[/bold]                    [dim]claimed  closed  hold[/dim]")
     for got in everyone:
         out.print(f"  {got['who'][:22]:22} {got['taken']:4}  {got['finished']:6}  {got['holds']:3} min")
+
+
+# ---- Sibyl's paid features ---------------------------------------------------------------
+
+
+@app.command()
+def learn(accept: str = typer.Option(None, "--accept", metavar="ID", help="accept a proposal: it becomes a playbook"),
+          show: bool = typer.Option(False, "--show", help="list pending proposals without a new pass")) -> None:
+    """Sibyl's self-learning over this repo's journal: repeated patterns across agents become team playbooks."""
+    from . import sibyl
+
+    repo = _repo()
+    try:
+        with Memory(repo) as mem:
+            if accept:
+                try:
+                    path = sibyl.accept(mem, repo, accept)
+                except LookupError as why:
+                    raise Stop(str(why), "See them:  knos learn --show") from None
+                out.print(f"Accepted. Playbook written to {path.relative_to(repo).as_posix()}: review it and commit "
+                          "it; every machine imports it at session start.")
+                return
+            got = sibyl.learn(mem, run=not show)
+    except sibyl.NeedsPro as why:
+        raise Stop(f"knos learn {why}.") from None
+    if not show:
+        out.print(f"Read {got['events_scanned']} journal entries; {got['proposals_made']} new proposal(s).")
+    if not got["pending"]:
+        out.print("No pending proposals.")
+    for p in got["pending"]:
+        out.print(f"  {p['id'][:12]}  {p['confidence']:.2f}  {p['title'] or p['slug']}", markup=False)
+    if got["pending"]:
+        out.print("Accept one:  knos learn --accept <id>")
+
+
+@app.command()
+def lint() -> None:
+    """Sibyl's memory linter, plus a check for agents that recorded opposite things."""
+    from . import sibyl
+
+    repo = _repo()
+    try:
+        with Memory(repo) as mem:
+            got = sibyl.lint(mem)
+    except sibyl.NeedsPro as why:
+        raise Stop(f"knos lint {why}.") from None
+    if got["text"]:
+        _quote(got["text"])
+    for c in got["contradictions"]:
+        _quote(f"  contradiction: {c['a_by'] or '?'} recorded {c['a']!r}; {c['b_by'] or '?'} recorded {c['b']!r}")
+    out.print("Memory is healthy." if got["ok"] else "Fix these before they spread: knos forget, or record the "
+              "decision that stands.")
 
 
 # ---- sharing through the repo ------------------------------------------------------------
@@ -597,8 +705,21 @@ def board(
 def bench(
     out_file: str = typer.Option(None, "--out", help="also write the results as markdown here"),
     quick: bool = typer.Option(False, "--quick", help="fewer rounds"),
+    chain: str = typer.Option(None, "--chain", metavar="URL",
+                              help="also the team bars, on a local validator (scripts/devchain.sh start)"),
+    rounds: int = typer.Option(200, "--rounds", help="with --chain: security rounds"),
 ) -> None:
     """Measure knos on this machine: collisions, friction, recall, speed. Every number is re-runnable."""
+    if chain:
+        import json as _json
+
+        from . import bench_chain
+
+        got = bench_chain.run(chain, rounds=rounds, quick=quick, say=lambda s: out.print(s, markup=False))
+        _quote(_json.dumps(got, indent=1))
+        if out_file:
+            Path(out_file).write_text(_json.dumps(got, indent=1), encoding="utf-8")
+        return
     from . import bench as bench_mod
 
     raise typer.Exit(bench_mod.main(out_file, quick=quick, say=lambda s: out.print(s, markup=False)))
@@ -627,6 +748,14 @@ def hook_cmd(ctx: typer.Context, which: str = typer.Argument(..., help="guard or
             from . import start_hook
 
             raise typer.Exit(start_hook.main(list(ctx.args)))
+        if which == "commit":  # git pre-commit / pre-push: exit 1 stops the commit
+            from . import commit_guard
+
+            args = list(ctx.args)
+            stage = args[args.index("--stage") + 1] if "--stage" in args[:-1] else "commit"
+            said = sys.stdin.read() if stage == "push" else ""
+            repo = paths.repo_here() or Path.cwd()
+            raise typer.Exit(commit_guard.run(stage, repo, said))
     except typer.Exit:
         raise
     except Exception:
@@ -649,6 +778,17 @@ def _register_pro() -> None:
 
 
 _register_pro()
+
+
+def _register_team() -> None:
+    try:
+        from .team.cli import register
+    except ImportError:  # solders or PyNaCl missing: no team commands, everything else works
+        return
+    register(app, out, Stop, _repo)
+
+
+_register_team()
 
 
 def main(argv: list[str] | None = None) -> int:

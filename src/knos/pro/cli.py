@@ -64,11 +64,25 @@ def register(app: typer.Typer, out, Stop) -> None:
                                                                              if s["over"] else ""))
 
     @bud.command("set")
-    def budget_set(usd: float = typer.Argument(..., help="dollars"),
+    def budget_set(first: str = typer.Argument(..., metavar="USD | AGENT", help="dollars; or an agent with --chain"),
+                   second: str = typer.Argument(None, metavar="[AMOUNT]", help="with --chain: 5/day or 20"),
                    per: str = typer.Option("day", "--per", help="day, week or month"),
-                   repo: str = typer.Option(None, "--repo", help="count and cap only this repo's agent sessions")) -> None:
-        """Set the cap: model tokens plus what agents paid APIs, across every agent."""
+                   repo: str = typer.Option(None, "--repo", help="count and cap only this repo's agent sessions"),
+                   chain: str = typer.Option(None, "--chain", help="tempo or solana: a limit the chain enforces"),
+                   network: str = typer.Option(None, "--network", help="tempo: moderato|mainnet; solana: devnet|"
+                                                                       "mainnet|localnet"),
+                   token: str = typer.Option(None, "--token", help="tempo: pathUSD, USDC.e or AlphaUSD; "
+                                                                   "solana: a mint address (default USDC)")) -> None:
+        """Set the cap across every agent, or (with --chain) one agent's limit enforced by Tempo or Solana."""
         need_pro()
+        if chain:
+            _chain_set(first, second, chain, network, token)
+            return
+        try:
+            usd = float(first)
+        except ValueError:
+            raise Stop(f"{first!r} is not an amount.", "Example:  knos budget set 20 --per day   or   "
+                       "knos budget set claude 5/day --chain tempo") from None
         try:
             cap = budget.set_cap(usd, per, repo)
         except ValueError as why:
@@ -113,6 +127,72 @@ def register(app: typer.Typer, out, Stop) -> None:
             from pathlib import Path
 
             Path(out_file).write_text(text, encoding="utf-8")
+
+    def _chain_set(agent, amount_text, chain, network, token):
+        from .. import keystore
+        from . import chainbudget as cb
+        if chain not in cb.NETWORKS:
+            raise Stop(f"No chain called {chain}.", "Use --chain tempo or --chain solana")
+        network = network or cb.NETWORKS[chain][0]
+        if network not in cb.NETWORKS[chain]:
+            raise Stop(f"{chain} has no network {network}.", "Networks: " + ", ".join(cb.NETWORKS[chain]))
+        try:
+            amount, period = cb.parse_amount(amount_text or "")
+            if chain == "tempo":
+                got = cb.tempo_set(agent, amount, period, network, token or "pathUSD")
+                every = {86_400: "day", 604_800: "week", 2_592_000: "month"}.get(period, "")
+                out.print(f"{agent} may spend {amount:g} {token or 'pathUSD'}" + (f" per {every}" if every else "")
+                          + f" on Tempo {network}: Tempo enforces it (Keychain access key {got['key']}).")
+                out.print(f"Budget account {got['root']}: fund it; the agent pays from it and cannot exceed the "
+                          "limit. Revoke: knos budget revoke " + agent + " --chain tempo")
+            else:
+                if period:
+                    raise cb.BudgetError("Solana delegates are a total, not a rate: use --chain solana with 20")
+                got = cb.solana_set(agent, amount, network, token)
+                out.print(f"{agent} may spend {amount:g} from vault {got['vault']} on Solana {network}: the Token "
+                          f"program enforces it (delegate {got['key']}).")
+                out.print(f"Fund the vault with the token (send to the token account {got['vault']}). "
+                          "Revoke: knos budget revoke " + agent + " --chain solana")
+        except keystore.NotATerminal as why:
+            raise Stop(str(why)) from None
+        except (cb.BudgetError, keystore.KeystoreError) as why:
+            raise Stop(str(why)) from None
+        notice = cb.legacy_wallets_notice()
+        if notice:
+            out.print(f"[dim]{notice}[/dim]")
+
+    @bud.command("show")
+    def budget_chain_show() -> None:
+        """Every chain-enforced agent limit, read from the chain now."""
+        from . import chainbudget as cb
+        rows = cb.entries()
+        if not rows:
+            out.print("No chain-enforced budgets. knos budget set claude 5/day --chain tempo")
+            return
+        for name, e in rows.items():
+            try:
+                got = cb.tempo_show(e) if e["chain"] == "tempo" else cb.solana_show(e)
+                left = f"{got['remaining']:g} left"
+            except Exception as why:  # noqa: BLE001
+                left = f"unreadable now ({type(why).__name__})"
+            out.print(f"  {name:<22} {e['network']:<9} limit {e['amount']:g}  {left}")
+
+    @bud.command("revoke")
+    def budget_revoke(agent: str = typer.Argument(...),
+                      chain: str = typer.Option(..., "--chain", help="tempo or solana")) -> None:
+        """End an agent's chain-enforced budget (on Tempo the key can never be used again)."""
+        from .. import keystore
+        from . import chainbudget as cb
+        e = cb.entries().get(f"{agent}@{chain}")
+        if not e:
+            raise Stop(f"{agent} has no {chain} budget.", "knos budget show")
+        try:
+            tx = cb.tempo_revoke(e) if chain == "tempo" else cb.solana_revoke(e)
+        except keystore.NotATerminal as why:
+            raise Stop(str(why)) from None
+        except (cb.BudgetError, keystore.KeystoreError) as why:
+            raise Stop(str(why)) from None
+        out.print(f"Revoked {agent}'s {chain} budget: {tx}")
 
     @bud.command("raise")
     def budget_raise(by: float = typer.Argument(..., help="dollars to add")) -> None:
@@ -341,8 +421,11 @@ def register(app: typer.Typer, out, Stop) -> None:
         network: str = typer.Option("mainnet", "--network", help="mainnet, or devnet (Solana) / testnet (Tempo)"),
         wait: bool = typer.Option(True, "--wait/--no-wait", help="watch the chain for the payment"),
         minutes: float = typer.Option(15, "--minutes", help="how long to wait"),
+        with_sibyl: bool = typer.Option(True, "--with-sibyl/--no-sibyl",
+                                        help="then get Sibyl Pro through Sibyl's own checkout, if you lack it"),
     ) -> None:
-        """Pay from any wallet: a Solana Pay link (USDC) or a Tempo transfer with memo. Verified on chain; no account."""
+        """Pay from any wallet: a Solana Pay link (USDC) or a Tempo transfer with memo. Verified on chain; no account.
+        Then, if Sibyl says you are on its free tier, Sibyl Pro through Sibyl's own checkout (never charged twice)."""
         if team and team < 3:
             raise Stop("Team starts at 3 seats.", "knos pro buy --team 3")
         plan = "team-seat" if team else ("pro-year" if year else "pro-month")
@@ -381,6 +464,20 @@ def register(app: typer.Typer, out, Stop) -> None:
         _qr(url)
         if wait:
             _wait(p, minutes)
+            if with_sibyl:
+                _sibyl_step("year" if year else "month")
+
+    def _sibyl_step(period: str) -> None:
+        import sys as _sys
+
+        from . import bundle
+
+        def confirm(q: str, default: bool) -> bool:
+            if not _sys.stdin.isatty():
+                return False  # never decide for someone who is not at the terminal
+            return typer.confirm(q, default=default)
+
+        bundle.step(lambda t: out.print(t, markup=False), confirm, period)
 
     def _qr(url: str) -> None:
         """A terminal QR when the optional `qrcode` package is installed; the link above works without it."""

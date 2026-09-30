@@ -54,7 +54,7 @@ GUEST = "guest"
 
 
 def _rules_file(repo: Path) -> Path:
-    return paths.store_for(repo).parent / "private.json"
+    return paths.work_root(repo) / "private.json"
 
 
 def added_patterns(repo: Path) -> list[str]:

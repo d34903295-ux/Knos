@@ -43,7 +43,8 @@ def repo(tmp_path: Path) -> Path:
 
 
 def test_reading_the_repo_writes_only_to_the_test_home(repo: Path) -> None:
-    """The fixture reads a repo; its store and code index must land in the per-test KNOS_HOME, never ~/.knos."""
+    """The fixture reads a repo; its code index must land in the per-test KNOS_HOME, and its Sibyl store in the
+    per-test home's ~/.sibyl-memory (where Sibyl's cap counts it), never the real home."""
     import os
 
     from knos import paths
@@ -51,11 +52,11 @@ def test_reading_the_repo_writes_only_to_the_test_home(repo: Path) -> None:
     home = Path(os.environ["KNOS_HOME"]).resolve()
     assert paths.home().resolve() == home
     store = paths.store_for(repo).resolve()
-    assert store.exists() and home in store.parents
+    assert store.exists() and Path.home().resolve() in store.parents and store.parent.name == ".sibyl-memory"
     assert home in paths.work_dir(repo).resolve().parents
     from conftest import _REAL_HOME
 
-    assert (_REAL_HOME / ".knos").resolve() not in store.parents
+    assert (_REAL_HOME / ".sibyl-memory").resolve() not in store.parents
 
 
 def _ask(repo: Path, question: str = "where is settle_trade"):

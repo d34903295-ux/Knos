@@ -1,143 +1,144 @@
 # Knos
 
-**One memory and one claim list for every coding agent on your machine, and a cap on what they spend.**
+**Every vendor now coordinates its own agents. Nobody coordinates everyone's. Knos is the neutral coordination and
+memory layer for the agent economy: who works on what, what is known, and what each may spend. It is enforced where
+the action happens, arbitrated on Solana, budgeted on Tempo and Solana, and remembered by Sibyl.**
+
+<!-- mcp-name: io.github.drexthealpha/knos -->
 
 ```
-$ pipx install knos && knos init
-  + read this repo into Sibyl memory: 212 commits, 38 things said in past sessions
-  + Claude Code: memory server, edit guard and session notice
-  + Codex: memory server
-  + Cursor: memory server, edit guard and session notice
-  Self-test passed: the memory server answered with its four tools and the guard allowed an empty edit.
-  Try it:  knos ask "what did we decide about auth?"   or   knos demo
+$ knos team create --cluster devnet
+  ✓ team registry on Solana — no server, nothing to host (credential knos-ca29f8d10cccc0b2)
+  ✓ wrote .knos/team.json — commit it
+
+# a teammate, on another machine, with another vendor's agent:
+$ uvx knos init
+  ✓ found .knos/team.json — send this join code to the team owner: knos-join:AGge…:Ym9i (fingerprint: focus-garlic-nutmeg-frost-blade-dance)
+
+# the owner:
+$ knos team add knos-join:AGge…:Ym9i
+  ✓ verified fingerprint · added · funded key · sealed team secret on chain  (bob)
 ```
 
-(The counts are your repo's. `knos init` takes under 30 seconds, measured by `knos bench`.)
+Now Alice's Claude Code claims `src/billing/tax.py` just by editing it. Bob's Codex, on another machine, tries to
+patch that file and is refused:
 
-![knos board: two files claimed by two agents, three agent sessions today, and a refused edit](docs/img/board.png)
+```
+src/billing/tax.py is claimed by alice/claude-code since 16:11 (Knos). Ask them, or take other work.
+```
 
-*`knos board`, rendered from a demo repo's real claims and refusal. It runs on 127.0.0.1 only, with a one-off token.*
+No server exists anywhere. This exact run is on Solana devnet, with every transaction linked, in
+[docs/network/demo.md](docs/network/demo.md).
 
-## The three things it fixes
+## What it enforces, and where
 
-1. **Agents collide.** Two sessions, from the same vendor or different ones, edit the same files, and work is lost or
-   done twice.
-   - With Knos, session A claims `src/parser/**`.
-   - When session B tries to edit `src/parser/x.py`, it is refused in one line that names who holds the file and since
-     when.
-   - A's own edits are never blocked.
-2. **Agents forget.** Every session rediscovers what earlier sessions, other vendors' agents and past commits already
-   settled.
-   - Knos reads all of them into one [Sibyl](https://sibyllabs.org) memory.
-   - Any agent asking "why did we drop the retry queue?" gets the answer with its citation: the Codex session, the
-     Cursor chat or the commit.
-3. **Agents spend with no edge** (Knos Pro).
-   - Knos meters what Claude Code and Codex spend, from their own logs, with no proxy.
-   - One cap covers every agent, session and host: when it is reached, the next edit is refused in one line.
-   - An agent that pays for APIs itself (MPP on Tempo, x402 on Solana) pays from its **own** wallet, which holds only
-     what you funded it with. The chain enforces that ceiling even if Knos is bypassed.
-
-## What it runs on
-
-- **[Sibyl](https://sibyllabs.org)** is the memory engine: every answer Knos gives comes out of a Sibyl store. Sibyl's
-  free tier holds 5 MB, and Knos never patches or routes around that cap. It keeps what can be rebuilt out of the
-  store, warns at 80%, and offers `knos compact`, or `sibyl upgrade` for Sibyl Pro (no cap).
-- **Solana** carries Pro licences, paid with a Solana Pay USDC link and verified by the CLI against the chain. There
-  is no licence server and no payment processor, and it works from any country. Solana also holds agent budget wallets
-  for x402 payments.
-- **Tempo** does the same with a stablecoin `transferWithMemo`, and holds agent wallets for MPP payments (the protocol
-  Stripe and Tempo co-authored).
-
-Memory, claims and the guard work fully offline. The chains carry money and proof.
-
-**Headroom on Sibyl's free 5 MB**, measured 29 Sep 2026 after reading each repo's latest 400 commits and its rules:
-
-| repo | store | counted by Sibyl's cap |
+| | what | enforced by |
 |---|---|---|
-| django | 2.0 MB | 2.3 MB |
-| hermes-agent | 3.0 MB | 3.3 MB |
+| **claims** | who works on what: files, folders, or any unit (`task:`, `market:`, `wallet:`) | each host's own pre-edit hook (Claude Code, Codex, Cursor, OpenCode, the Copilot cloud agent) and a git commit guard for raw shell writes; across machines by a Solana Attestation Service mutex, with no server |
+| **memory** | what is known: past sessions of every host, commits, decisions, team playbooks | [Sibyl](https://sibyllabs.org), and only Sibyl |
+| **budgets** | what each agent may spend | the chain itself: a Tempo Keychain access key limited per day, or a Solana delegate. Signing directly with the agent's key cannot get past the limit, even if Knos is bypassed |
+| **records** | who did what | one signed attestation per agent per day: counters and a Merkle root anyone can check |
 
-Sibyl's count includes your own Sibyl memory in `~/.sibyl-memory`. Past sessions add to the store as they are read.
-Knos warns at 80%.
+Solo use needs none of the chain: memory, claims and the guard work fully offline, as in 0.2.
 
 ## Install
 
 Python 3.10+ on Windows, macOS or Linux:
 
 ```
-pipx install knos        # or: uv tool install knos
+pipx install knos        # or: uv tool install knos; or run it once with uvx knos init
 knos init                # wire every agent it finds; undo with: knos init --undo
+knos init --team         # also commit the guard with the repo, for every clone and cloud session
 ```
-
-Optional extras:
-- `pipx inject knos 'knos[pro]'` adds licence codes and a terminal QR.
-- `pipx inject knos 'knos[agentpay]'` adds agent payments over MPP and x402 (MPP needs Python 3.11+).
 
 ## Use it
 
 | you type | what happens |
 |---|---|
 | `knos ask "why did we drop redis?"` | answers from past sessions (Claude Code, Codex, Cursor), commits, CLAUDE.md/AGENTS.md and the code, each with its source |
-| `knos claim "the parser" -p "src/parser/**"` | other agents' edits to those files are refused until `knos done` or the claim lapses |
-| `knos status` / `knos board` | what is claimed and by whom, what memory holds; `board` is a live page on 127.0.0.1 |
-| `knos demo` | the whole product on a throwaway repo, with every line a real call |
-| `knos spend` / `knos budget set 20 --per day` | Pro: spend at API list prices, and one cap over everything |
-| `knos budget fund --agent claude 5 --chain tempo` | Pro: that agent's own wallet; it pays APIs with `knos pay` or the `pay` tool |
-| `knos pro buy` | pay for Pro with USDC on Solana (or `--chain tempo`), checked on chain |
-| `knos serve` + `knos init --remote <url> --token <t>` | Team: one claim list, shared notes and one spend cap across every machine that joins; a claim on one machine blocks an edit on another |
+| `knos claim "the parser" -p "src/parser/**"` | other agents' edits to those files are refused, on this machine and, in a team, on every machine |
+| `knos team create` / `add` / `status` | a team registry on Solana; see [CLOUD.md](docs/CLOUD.md) for cloud sandboxes |
+| `knos budget set claude 5/day --chain tempo` | Pro: Tempo enforces that agent's daily limit; `--chain solana` sets a delegate |
+| `knos agent record codex` | what that agent claimed, finished, abandoned and collided on, checked against its records on chain |
+| `knos learn` / `knos lint` | Sibyl Pro: team playbooks from Sibyl's self-learning; Sibyl's linter plus a check for agents that recorded opposite things |
+| `knos doctor` | which agents and machines are guarded, and which are not |
+| `knos pro buy` | Knos Pro, and Sibyl Pro in the same command through Sibyl's own checkout if you lack it (never charged twice) |
 
-Your agents use the same things through the MCP server `knos init` installs, which has five tools:
-- `search` and `about` (answers, annotated with who holds which files; nothing is hidden);
-- `remember` (with `claiming=true, paths=[...]` to claim files);
-- `done`;
-- `pay` (Pro).
+Your agents get the same through the MCP server `knos init` installs, and framework agents through the Python SDK:
 
-The edit guard runs in Claude Code's and Cursor's pre-edit hooks and in an OpenCode plugin. Codex has no edit hook,
-so its edits are not guarded. Edits made with shell commands (`sed -i`, scripts) are not seen by any of these hooks.
+```python
+from knos.sdk import Knos
+k = Knos(agent="researcher")
+if k.claim("task:invoice-4411"):
+    k.remember("invoice 4411 was a duplicate", about="invoice-4411")
+```
+
+[`examples/langgraph_team.py`](examples/langgraph_team.py): two LangGraph agents share Sibyl memory through Sibyl's
+own `BaseStore`, and never work the same task.
 
 ## Numbers
 
-From [`knos bench`](docs/BENCH.md), which anyone can re-run:
+From [`knos bench`](docs/BENCH.md), which anyone can re-run. Chain rows run on a local validator with the
+devnet-deployed programs.
 
 | | knos | without |
 |---|---|---|
-| rounds where a conflicting edit reached the file (3 agents, 200 rounds) | **0** | 191 with advisory leases (simulated); 200 with no coordination |
-| questions answered from past sessions and commits, with a citation (20) | **18** | 0 with CLAUDE.md alone |
-| steps to three hosts sharing memory and claims | **1** | 8 ([COMPARE.md](docs/COMPARE.md)) |
-| spend past an agent's cap (200 attempted payments) | **0** | |
-| edit-guard decision, p95 (5,400 files) | **38.8 ms** | |
-| search, p95 (5,400 files) | **25.9 ms** | |
-| `knos init`, 4 hosts, self-test included | **21 s** | |
-
-Measured 29 Sep 2026 on a Linux (WSL) laptop with a spinning disk; your numbers will differ, so run `knos bench`.
+| conflicting writes to working trees, 3 machines × 3 vendors' hooks × 200 rounds | **0** | 149 with Agent Mail-style advisory reservations (modelled, 90% compliance); 1,062 with none |
+| claim protocol property test: double winners / winners ever blocked | **0 / 0** (1,000 rounds, 5,000 claims) | |
+| overspend signed directly with an agent's key, Tempo Moderato (200) | **0 received; 200 reverted** | |
+| overspend signed directly with an agent's delegate key, Solana (200) | **0 moved; 200 rejected** | |
+| edit-guard decision when the agent holds the claim, p95 | **25.6 ms** | |
+| edits that waited on the chain (20 per claimed file) | **5%** | |
+| coverage cells: 4 vendors × 1 or many machines × edit or commit × bypass-proof budget | **32 / 32** | 8 for MCP Agent Mail |
 
 Verify the core claims yourself:
-- `pytest tests/test_collide.py`: exactly one of many agents gets a file.
-- `pytest tests/test_no_network.py`: a whole day of work opens no network connection.
-- `pytest tests/test_v1_fixes.py`: one test per defect fixed in 0.2.0.
+- `pytest tests/test_collide.py`: on one machine, exactly one of many agents gets a file.
+- `pytest tests/test_team_two_homes.py`: across two machines and four vendors' hooks, with no server (needs
+  `bash scripts/devchain.sh start`).
+- `pytest tests/test_team_property.py`: the claim protocol's property test (same).
+- `pytest tests/test_chain_budgets.py`: an agent's own key cannot spend past its chain limit.
+- `pytest tests/test_no_network.py`: a solo day of work opens no network connection.
+
+**What it costs:** a 5,000-lamport fee to place a claim, plus a deposit of about 0.0028 SOL while the claim is live,
+refunded when it is released. Each member key keeps a small float for those deposits: 20 live claims' worth plus fees,
+about 0.065 SOL. On devnet all of it is free.
+
+## Why a chain
+
+For one machine it isn't needed, and Knos doesn't use one. For a team, the chain replaces the server someone would
+otherwise have to run and every vendor would have to trust. See [WHY-CHAIN.md](docs/WHY-CHAIN.md) for what it does and
+does not protect, and [SECURITY.md](docs/SECURITY.md) for the keys, the member-trust model and the known bypasses.
 
 ## Privacy
 
-Nothing leaves your machine. Knos reads your repo, your agents' local transcripts and their spend logs, and writes
-to `~/.knos`. The only network traffic is what Knos Pro does when you ask it to:
-- public RPC reads to check a payment;
-- payments you or your agent's wallet sign;
-- with Knos Team, claims, notes and spend totals sent to the `knos serve` you host, and to nobody else;
-- for Sibyl Pro subscribers only, Sibyl's own tier check at its size cap.
+Nothing in plaintext on chain: paths, repo names, user names and descriptions are salted hashes or sealed boxes.
+
+Without a team, nothing leaves your machine. In a team, Knos talks to one Solana RPC endpoint. Beyond that, Knos Pro
+makes the calls you ask for: public RPC reads to check a payment, payments you or your agents' keys sign, and Sibyl's
+own tier check.
 
 Secrets (`.env`, keys, certificates, `.ssh`, `.aws`, and paths you add with `knos private`) never reach your agents.
 
 ## Plans
 
-- **Free (MIT):** memory, claims and the guard, everywhere, forever.
-- **Pro:** 10 USDC for 30 days, or 100 a year, with a 14-day trial.
-- **Team:** 20 USDC per seat per 30 days, with the self-hosted `knos serve`.
+- **Free (MIT):** solo; team registries up to 3 keys; any public open-source repo.
+- **Pro:** 10 USDC / 30 days (100 / year), plus Sibyl Pro at Sibyl's price if you lack it.
+- **Team:** 20 USDC per seat per 30 days, for private registries of 4+ keys.
 
 See [PRICING.md](PRICING.md).
+
+## More
+
+- [WHY.md](docs/WHY.md): the market, with sources.
+- [COMPARE.md](docs/COMPARE.md): MCP Agent Mail, vendor projects, Wasteland, Coinbase Agentic Wallet, gateways.
+- [INTEGRATE.md](docs/INTEGRATE.md): MCP, hooks, the SAS schemas, the SDK.
+- [The network page](https://drexthealpha.github.io/Knos/network/): every Knos team on Solana, counted from the
+  chain.
 
 ## History
 
 - **0.1.x:** released 1–7 Sep 2026.
-- **0.2.0:** built 29 Sep – Oct 2026 (see [CHANGELOG.md](CHANGELOG.md)).
+- **0.2.x:** 30 Sep 2026.
+- **0.3.0:** Oct 2026.
 
-Knos was built by drexthealpha. Its memory engine is [Sibyl](https://sibyllabs.org).
+See [CHANGELOG.md](CHANGELOG.md). Knos is built by drexthealpha. Its memory engine is [Sibyl](https://sibyllabs.org).

@@ -20,6 +20,7 @@ _WATCHED = [
     _REAL_HOME / ".knos" / "config.json",
     _REAL_HOME / ".knos" / "licence.json",
     _REAL_HOME / ".knos" / "budget.json",
+    _REAL_HOME / ".sibyl-memory" / "memory.db",  # knos 0.3 keeps memory in Sibyl's own store: tests must never touch yours
 ]
 
 

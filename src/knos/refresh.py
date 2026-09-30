@@ -177,8 +177,17 @@ def reset(repo: Path) -> Path | None:
             out.close()
         finally:
             src.close()
-    for p in (store, Path(str(store) + "-wal"), Path(str(store) + "-shm"), Path(str(store) + ".born"), read_db(repo),
-              Path(str(read_db(repo)) + "-wal"), Path(str(read_db(repo)) + "-shm")):
+    if store.exists():  # the store is shared: only this repo's tenant goes
+        from .memory import _open, drop_tenant
+        st = _open(store)
+        try:
+            drop_tenant(st, paths.tenant_for(repo))
+        finally:
+            st.close()
+    legacy = paths.legacy_store_for(repo)
+    for p in (legacy, Path(str(legacy) + "-wal"), Path(str(legacy) + "-shm"), Path(str(legacy) + ".born"),
+              paths.born_for(repo), read_db(repo), Path(str(read_db(repo)) + "-wal"),
+              Path(str(read_db(repo)) + "-shm")):
         try:
             p.unlink()
         except FileNotFoundError:

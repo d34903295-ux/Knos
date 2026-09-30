@@ -337,19 +337,21 @@ def test_a_full_store_refuses_a_note_loudly(knos_home, repo, monkeypatch, capsys
     """
     with Memory(repo):
         pass
-    _sibyl_measures(monkeypatch, FREE_TIER_CAP_BYTES + 1)
+    # Its own MonkeyPatch, so undoing it cannot undo the test's isolated HOME (which would point Sibyl's store at
+    # the real ~/.sibyl-memory).
+    with pytest.MonkeyPatch.context() as full:
+        _sibyl_measures(full, FREE_TIER_CAP_BYTES + 1)
 
-    with Memory(repo) as mem:
-        assert mem.full()
-        assert mem.record(Fact("x", "note", "you", _now(), about="x")) is None, "Sibyl accepted a write past the cap"
+        with Memory(repo) as mem:
+            assert mem.full()
+            assert mem.record(Fact("x", "note", "you", _now(), about="x")) is None,                 "Sibyl accepted a write past the cap"
 
-    capsys.readouterr()
-    assert main(["remember", "we chose sqlite over redis", "--about", "storage"]) == 1
-    said = capsys.readouterr().out
-    assert "Not remembered" in said and "nothing was written" in said, said
-    assert "knos compact" in said and "sibyl upgrade" in said, said
+        capsys.readouterr()
+        assert main(["remember", "we chose sqlite over redis", "--about", "storage"]) == 1
+        said = capsys.readouterr().out
+        assert "Not remembered" in said and "nothing was written" in said, said
+        assert "knos compact" in said and "sibyl upgrade" in said, said
 
-    monkeypatch.undo()
     with Memory(repo) as mem:
         assert not mem.remembered("storage"), "a refused note was written anyway"
         assert all("sqlite over redis" not in str(e.get("evaluated")) for e in mem.journal())

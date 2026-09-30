@@ -89,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
         if agent.session:
             with Claims(repo) as c:
                 c.record_session(agent.host, agent.session, agent.anchor)
+        if paths.has_store(repo) and (repo / ".knos" / "playbooks").is_dir():
+            from .memory import Memory
+            from .sibyl import import_playbooks
+            with Memory(repo) as mem:  # accepted team playbooks, committed to the repo, into Sibyl REFERENCE
+                import_playbooks(mem, repo)
         said = _lines(repo)  # claims live in claims.db, so they are told even before the repo's memory is read
         if said:
             sys.stdout.write("knos, this repo's shared memory:\n" + "\n".join(said) + "\n")

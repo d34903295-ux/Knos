@@ -1,10 +1,43 @@
 # Pricing
 
-| plan | price | what you get |
-|---|---|---|
-| **Free** (MIT), forever | $0 | Shared Sibyl memory built from your agents' past sessions and your commits; file claims and the edit guard; every host, every repo; local only |
-| **Pro** | **10 USDC per 30 days**, or **100 USDC per year**, per developer | Everything in Free, plus: the spend meter across Claude Code and Codex (`knos spend`); one hard cap across tokens and agents' API payments (`knos budget`); agent budget wallets on Solana and Tempo (`knos budget fund`, `knos pay`); spend on `knos board`. 14-day trial, no signup. 30-day money-back guarantee |
-| **Team** | 20 USDC per seat per 30 days, 3 seats minimum | Pro for each seat, plus `knos serve`: a server you host that shares claims, notes and one pooled spend cap across every machine and cloud agent that joins (`knos init --remote <url> --token <seat token>`). A claim on one machine blocks an edit on another |
+| plan | who | Knos part | Sibyl Pro part (paid to Sibyl directly, at Sibyl's list price; skipped if you already have Pro) | total per 30 days / per year |
+|---|---|---|---|---|
+| **Free** (MIT), forever | solo, offline; team registries of up to 3 keys; any public open-source repo | 0 | Sibyl's free tier (5 MB) | 0 |
+| **Pro** | individuals | 10 / 100 USDC | 12 / 108 USD | **22 / 208** (10 / 100 if you already have Sibyl Pro) |
+| **Team** | private registries with 4+ keys | 20 USDC per seat | 12 USD per seat | **32 per seat** (20 if the seat already has Sibyl Pro) |
+
+What each plan includes:
+
+- **Free:**
+  - shared Sibyl memory built from your agents' past sessions and your commits;
+  - file claims and the edit guard in every host, and the commit guard;
+  - a team registry on Solana of up to 3 keys, with no server;
+  - the Python SDK.
+- **Pro adds:**
+  - the spend meter across Claude Code and Codex, and one cap across agents;
+  - agent budgets enforced by the chain (Tempo Keychain limits per period, Solana delegates);
+  - agent wallets for MPP and x402 payments.
+- **Team adds:**
+  - chain budgets for every agent;
+  - private registries past 3 keys, and a records policy;
+  - priority fixes.
+  - `knos serve` (0.2's self-hosted server) is still included for teams that prefer one.
+
+Sibyl Pro is what unlocks `knos learn` and `knos lint` (Sibyl's self-learning and memory linter) and removes Sibyl's
+5 MB cap. **Works with Sibyl Pro, bought in the same command:**
+
+1. `knos pro buy` takes the Knos payment.
+2. It asks Sibyl for your tier (Sibyl's own `sibyl status`, or, with your consent, Sibyl's access endpoint with your
+   own credentials).
+3. If Sibyl says you are on the free tier, it runs Sibyl's own `sibyl upgrade`, which opens Sibyl's checkout (card,
+   or USDC on Base).
+
+Two payments, one command. Pro or Staker means the Sibyl part is skipped, at purchase and at every Knos renewal, so
+nobody pays Sibyl twice. Sibyl also grants Pro to holders of 100,000 $SIBYL (see Sibyl's docs); Knos detects that
+tier and does not charge for Sibyl.
+
+For comparison (read 30 Sep 2026): Sibyl Pro alone is $12, Conductor Teams $60 per user (a different product),
+Portkey $49 and Helicone $79 a month.
 
 ## Paying
 
