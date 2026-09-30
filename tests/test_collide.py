@@ -1,20 +1,18 @@
-"""Sixteen agents reaching for one piece of work at the same instant.
+"""Many agents reaching for the same files at the same instant.
 
-`test_intent.py` already proves two processes cannot both take the same topic.
-This is the same property under load, and it is here because the number in
-`docs/evidence/collide.json` is quoted in the README: a figure a judge is
-pointed at should be a figure a test regenerates rather than one somebody
-typed.
+`test_intent.py` proves two processes cannot both claim the same file. This is the same property under load, and it
+is the property `knos bench` measures and `docs/BENCH.md` publishes.
 
-The claim being made is narrow and absolute. Zero double-grants, not few. A
-lock that holds most of the time hands two agents the same file and lets the
-second overwrite the first, which is the exact failure this product exists to
+The claim being made is narrow and absolute. Zero double-grants, not few. A lock that holds most of the time hands
+two agents the same file and lets the second overwrite the first, which is the exact failure this product exists to
 stop, so "rare" is not a passing grade.
 
-The second arm is the honest counterfactual. Deleting the store proves nothing
-about coordination - the next agent recreates it and the lock works again. The
-condition that matters is whether the memory is *shared*, so the ablation
-gives every agent its own, which is what an agent has today without knos.
+The second arm is the honest counterfactual: the condition that matters is whether the claim list is *shared*, so
+the ablation gives every agent its own, which is what an agent has without knos.
+
+Rewritten for 0.2.0: agents claim a path (`src/auth.py`) through the embeddable `knos.core.Claims`, since a claim on
+prose ("the parser") is advisory and never blocks. Dropped: the checks on docs/evidence/collide.json and
+scripts/collide.py, which are not part of 0.2.0 (knos bench replaces them).
 """
 
 from __future__ import annotations
@@ -34,15 +32,17 @@ AGENTS = 8  # smaller than the study's 16; the property does not depend on it
 GRAB = """
 import json, sys
 from knos.core import Claims
-repo, who, topic = sys.argv[1], sys.argv[2], sys.argv[3]
+repo, who, path = sys.argv[1], sys.argv[2], sys.argv[3]
 with Claims(repo=repo, who=who) as claims:
-    took, holder = claims.take(topic)
+    took, holder = claims.take("working on " + path, paths=[path])
+    held = claims.holder(path)
 print(json.dumps({"who": who, "took": bool(took),
-                  "holder": (holder or {}).get("who")}))
+                  "holder": (holder or {}).get("host"),
+                  "blocked_after": (held or {}).get("host")}))
 """
 
 
-def _race(script: Path, repo, topic: str, env: dict, private: Path | None = None):
+def _race(script: Path, repo, path: str, env: dict, private: Path | None = None):
     def grab(n: int) -> dict:
         mine = dict(env)
         if private is not None:
@@ -50,7 +50,7 @@ def _race(script: Path, repo, topic: str, env: dict, private: Path | None = None
             own.mkdir(parents=True, exist_ok=True)
             mine["KNOS_HOME"] = str(own)
         done = subprocess.run(
-            [sys.executable, str(script), str(repo), f"agent-{n:02d}", topic],
+            [sys.executable, str(script), str(repo), f"agent-{n:02d}", path],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             env=mine,
         )
@@ -70,44 +70,38 @@ def _env(knos_home, monkeypatch):
 
 
 @pytest.mark.critical
-def test_exactly_one_of_many_agents_gets_the_work(tmp_path, repo, _env) -> None:
+def test_exactly_one_of_many_agents_gets_the_file(tmp_path, repo, _env) -> None:
+    from knos.claims import Claims
+
     script = tmp_path / "grab.py"
     script.write_text(GRAB, encoding="utf-8")
 
-    said = _race(script, repo, "the parser", _env)
+    said = _race(script, repo, "src/auth.py", _env)
     winners = [s for s in said if s["took"]]
 
-    assert len(winners) == 1, f"{len(winners)} agents were granted the same work"
+    assert len(winners) == 1, f"{len(winners)} agents were granted the same file"
 
     # A refusal that names nobody is a failed write wearing a refusal's coat.
     for lost in (s for s in said if not s["took"]):
         assert lost["holder"] == winners[0]["who"], lost
+        assert lost["blocked_after"] == winners[0]["who"], lost
+    assert winners[0]["blocked_after"] is None, "the winner was blocked by its own claim"
+
+    with Claims(repo) as c:
+        live = c.live()
+    assert [(x.host, x.globs) for x in live] == [(winners[0]["who"], ("src/auth.py",))]
 
 
 @pytest.mark.critical
-def test_without_a_shared_memory_every_agent_takes_it(tmp_path, repo, _env) -> None:
-    """The ablation. Same code, same instant, memory not shared."""
+def test_without_a_shared_claim_list_every_agent_takes_it(tmp_path, repo, _env) -> None:
+    """The ablation. Same code, same instant, claims not shared."""
     script = tmp_path / "grab.py"
     script.write_text(GRAB, encoding="utf-8")
 
-    said = _race(script, repo, "the parser", _env, private=tmp_path / "alone")
+    said = _race(script, repo, "src/auth.py", _env, private=tmp_path / "alone")
     winners = [s for s in said if s["took"]]
 
     assert len(winners) == AGENTS, (
-        "with a private memory each agent should believe it is alone; "
+        "with a private claim list each agent should believe it is alone; "
         f"only {len(winners)} of {AGENTS} did"
     )
-
-
-def test_the_published_numbers_say_what_the_readme_says() -> None:
-    """The figure quoted to a judge has to be the one on disk."""
-    where = ROOT / "docs" / "evidence" / "collide.json"
-    assert where.exists(), "run: python scripts/collide.py"
-    report = json.loads(where.read_text(encoding="utf-8"))
-
-    assert report["with_store"]["double_grants"] == 0
-    assert report["with_store"]["rounds_with_exactly_one_winner"] == report["rounds"]
-    # Every refusal named the agent actually holding it.
-    assert (report["with_store"]["refusals_naming_the_holder"]
-            == report["with_store"]["refusals"])
-    assert report["no_shared_store"]["double_grants"] == report["agents"] - 1

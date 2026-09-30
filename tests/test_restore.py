@@ -9,6 +9,9 @@ never run knos carries the decisions with it.
 What makes this different from a portable-state blob is that the thing being
 carried is markdown a human reads in a pull request diff. Memory that restores
 an agent but cannot be reviewed is memory nobody audits.
+
+0.2.0: claims live in claims.db, so "claims are not restored" is checked there; the round trip starts over with
+`knos reset` (refresh.reset) because deleting the store by hand is refused. Nothing dropped.
 """
 
 from __future__ import annotations
@@ -18,6 +21,8 @@ from datetime import datetime, timezone
 import pytest
 
 from knos import answer, paths, share
+from knos.claims import Claims, claims_db
+from knos.identity import Agent
 from knos.memory import TOPIC, Fact, Memory
 
 WRITTEN = """# knos
@@ -73,8 +78,36 @@ def test_claims_are_not_restored(knos_home, repo) -> None:
     _commit_a_record(repo)
     paths.remember_pointed(repo)
     with Memory(repo) as mem:
-        share.restore(repo, mem)
-        assert mem.claims() == []
+        kept, _ = share.restore(repo, mem)
+    assert kept == 2, "the decisions beside the claim should still come back"
+
+    if claims_db(repo).exists():
+        with Claims(repo) as c:
+            assert c.live() == []
+            assert c.events(kind="claim") == []
+    # And the claim is not smuggled in as a decision either.
+    with Memory(repo) as mem:
+        assert not mem.remembered("the parser")
+
+
+def test_an_exported_live_claim_does_not_come_back_on_another_machine(knos_home, repo) -> None:
+    """The same, from a file knos wrote itself: export carries the claim, restore leaves it behind."""
+    from knos import refresh
+
+    with Claims(repo) as c:
+        c.take(Agent(host="claude", session="aaaa1111bbbb"), "the parser", ["src/auth.py"])
+    with Memory(repo) as mem:
+        mem.note_thing(TOPIC, "storage", {"note": "we chose sqlite", "when": "2026-09-01"})
+        _, decisions, claims = share.write(repo, mem)
+    assert (decisions, claims) == (1, 1)
+
+    # Another machine: no store, no claims.db.
+    refresh.reset(repo)
+    claims_db(repo).unlink()
+    with Memory(repo) as mem:
+        kept, _ = share.restore(repo, mem)
+    assert kept == 1
+    assert not claims_db(repo).exists(), "restore created claims"
 
 
 def test_restoring_twice_does_not_duplicate(knos_home, repo) -> None:
@@ -130,9 +163,12 @@ def test_the_round_trip_holds(knos_home, repo) -> None:
         mem.note_thing(TOPIC, "the lockfile", {"note": "we pinned pnpm", "when": now[:10]})
         share.write(repo, mem)
 
-    # A different machine: same repo, empty store.
-    paths.store_for(repo).unlink()
+    # A different machine: same repo, empty store. (Deleting the store by hand is refused; starting over is on purpose.)
+    from knos import refresh
+
+    refresh.reset(repo)
     with Memory(repo) as mem:
+        assert not mem.remembered("the lockfile")
         kept, _ = share.restore(repo, mem)
         back = mem.thing(TOPIC, "the lockfile")
 

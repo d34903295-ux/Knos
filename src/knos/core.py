@@ -1,157 +1,77 @@
-"""Claim and withhold, as a library you can embed. No MCP, no CLI.
-
-Almost nobody wants to install and keep running a separate server to get
-this behaviour. They want it inside the tool they already have. This module
-is that door: the claim, the connection-bound hold and the refusal, importable
-from any Python agent or tool.
+"""Claims as a library you can embed. No MCP, no CLI.
 
     from knos.core import Claims
 
     with Claims(repo=".", who="my-agent") as claims:
-        taken, holder = claims.take("the risk guard")
+        taken, holder = claims.take("the parser", paths=["src/parser/**"])
         if not taken:
-            print(claims.withheld("the risk guard"))   # or just refuse
+            print(holder["who"], "has", holder["globs"])
         ...
         claims.release()
 
-Nothing here is new logic. `take` is `Memory.claim_if_free`, the compare-and-
-swap that decides exactly one winner when two agents reach for the same work
-in the same second. `withheld` is the same sentence `knos` gives an agent
-over MCP. `holds` is `answer.same_subject`, so a claim on "parser" covers a
-question about "parsing". The MCP server in `mcp.py` is one caller of this
-surface, not the definition of it.
+`take` is the same single-transaction claim the MCP server and CLI use (`claims.Claims.take`): of two callers
+reaching for overlapping paths in the same second, exactly one wins. `holder(path)` is the check the edit guard
+makes. A claim given only a description resolves exact file and symbol names; if none resolve it is advisory and
+never blocks.
 
-Two things worth knowing before you embed it:
-
-**The hold is bound to a connection, not a name.** Whatever you pass as
-`session` is what a later caller must match to count as the holder. The MCP
-server passes its own process id, because a client that names itself can
-claim to be anyone. If you leave it empty the hold falls back to the name
-alone, which is weaker; pass something the holder has and a different caller
-cannot borrow.
-
-**A claim lapses on its own.** Thirty minutes by default, so a crashed agent
-cannot hold work for ever. Re-take it to refresh it.
-
-The store is one SQLite file per repo under `~/.knos/`. It is created on
-first use and needs no daemon.
+`who` and `session` make the identity. `session` defaults to this process id, so two processes are two agents; pass
+your own when one process serves several independent agents, or share one when several processes are one agent.
 """
 
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import answer
-from .memory import Memory
+from . import claims as _claims
+from .identity import Agent
 
-__all__ = ["Claims", "holds", "withheld_message"]
-
-# Re-exported so a caller can match subjects without opening a store: this is
-# the rule that makes a claim on "parser" cover a question about "parsing".
-holds = answer.same_subject
-withheld_message = answer.withheld
-
-
-def _stamp() -> str:
-    return datetime.now(timezone.utc).isoformat()
+__all__ = ["Claims"]
 
 
 class Claims:
-    """One repo's claims, open for as long as you hold it.
+    """One repo's claims, open for as long as you hold it."""
 
-    `who` is the name that appears to other agents. `session` is what binds
-    a hold to this caller specifically; it defaults to the process id, which
-    is what the MCP server uses and is right for one agent per process. Pass
-    your own if a single process serves several independent agents.
-    """
-
-    def __init__(
-        self, repo: str | Path = ".", who: str = "an agent", session: str | None = None
-    ) -> None:
+    def __init__(self, repo: str | Path = ".", who: str = "agent", session: str | None = None) -> None:
         self.repo = Path(repo).resolve()
         self.who = who
-        self.session = os.getpid() if session is None else session
-        self.session = str(self.session)
-        self._mem: Memory | None = None
-
-    # -- lifecycle ---------------------------------------------------------
+        self.session = str(os.getpid() if session is None else session)
+        self.agent = Agent(host=who, session=self.session)
+        self._c: _claims.Claims | None = None
 
     def __enter__(self) -> "Claims":
-        self._mem = Memory(self.repo)
+        self._c = _claims.Claims(self.repo).__enter__()
         return self
 
-    def __exit__(self, *_: object) -> None:
-        mem, self._mem = self._mem, None
-        if mem is not None:
-            close = getattr(mem, "close", None)
-            if callable(close):
-                close()
+    def __exit__(self, *exc: object) -> None:
+        if self._c is not None:
+            self._c.__exit__(*exc)
+            self._c = None
 
     @property
-    def memory(self) -> Memory:
-        if self._mem is None:
+    def store(self) -> _claims.Claims:
+        if self._c is None:
             raise RuntimeError("use Claims as a context manager: with Claims(...) as c:")
-        return self._mem
+        return self._c
 
-    # -- the three things this exists for ----------------------------------
+    def take(self, description: str, paths: list[str] | None = None) -> tuple[bool, dict[str, Any] | None]:
+        """(True, None) when the claim is yours (taken or refreshed), or (False, holder) when another agent holds
+        overlapping paths."""
+        took, conflict, _mine = self.store.take(self.agent, description, paths)
+        return took, (conflict.as_dict() if conflict else None)
 
-    def take(self, topic: str) -> tuple[bool, dict[str, Any] | None]:
-        """Claim `topic` unless somebody else holds it.
+    def holder(self, path: str) -> dict[str, Any] | None:
+        """Whoever else holds `path` (repo-relative), or None if you may edit it."""
+        got = self.store.holder(_claims.norm(path), self.agent)
+        return got.as_dict() if got else None
 
-        Returns (True, None) when it is yours, or (False, holder) when it is
-        not. Calling it again with a claim you already hold refreshes it.
-        """
-        return self.memory.claim_if_free(topic, self.who, _stamp(), session=self.session)
-
-    def holder(self, subject: str) -> dict[str, Any] | None:
-        """Whoever holds work covering `subject`, or None if it is free.
-
-        Subject matching is by shared word stems, so a claim on "the risk
-        guard" answers a question about "guards".
-        """
-        for work in self.memory.claims():
-            topic = str(work.get("topic", ""))
-            if holds(topic, subject) and not self.mine(work):
-                return work
-        return None
-
-    def withheld(self, subject: str) -> str:
-        """The refusal to give an agent asking about claimed work, or "".
-
-        The same words the MCP server uses, so an embedded agent and a
-        connected one are told the same thing.
-        """
-        work = self.holder(subject)
-        if work is None:
-            return ""
-        who = str(work.get("who", "")) or "another agent"
-        topic = str(work.get("topic", ""))
-        by_the_person = who == "you"
-        held = topic if by_the_person else f"{topic} (held by {who})"
-        return withheld_message(held, by_the_person)
-
-    def release(self) -> None:
-        """Give up everything this repo's store says is being worked on."""
-        self.memory.done_working()
-
-    # -- reading -----------------------------------------------------------
+    def release(self, description: str = "") -> list[str]:
+        """Release your own claims (one, by description or id, or all of yours). Never anyone else's."""
+        return [c.description for c in self.store.release(self.agent, description)]
 
     def live(self) -> list[dict[str, Any]]:
-        """Every claim that has not lapsed, oldest first."""
-        return sorted(self.memory.claims(), key=lambda c: str(c.get("when", "")))
+        return [c.as_dict() for c in self.store.live()]
 
     def mine(self, work: dict[str, Any]) -> bool:
-        """Whether this caller is the one holding `work`.
-
-        Both the name and the session, because a name alone can be asserted
-        by anyone. A claim written without a session falls back to the name,
-        which is no weaker than it was before sessions existed.
-        """
-        held_by = str(work.get("who", ""))
-        session = str(work.get("session", ""))
-        if session:
-            return held_by == self.who and session == self.session
-        return held_by == self.who
+        return self.agent.owns(str(work.get("host", "")), str(work.get("session", "")), work.get("anchor"))

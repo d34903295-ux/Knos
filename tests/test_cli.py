@@ -1,68 +1,126 @@
-"""Every command, every error path, and help that fits one screen."""
+"""Every command, every error path, `knos init` on a fake home, and help that fits one screen.
+
+The console script is `knos.cli:main(argv) -> int`: a failure is one line and the command that fixes it, never a
+traceback; exit 1 for a failure a person can fix, 2 for a usage error. These tests call `main([...])` and read what
+it printed, the way a person reads it.
+
+Rewritten for 0.2.0. Dropped, because the thing they tested is gone from the product:
+
+  - the `knos connect --print` paste text (`knos.mcp` module path, "knos connect" by hand) and the 0.1 writer's
+    private helpers (`_config_files`, `_write_configs`, `_claude_cli`, `*.before-knos` copies, "already has it",
+    "nothing to restart"); the same purposes are now tested through `knos init` (adds and keeps everything else,
+    idempotent, leaves an unreadable config alone, skips agents that are not installed, `claude mcp add`, the
+    OpenCode shape and its env var, every platform's config path, the exact restart line per app);
+  - the Claude Desktop extension manifest check: extension/ is not part of 0.2.0 (it still pins knos==0.1.8 and
+    advertises three tools); the plugin and marketplace manifests are still checked;
+  - the README first-screen test: it asserted the GitHub Action and the CI pull-request warning, which 0.2.0 removed;
+  - "CLAUDE.md cannot do that" on the main screen: the 0.2.0 screen states the pitch differently (checked below);
+  - status's "things learned" / "MB of 5 MB used" wording from the 0.1 store (status is checked against 0.2.0's).
+
+The jargon list no longer bans "mcp" (0.2.0's `knos init` page names the memory server "(MCP)" because that is what
+every agent's settings call it) nor "wallet", "onchain" and "gas" (Knos Pro is bought from a Solana wallet).
+"""
 
 from __future__ import annotations
 
+import ast
+import json
 import re
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
 from knos import help as help_text
-from knos.cli import app
+from knos import init as setup
+from knos.cli import main
 
-runner = CliRunner()
+ROOT = Path(__file__).resolve().parents[1]
 
-# Words a developer would have to look up, or that describe knos's insides
-# rather than their repo.
-JARGON = [
-    "mcp",
-    "stdio",
-    "tier",
-    "entity",
-    "schema",
-    "index",
-    "sqlite",
-    "traceback",
-    "exception",
-    "serialize",
-    "daemon",
-    "onchain",
-    "wallet",
-    "gas",
-]
+# Words a developer would have to look up, or that describe knos's insides rather than their repo.
+JARGON = ["stdio", "tier", "entity", "schema", "index", "sqlite", "traceback", "exception", "serialize", "daemon"]
 
 
-def _screens():
-    yield "help", help_text.main()
-    for name in ("point", "ask", "connect", "status", "private", "notes", "forget", "remember", "claim", "done"):
-        yield name, help_text.for_command(name)
+def run(capsys, *args: str) -> tuple[int, str]:
+    rc = main(list(args))
+    got = capsys.readouterr()
+    return rc, got.out + got.err
+
+
+# ---- agents on this machine: never the real ones ------------------------------------------------------------
+
+_AGENT_CLIS = {"claude", "codex", "cursor", "opencode"}
+
+
+@pytest.fixture(autouse=True)
+def _no_agent_clis(monkeypatch):
+    """The machine running the tests may have `claude` on PATH (it does under WSL). `knos init` must never run the
+    real one from a test, and "is Claude Code installed" must be decided by the fake home alone."""
+    real = shutil.which
+
+    def which(name, *a, **k):
+        if Path(str(name)).stem.lower() in _AGENT_CLIS:
+            return None
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(shutil, "which", which)
+
+
+def _init(capsys, *extra: str) -> tuple[int, str]:
+    return run(capsys, "init", "--no-test", "--no-read", *extra)
+
+
+def _json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _server() -> dict:
+    cmd = setup.server_command()
+    return {"command": cmd[0], "args": cmd[1:]}
+
+
+# ---- version, help ---------------------------------------------------------------------------------------------
 
 
 @pytest.mark.critical
-def test_the_cli_and_the_handshake_report_the_same_version():
-    """One number, read from package metadata, so it cannot drift.
-
-    A client that is told the empty string cannot say which knos it is
-    talking to, and a person who runs --version should get the same answer.
-    """
+def test_the_cli_reports_the_package_version(capsys):
+    """One number, read from package metadata, so it cannot drift from what the MCP handshake reports."""
     from knos import version
 
-    said = subprocess.run(
-        [sys.executable, "-c", "from knos.cli import app; app()", "--version"],
-        capture_output=True, text=True, encoding="utf-8",
-    )
-
-    assert said.returncode == 0
-    assert said.stdout.strip() == version()
+    rc, said = run(capsys, "--version")
+    assert rc == 0
+    assert said.strip() == version()
     assert version() not in ("", "0+unknown")
+    assert "version=version()" in (ROOT / "src" / "knos" / "mcp.py").read_text(encoding="utf-8")
+
+
+def test_knos_on_its_own_shows_the_one_screen(capsys):
+    rc, said = run(capsys)
+    assert rc == 0
+    assert "knos init" in said and "knos help <cmd>" in said
+    assert "Usage:" not in said
 
 
 def test_help_fits_one_screen():
-    lines = help_text.main().splitlines()
-    assert len(lines) <= 24, f"{len(lines)} lines"
-    assert max(len(line) for line in lines) <= 80
+    assert len(help_text.main().splitlines()) <= 24
+
+
+def _screens():
+    yield "main", help_text.main()
+    for name in sorted(help_text.PER_COMMAND):
+        yield name, help_text.for_command(name)
+
+
+_WIDE = {}  # every bug once listed here is fixed; a new one goes here as a strict xfail
+
+
+@pytest.mark.parametrize("name,screen", [
+    pytest.param(n, s, marks=pytest.mark.xfail(reason=_WIDE[n], strict=True)) if n in _WIDE else (n, s)
+    for n, s in _screens()])
+def test_every_screen_fits_eighty_columns(name, screen):
+    assert max(len(line) for line in screen.splitlines()) <= 80
 
 
 @pytest.mark.parametrize("name,screen", list(_screens()))
@@ -72,218 +130,99 @@ def test_no_jargon_anywhere(name, screen):
         assert word not in low, f"{name} says {word!r}"
 
 
-@pytest.mark.parametrize("name,screen", list(_screens()))
-def test_every_screen_fits_eighty_columns(name, screen):
-    assert max(len(line) for line in screen.splitlines()) <= 80
+def test_the_one_screen_states_both_halves_of_the_product():
+    """The claim has to be in the product, not only in the README: shared memory, and who is changing what."""
+    screen = help_text.main()
+    assert "one local memory every coding agent on this machine shares" in screen
+    assert "which files each of them is changing right now" in screen
 
 
-def test_help_runs():
-    result = runner.invoke(app, ["help"])
-    assert result.exit_code == 0
-    assert "in your code right now" in result.stdout
+def _commands() -> list[str]:
+    """Every command a person can type: visible commands and groups, not the hidden plumbing."""
+    import typer
+
+    from knos.cli import app
+
+    group = typer.main.get_command(app)
+    return sorted(name for name, cmd in group.commands.items() if not getattr(cmd, "hidden", False) and name != "help")
 
 
-def test_help_for_one_command():
-    result = runner.invoke(app, ["help", "private"])
-    assert result.exit_code == 0
-    assert "knos private .env" in result.stdout
+_NO_PAGE = {}  # every bug once listed here is fixed; a new one goes here as a strict xfail
 
 
-def test_help_for_a_command_that_does_not_exist():
-    result = runner.invoke(app, ["help", "teleport"])
-    assert "No command called teleport" in result.stdout
-    assert "knos help" in result.stdout
+@pytest.mark.parametrize("command", [
+    pytest.param(c, marks=pytest.mark.xfail(reason=_NO_PAGE[c], strict=True)) if c in _NO_PAGE else c
+    for c in _commands()])
+def test_every_command_has_a_help_page(command, capsys):
+    """`knos help export` once said "No command called export" while export worked. Nothing compared them."""
+    rc, said = run(capsys, "help", command)
+    assert rc == 0
+    assert "No command called" not in said
+    assert f"knos {command}" in said
 
 
-def test_asking_somewhere_that_is_not_a_repo_says_so(knos_home, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["ask", "anything"])
-    assert result.exit_code == 1
-    assert "not a git repo" in result.stdout
-    assert "Traceback" not in result.stdout
+def test_the_old_names_share_the_init_page():
+    assert help_text.for_command("connect") == help_text.for_command("init")
+    assert help_text.for_command("guard") == help_text.for_command("init")
 
 
-def test_status_somewhere_that_is_not_a_repo_says_so(knos_home, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["status"])
-    assert result.exit_code == 1
-    assert "not a git repo" in result.stdout
+def _flags_named_in_help():
+    """(page, command words, flag) for every `--flag` shown in a `knos <cmd> ...` example line of a help page."""
+    import typer
+
+    from knos.cli import app
+
+    group = typer.main.get_command(app)
+    found = []
+    for page, screen in help_text.PER_COMMAND.items():
+        for line in screen.splitlines():
+            m = re.match(r"\s*knos ([a-z-]+)((?: [^ ].*?)?)(?:\s{2,}.*)?$", line)
+            if not m or m.group(1) not in group.commands:
+                continue
+            cmd, words = group.commands[m.group(1)], [m.group(1)]
+            rest = m.group(2).split()
+            if rest and hasattr(cmd, "commands") and rest[0] in cmd.commands:
+                cmd, words = cmd.commands[rest[0]], words + [rest[0]]
+            known = {o for p in cmd.params for o in (*p.opts, *p.secondary_opts)}
+            for flag in re.findall(r"(?<![\w-])(--?[a-z][\w-]*)", m.group(2)):
+                found.append((page, " ".join(words), flag, flag in known))
+    return found
 
 
-def test_the_first_question_reads_the_repo_by_itself(knos_home, repo, monkeypatch):
-    """Install, ask, answer. Running `point` first was a step and a concept
-    between a person and the first thing knos is good for."""
-    asked = runner.invoke(app, ["ask", "why did we drop redis"])
-    assert asked.exit_code == 0, asked.stdout
-    assert "First time in repo" in asked.stdout
-    assert "redis" in asked.stdout.lower()
-
-    # And it does not read it again on the next question.
-    again = runner.invoke(app, ["ask", "why did we drop redis"])
-    assert "First time in" not in again.stdout
+_BAD_FLAG = {}  # every bug once listed here is fixed; a new one goes here as a strict xfail
 
 
-def test_point_at_a_folder_that_is_not_there(knos_home):
-    result = runner.invoke(app, ["point", "no/such/folder"])
-    assert result.exit_code == 1
-    assert "No such folder" in result.stdout
-    assert "knos point ." in result.stdout
+@pytest.mark.parametrize("page,command,flag,known", [
+    pytest.param(*f, marks=pytest.mark.xfail(reason=_BAD_FLAG[(f[0], f[2])], strict=True))
+    if (f[0], f[2]) in _BAD_FLAG else f
+    for f in _flags_named_in_help()])
+def test_every_flag_a_help_page_shows_exists(page, command, flag, known):
+    """A help page that shows a flag the command refuses is a usage error the person was told to type."""
+    assert known, f"`knos help {page}` shows `knos {command} {flag}`, which `knos {command}` does not take"
 
 
-def test_point_then_status_then_ask(knos_home, repo, monkeypatch, tmp_path):
-    monkeypatch.setenv("KNOS_CLAUDE_HOME", str(tmp_path / "absent"))
-    monkeypatch.setenv("KNOS_CURSOR_DB", str(tmp_path / "absent.vscdb"))
-
-    assert runner.invoke(app, ["point", str(repo)]).exit_code == 0
-
-    status = runner.invoke(app, ["status"])
-    assert status.exit_code == 0
-    # status shows each of Sibyl's five tiers and how each one behaves,
-    # so a person can see the store working rather than take it on trust.
-    for tier in ("journal", "warm", "hot", "reference", "archive"):
-        assert tier in status.stdout, tier
-    assert "things learned" in status.stdout
-    assert "MB of 5 MB used" in status.stdout
-
-    asked = runner.invoke(app, ["ask", "why did we drop redis"])
-    assert asked.exit_code == 0
-    assert "redis" in asked.stdout.lower()
+def test_help_runs(capsys):
+    rc, said = run(capsys, "help")
+    assert rc == 0
+    assert "which files each of them is changing right now" in said
 
 
-def test_private_command(knos_home, repo, monkeypatch, tmp_path):
-    monkeypatch.setenv("KNOS_CLAUDE_HOME", str(tmp_path / "absent"))
-    monkeypatch.setenv("KNOS_CURSOR_DB", str(tmp_path / "absent.vscdb"))
-    runner.invoke(app, ["point", str(repo)])
-    result = runner.invoke(app, ["private", "notes/salary.md"])
-    assert result.exit_code == 0
-    assert "is private" in result.stdout
-    assert "agents cannot see it" in result.stdout
+def test_help_for_one_command(capsys):
+    rc, said = run(capsys, "help", "private")
+    assert rc == 0
+    assert "knos private notes/salary.md" in said
 
 
-def test_connect_prints_something_copyable(knos_home):
-    """--print is the by-hand path. Plain `knos connect` does it for you."""
-    result = runner.invoke(app, ["connect", "--print"])
-    assert result.exit_code == 0
-    assert "knos.mcp" in result.stdout
-    assert "Cursor" in result.stdout
-    assert "Claude Code" in result.stdout
-    # And it says how to stop doing it by hand.
-    assert "knos connect" in result.stdout
-
-
-def test_no_output_anywhere_mentions_a_stack_trace(knos_home, repo):
-    for args in (["ask", "x"], ["status"], ["point", "nope"], ["help", "nope"]):
-        result = runner.invoke(app, args)
-        assert "Traceback" not in result.stdout
-        assert "Error:" not in result.stdout
-        assert not re.search(r"\bknos\.[a-z]+\.py\b", result.stdout)
-
-
-def test_every_source_reference_in_the_docs_still_exists():
-    """Docs used to name a line number, which drifted every time the file
-    changed — five times. They name the method now, and this checks it is
-    still there."""
-    import re
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[1]
-    doc = (root / "docs" / "core-flow.md").read_text(encoding="utf-8")
-    named = re.findall(r"\[`Memory\.(\w+)`\]\(\.\./(src/knos/\w+\.py)\)", doc)
-    assert named, "the walkthrough stopped naming any source at all"
-    for method, path in named:
-        source = (root / path).read_text(encoding="utf-8")
-        assert f"def {method}(" in source, f"{path} has no {method}"
-
-
-def _configs(tmp_path):
-    return [
-        ("Claude Desktop", str(tmp_path / "Claude" / "claude_desktop_config.json")),
-        ("Cursor", str(tmp_path / ".cursor" / "mcp.json")),
-    ]
-
-
-def test_connect_write_adds_knos_and_keeps_everything_else(tmp_path, monkeypatch):
-    """Hand-editing JSON was the last step markdown did not ask of you."""
-    import json
-
-    from knos import cli
-
-    (tmp_path / "Claude").mkdir()
-    (tmp_path / ".cursor").mkdir()
-    existing = {
-        "somethingElse": "keep me",
-        "mcpServers": {"filesystem": {"command": "npx", "args": ["-y", "fs"]}},
-    }
-    desktop = tmp_path / "Claude" / "claude_desktop_config.json"
-    desktop.write_text(json.dumps(existing), encoding="utf-8")
-
-    monkeypatch.setattr(cli, "_config_files", lambda: _configs(tmp_path))
-    cli._write_configs("C:/python.exe")
-
-    after = json.loads(desktop.read_text(encoding="utf-8"))
-    assert after["somethingElse"] == "keep me"
-    assert "filesystem" in after["mcpServers"]
-    assert after["mcpServers"]["knos"] == {
-        "command": "C:/python.exe",
-        "args": ["-m", "knos.mcp"],
-    }
-    assert desktop.with_suffix(".json.before-knos").exists()
-    # a client with no config yet gets one
-    assert "knos" in json.loads(
-        (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
-    )["mcpServers"]
-
-
-def test_connect_write_is_idempotent(tmp_path, monkeypatch):
-    import json
-
-    from knos import cli
-
-    (tmp_path / "Claude").mkdir()
-    (tmp_path / ".cursor").mkdir()
-    monkeypatch.setattr(cli, "_config_files", lambda: _configs(tmp_path))
-
-    cli._write_configs("C:/python.exe")
-    first = (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
-    cli._write_configs("C:/python.exe")
-    assert (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8") == first
-    assert len(json.loads(first)["mcpServers"]) == 1
-
-
-def test_connect_write_refuses_to_touch_a_config_it_cannot_parse(tmp_path, monkeypatch):
-    """Somebody's editor settings are not a thing to guess at."""
-    from knos import cli
-
-    (tmp_path / "Claude").mkdir()
-    (tmp_path / ".cursor").mkdir()
-    broken = tmp_path / "Claude" / "claude_desktop_config.json"
-    broken.write_text("{ this is not json", encoding="utf-8")
-
-    monkeypatch.setattr(cli, "_config_files", lambda: _configs(tmp_path))
-    cli._write_configs("C:/python.exe")
-
-    assert broken.read_text(encoding="utf-8") == "{ this is not json"
-    assert not broken.with_suffix(".json.before-knos").exists()
-
-
-def test_connect_write_skips_a_client_that_is_not_installed(tmp_path, monkeypatch):
-    from knos import cli
-
-    monkeypatch.setattr(cli, "_config_files", lambda: _configs(tmp_path))
-    cli._write_configs("C:/python.exe")  # neither folder exists
-    assert not (tmp_path / "Claude").exists()
-    assert not (tmp_path / ".cursor").exists()
+def test_help_for_a_command_that_does_not_exist(capsys):
+    rc, said = run(capsys, "help", "teleport")
+    assert rc == 0
+    assert "No command called teleport" in said
+    assert "knos help" in said
 
 
 def test_no_help_screen_is_defined_twice():
     """A duplicate key in the help table silently wins, and the loser rots."""
-    import ast
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[1] / "src/knos/help.py").read_text(
-        encoding="utf-8"
-    )
-    tree = ast.parse(source)
+    tree = ast.parse((ROOT / "src" / "knos" / "help.py").read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "PER_COMMAND":
             names = [k.value for k in node.value.keys]
@@ -292,301 +231,759 @@ def test_no_help_screen_is_defined_twice():
     raise AssertionError("PER_COMMAND not found")
 
 
-def test_the_one_screen_says_what_a_markdown_file_cannot_do():
-    """The claim has to be in the product, not only in the README."""
-    screen = help_text.main()
-    assert "in your code right now" in screen
-    assert "CLAUDE.md cannot do that" in screen
-    assert "one local memory every coding agent on this machine shares" in screen
+# ---- errors are one line and a fix --------------------------------------------------------------------------
 
 
-def test_the_plugin_and_extension_manifests_agree_with_the_package():
-    """Three ways in, one server. A version or command that drifts between
-    them is a broken install for whoever picked that path."""
-    import json
-    from pathlib import Path
+def test_a_usage_error_is_one_line_and_exit_two(capsys):
+    rc, said = run(capsys, "claim")
+    assert rc == 2
+    assert "Traceback" not in said
+    assert "See:  knos help" in said
+    assert len([ln for ln in said.splitlines() if ln.strip()]) == 2, said
 
-    root = Path(__file__).resolve().parents[1]
-    version = re.search(
-        r'^version = "([^"]+)"',
-        (root / "pyproject.toml").read_text(encoding="utf-8"),
-        re.M,
-    ).group(1)
 
-    manifest = json.loads(
-        (root / "extension" / "manifest.json").read_text(encoding="utf-8")
-    )
-    assert manifest["version"] == version
-    assert [t["name"] for t in manifest["tools"]] == ["search", "about", "remember"]
+def test_an_unknown_command_is_a_usage_error(capsys):
+    rc, said = run(capsys, "teleport")
+    assert rc == 2
+    assert "teleport" in said
+    assert "See:  knos help" in said
 
-    # The extension resolves knos itself, with uv, from the pyproject beside
-    # its entry point. That is what makes it one click, so the three things
-    # that carry it are asserted rather than assumed: the runtime, the pinned
-    # dependency, and the absence of the user_config that used to ask a
-    # person to find and paste a Python path.
-    assert manifest["manifest_version"] == "0.4"
-    assert manifest["server"]["type"] == "uv"
-    assert "user_config" not in manifest
-    deps = (root / "extension" / "pyproject.toml").read_text(encoding="utf-8")
-    assert f'"knos=={version}"' in deps, "the extension must pin this version"
 
-    market = json.loads(
-        (root / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
-    )
+def test_asking_somewhere_that_is_not_a_repo_says_so(knos_home, tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    rc, said = run(capsys, "ask", "anything")
+    assert rc == 1
+    assert "not a git repo" in said
+    assert "knos point" in said
+    assert "Traceback" not in said
+
+
+@pytest.mark.parametrize("command", [["status"], ["notes"], ["compact"], ["claim", "x"], ["done"], ["reset", "--yes"],
+                                     ["remember", "x"], ["worth"], ["who"], ["export"], ["restore"]])
+def test_every_repo_command_outside_a_repo_says_so(command, knos_home, tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    rc, said = run(capsys, *command)
+    assert rc == 1, said
+    assert "not a git repo" in said
+
+
+def test_point_at_a_folder_that_is_not_there(knos_home, capsys):
+    rc, said = run(capsys, "point", "no/such/folder")
+    assert rc == 1
+    assert "No such folder" in said
+    assert "knos point ." in said
+
+
+def test_no_output_anywhere_mentions_a_stack_trace(knos_home, repo, capsys):
+    for args in (["ask", "x"], ["status"], ["point", "nope"], ["help", "nope"], ["forget", "nope"], ["claim"],
+                 ["init", "--hosts", "vscode"], ["reset"]):
+        _, said = run(capsys, *args)
+        assert "Traceback" not in said, args
+        assert "Error:" not in said, args
+        assert not re.search(r"\bknos[/\\.][a-z_]+\.py\b", said), args
+
+
+def test_an_unforeseen_error_is_one_line_not_a_traceback(knos_home, repo, monkeypatch, capsys):
+    from knos import worth
+
+    def explode(*a, **k):
+        raise KeyError("boom")
+
+    monkeypatch.setattr(worth, "tally", explode)
+    rc, said = run(capsys, "worth")
+    assert rc == 1
+    assert "knos stopped: KeyError" in said
+    assert "Traceback" not in said
+
+
+# ---- reading and asking ------------------------------------------------------------------------------------------
+
+
+def test_the_first_question_reads_the_repo_by_itself(knos_home, repo, capsys):
+    """Install, ask, answer. Running `point` first was a step between a person and the first thing knos is good for."""
+    rc, said = run(capsys, "ask", "why did we drop redis")
+    assert rc == 0, said
+    assert "First time in repo" in said
+    assert "redis" in said.lower()
+
+    # And it does not read it again on the next question.
+    rc, again = run(capsys, "ask", "why did we drop redis")
+    assert rc == 0
+    assert "First time in" not in again
+
+
+def test_point_then_status_then_ask(knos_home, repo, capsys):
+    rc, said = run(capsys, "point", str(repo))
+    assert rc == 0, said
+    assert "Read repo in" in said
+    assert "new commits" in said
+
+    rc, status = run(capsys, "status")
+    assert rc == 0, status
+    # each of Sibyl's tiers and how each behaves, so a person can see the store working rather than take it on trust
+    for tier in ("journal", "warm", "claims", "reference", "archive"):
+        assert tier in status, tier
+    assert " MB" in status
+    assert "notes exist nowhere else" in status
+    assert "edit guard: off (knos init)" in status
+
+    rc, asked = run(capsys, "ask", "why did we drop redis")
+    assert rc == 0
+    assert "redis" in asked.lower()
+
+
+def test_point_never_deletes(knos_home, repo, capsys):
+    run(capsys, "remember", "we deploy on tuesdays", "--about", "deploy window")
+    rc, _ = run(capsys, "point")
+    assert rc == 0
+    _, notes = run(capsys, "notes")
+    assert "deploy window: we deploy on tuesdays" in notes
+
+
+def test_private_command(knos_home, repo, capsys):
+    rc, said = run(capsys, "private", "notes/salary.md")
+    assert rc == 0
+    assert "is private" in said
+    assert "agents cannot see it" in said
+
+
+def test_remember_notes_forget(knos_home, repo, capsys):
+    rc, said = run(capsys, "remember", "we deploy on tuesdays", "--about", "deploy window")
+    assert rc == 0, said
+    assert "Noted, under deploy window." in said
+
+    _, notes = run(capsys, "notes")
+    assert "deploy window: we deploy on tuesdays" in notes
+
+    rc, said = run(capsys, "forget", "deploy window")
+    assert rc == 0
+    assert "Forgotten: deploy window." in said
+    _, notes = run(capsys, "notes")
+    assert "Nothing written down yet." in notes
+
+    rc, said = run(capsys, "forget", "deploy window")
+    assert rc == 1
+    assert "Nothing written down about deploy window." in said
+    assert "knos notes" in said
+
+
+def test_compact_runs(knos_home, repo, capsys):
+    run(capsys, "remember", "we deploy on tuesdays", "--about", "deploy window")
+    run(capsys, "forget", "deploy window")
+
+    rc, said = run(capsys, "compact")
+    assert rc == 0, said
+    assert re.search(r"\d+\.\d\d MB -> \d+\.\d\d MB", said), said
+    # forgotten today, so not older than the default 30 days: kept
+    assert "Dropped 0 forgotten note(s)." in said
+
+    rc, said = run(capsys, "compact", "--older-than", "0")
+    assert rc == 0, said
+    assert re.search(r"Dropped \d+ forgotten note\(s\)\.", said), said
+
+
+def test_reset_refuses_without_yes(knos_home, repo, capsys):
+    from knos import paths
+
+    run(capsys, "remember", "we deploy on tuesdays", "--about", "deploy window")
+    assert paths.has_store(repo)
+
+    rc, said = run(capsys, "reset")
+    assert rc == 1
+    assert "This starts repo's memory over" in said
+    assert "knos reset --yes" in said
+    assert paths.has_store(repo), "reset without --yes started over anyway"
+
+
+def test_reset_with_yes_starts_over_and_keeps_a_backup(knos_home, repo, capsys):
+    from knos import paths
+
+    run(capsys, "remember", "we deploy on tuesdays", "--about", "deploy window")
+
+    rc, said = run(capsys, "reset", "--yes")
+    assert rc == 0, said
+    assert "Started repo over." in said
+    backups = list((knos_home / "backups").glob("repo-*"))
+    assert len(backups) == 1 and backups[0].stat().st_size > 0, backups
+    assert str(backups[0]) in said
+    assert not paths.has_store(repo)
+
+
+# ---- claims through the command line ---------------------------------------------------------------------------
+
+
+def test_claim_then_done(knos_home, repo, capsys):
+    from knos import cli, guard
+    from knos.identity import Agent
+
+    rc, said = run(capsys, "claim", "the login", "-p", "src/auth.py")
+    assert rc == 0, said
+    assert "Claimed src/auth.py for 30 min." in said
+    assert "knos done" in said
+
+    other = Agent(host="cursor", session="sess-other")
+    assert not guard.check(repo, str(repo / "src" / "auth.py"), other).allow
+    assert guard.check(repo, str(repo / "src" / "auth.py"), cli._me(repo)).allow, "the holder was refused"
+
+    _, status = run(capsys, "status")
+    assert "claimed" in status and "src/auth.py" in status
+
+    rc, said = run(capsys, "done")
+    assert rc == 0
+    assert "Released src/auth.py (the login" in said
+    assert guard.check(repo, str(repo / "src" / "auth.py"), other).allow
+
+    rc, said = run(capsys, "done")
+    assert rc == 0
+    assert "You hold no claims here." in said
+
+
+def test_claim_for_minutes(knos_home, repo, capsys):
+    rc, said = run(capsys, "claim", "the readme", "-p", "README.md", "--for", "5")
+    assert rc == 0, said
+    assert "Claimed README.md for 5 min." in said
+
+
+def test_claim_without_files_is_advisory(knos_home, repo, capsys):
+    rc, said = run(capsys, "claim", "something vague about performance")
+    assert rc == 0, said
+    assert "advisory" in said
+    assert "nothing is blocked" in said
+
+
+def test_claim_held_by_another_agent_is_refused(knos_home, repo, capsys):
+    from knos.claims import Claims
+    from knos.identity import Agent
+
+    with Claims(repo) as c:
+        assert c.take(Agent(host="cursor", session="sess-other-1"), "the login", ["src/auth.py"])[0]
+
+    rc, said = run(capsys, "claim", "mine", "-p", "src/**")
+    assert rc == 1
+    assert "Not claimed: src/auth.py is held by cursor/sess-oth" in said
+    assert "knos done --all" in said
+
+
+def test_done_all_asks_before_releasing_other_agents_claims(knos_home, repo, capsys):
+    from knos.claims import Claims
+    from knos.identity import Agent
+
+    with Claims(repo) as c:
+        c.take(Agent(host="cursor", session="sess-other-1"), "the login", ["src/auth.py"])
+
+    rc, said = run(capsys, "done", "--all")
+    assert rc == 1, "released another agent's claim without asking"
+    assert "cursor/sess-oth" in said
+    assert "Nothing released." in said
+    assert "knos done --all --yes" in said
+    with Claims(repo) as c:
+        assert len(c.live()) == 1
+
+    rc, said = run(capsys, "done", "--all", "--yes")
+    assert rc == 0
+    assert "Released src/auth.py (the login, cursor/sess-oth" in said
+    with Claims(repo) as c:
+        assert c.live() == []
+
+    rc, said = run(capsys, "done", "--all")
+    assert "Nothing is claimed here." in said
+
+
+def test_done_releases_only_your_own(knos_home, repo, capsys):
+    from knos.claims import Claims
+    from knos.identity import Agent
+
+    with Claims(repo) as c:
+        c.take(Agent(host="cursor", session="sess-other-1"), "the login", ["src/auth.py"])
+
+    rc, said = run(capsys, "done")
+    assert rc == 0
+    assert "You hold no claims here." in said
+    with Claims(repo) as c:
+        assert len(c.live()) == 1
+
+
+# ---- knos init: wiring every agent, on a fake home --------------------------------------------------------------
+
+
+def _home() -> Path:
+    return Path.home()
+
+
+def test_init_with_no_agent_installed_says_so(capsys):
+    rc, said = _init(capsys)
+    assert rc == 1
+    assert "No coding agent found" in said
+    assert "knos init --hosts claude" in said
+
+
+def test_init_with_an_unknown_host_says_which(capsys):
+    rc, said = _init(capsys, "--hosts", "vscode")
+    assert rc == 1
+    assert "unknown host vscode" in said
+    assert "claude, codex, cursor, desktop, opencode" in said
+
+
+def test_init_claude_code(capsys):
+    rc, said = _init(capsys, "--hosts", "claude")
+    assert rc == 0, said
+    assert "Claude Code: memory server, edit guard and session notice" in said
+
+    assert _json(_home() / ".claude.json")["mcpServers"]["knos"] == _server()
+    hooks = _json(_home() / ".claude" / "settings.json")["hooks"]
+    pre = hooks["PreToolUse"]
+    assert [h["matcher"] for h in pre] == ["Edit|Write|MultiEdit|NotebookEdit"]
+    assert "hook guard --client claude" in pre[0]["hooks"][0]["command"]
+    start = hooks["SessionStart"]
+    assert "hook start --client claude" in start[0]["hooks"][0]["command"]
+
+
+def test_init_cursor(capsys):
+    rc, said = _init(capsys, "--hosts", "cursor")
+    assert rc == 0, said
+    assert "Cursor: memory server, edit guard and session notice" in said
+    assert "Restart Cursor: quit and reopen." in said
+
+    assert _json(_home() / ".cursor" / "mcp.json")["mcpServers"]["knos"] == _server()
+    hooks = _json(_home() / ".cursor" / "hooks.json")
+    assert hooks["version"] == 1
+    assert [h["command"] for h in hooks["hooks"]["preToolUse"]][0].count("hook guard --client cursor") == 1
+
+
+def test_init_claude_desktop(capsys):
+    rc, said = _init(capsys, "--hosts", "desktop")
+    assert rc == 0, said
+    assert "Claude Desktop: memory server" in said
+    assert "Restart Claude Desktop" in said
+    assert _json(setup.desktop_config())["mcpServers"]["knos"] == _server()
+
+
+def test_init_opencode_gets_the_shape_opencode_reads(capsys):
+    """OpenCode names the key `mcp`, marks a local server `"type": "local"`, and takes one command array. Writing
+    Claude's shape into it would look like it worked and do nothing."""
+    rc, said = _init(capsys, "--hosts", "opencode")
+    assert rc == 0, said
+
+    written = _json(setup.opencode_config())
+    assert setup.opencode_config() == _home() / ".config" / "opencode" / "opencode.json"
+    assert "mcpServers" not in written
+    entry = written["mcp"]["knos"]
+    assert entry == {"type": "local", "command": setup.server_command(), "enabled": True}
+    assert written["$schema"] == "https://opencode.ai/config.json"
+
+    plugin = _home() / ".config" / "opencode" / "plugin" / "knos-guard.js"
+    assert "hook guard --client opencode" in plugin.read_text(encoding="utf-8")
+    assert "tool.execute.before" in plugin.read_text(encoding="utf-8")
+
+
+def test_opencode_config_location_follows_its_own_env_var(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "custom.json"))
+    assert setup.opencode_config() == tmp_path / "custom.json"
+    rc, _ = _init(capsys, "--hosts", "opencode")
+    assert rc == 0
+    assert _json(tmp_path / "custom.json")["mcp"]["knos"]["type"] == "local"
+
+
+def test_init_codex_adds_one_table_and_keeps_the_rest(capsys):
+    config = _home() / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    original = '# my settings\nmodel = "o4"\n\n[mcp_servers.other]\ncommand = "npx"\n'
+    config.write_text(original, encoding="utf-8")
+
+    rc, said = _init(capsys, "--hosts", "codex")
+    assert rc == 0, said
+    assert "Codex: memory server (Codex has no edit hook" in said
+
+    text = config.read_text(encoding="utf-8")
+    assert text.startswith(original)
+    cmd = setup.server_command()
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10
+        assert "[mcp_servers.knos]" in text
+    else:
+        parsed = tomllib.loads(text)
+        assert parsed["model"] == "o4"
+        assert parsed["mcp_servers"]["other"] == {"command": "npx"}
+        assert parsed["mcp_servers"]["knos"] == {"command": cmd[0], "args": cmd[1:]}
+
+
+def test_init_adds_knos_and_keeps_everything_else(capsys):
+    existing = {"somethingElse": "keep me", "mcpServers": {"filesystem": {"command": "npx", "args": ["-y", "fs"]}}}
+    desktop = setup.desktop_config()
+    desktop.parent.mkdir(parents=True)
+    desktop.write_text(json.dumps(existing), encoding="utf-8")
+    settings = _home() / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    mine = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]}
+    settings.write_text(json.dumps({"model": "opus", "hooks": {"PreToolUse": [mine]}}), encoding="utf-8")
+
+    rc, said = _init(capsys, "--hosts", "desktop,claude")
+    assert rc == 0, said
+
+    after = _json(desktop)
+    assert after["somethingElse"] == "keep me"
+    assert after["mcpServers"]["filesystem"] == existing["mcpServers"]["filesystem"]
+    assert after["mcpServers"]["knos"] == _server()
+    hooks = _json(settings)
+    assert hooks["model"] == "opus"
+    assert hooks["hooks"]["PreToolUse"][0] == mine
+    assert len(hooks["hooks"]["PreToolUse"]) == 2
+
+
+def test_init_backs_up_every_file_it_changes(knos_home, capsys):
+    mcp = _home() / ".cursor" / "mcp.json"
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text('{"mcpServers": {}}', encoding="utf-8")
+
+    rc, said = _init(capsys, "--hosts", "cursor")
+    assert rc == 0
+
+    runs = list((knos_home / "backups").glob("init-*"))
+    assert len(runs) == 1, runs
+    assert f"Copies of every file it changed: {runs[0]}" in said
+    manifest = _json(runs[0] / "manifest.json")
+    assert set(manifest) == {str(mcp), str(_home() / ".cursor" / "hooks.json")}
+    kept = Path(manifest[str(mcp)]["backup"])
+    assert kept.read_text(encoding="utf-8") == '{"mcpServers": {}}'
+    assert manifest[str(_home() / ".cursor" / "hooks.json")]["backup"] is None, "hooks.json did not exist before"
+
+
+def _every_file() -> list[Path]:
+    return sorted({p for h in setup.HOSTS for p in setup.files_of(h)}, key=str)
+
+
+def test_init_twice_changes_nothing(knos_home, capsys):
+    rc, _ = _init(capsys, "--hosts", ",".join(setup.HOSTS))
+    assert rc == 0
+    first = {p: p.read_bytes() for p in _every_file()}
+    assert len(first) == len(_every_file()), "some host got no file"
+    runs = sorted((knos_home / "backups").glob("init-*/manifest.json"))
+
+    rc, said = _init(capsys, "--hosts", ",".join(setup.HOSTS))
+    assert rc == 0, said
+    assert {p: p.read_bytes() for p in _every_file()} == first
+    assert sorted((knos_home / "backups").glob("init-*/manifest.json")) == runs, "a second run backed something up"
+    assert "Copies of every file it changed" not in said
+    assert _json(_home() / ".cursor" / "hooks.json")["hooks"]["preToolUse"].__len__() == 1
+    assert len(_json(_home() / ".claude" / "settings.json")["hooks"]["PreToolUse"]) == 1
+
+
+def test_init_skips_an_agent_that_is_not_installed(capsys):
+    (_home() / ".cursor").mkdir()
+
+    rc, said = _init(capsys)
+    assert rc == 0, said
+    assert "Cursor" in said
+    assert (_home() / ".cursor" / "mcp.json").exists()
+    for absent in (_home() / ".claude.json", _home() / ".claude", setup.desktop_config().parent,
+                   setup.codex_config(), setup.opencode_config()):
+        assert not absent.exists(), absent
+
+
+def test_init_leaves_a_config_it_cannot_read_alone(knos_home, capsys):
+    """Somebody's editor settings are not a thing to guess at."""
+    broken = _home() / ".cursor" / "mcp.json"
+    broken.parent.mkdir(parents=True)
+    broken.write_text("{ this is not json", encoding="utf-8")
+
+    rc, said = _init(capsys, "--hosts", "cursor,desktop")
+    assert rc == 1
+    assert "Cursor:" in said and "is not readable JSON, so knos left it alone" in said
+    assert broken.read_text(encoding="utf-8") == "{ this is not json"
+    # the other agent is still wired
+    assert _json(setup.desktop_config())["mcpServers"]["knos"] == _server()
+    for manifest in (knos_home / "backups").glob("init-*/manifest.json"):
+        assert str(broken) not in _json(manifest)
+
+
+def test_init_leaves_a_settings_file_it_cannot_read_alone(capsys):
+    settings = _home() / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("[1, 2, 3]", encoding="utf-8")
+
+    rc, said = _init(capsys, "--hosts", "claude")
+    assert rc == 1
+    assert "is not a JSON object, so knos left it alone" in said
+    assert settings.read_text(encoding="utf-8") == "[1, 2, 3]"
+
+
+def test_init_print_changes_nothing(capsys):
+    rc, said = run(capsys, "init", "--print", "--hosts", "cursor,desktop")
+    assert rc == 0
+    assert "Would add this MCP server to: Cursor, Claude Desktop" in said
+    assert setup.server_command()[0] in said
+    assert not (_home() / ".cursor").exists()
+    assert not setup.desktop_config().exists()
+
+
+def test_connect_is_the_old_name_for_init(capsys):
+    rc, said = run(capsys, "connect", "--print", "--hosts", "cursor")
+    assert rc == 0
+    assert "Would add this MCP server to: Cursor" in said
+
+
+def test_claude_code_is_added_through_its_own_cli_when_that_exists(monkeypatch, capsys):
+    """`claude mcp add` registers the server with a running session too, so its tools work without a restart; a
+    running session has already read ~/.claude.json and will not read it again."""
+    real_which, real_run = shutil.which, subprocess.run
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: "/usr/bin/claude" if name == "claude"
+                        else real_which(name, *a, **k))
+    calls = []
+
+    def fake_run(cmd, *a, **kw):
+        if cmd and cmd[0] == "/usr/bin/claude":
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "Added knos", "")
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    rc, said = _init(capsys, "--hosts", "claude")
+    assert rc == 0, said
+    assert ["/usr/bin/claude", "mcp", "add", "--scope", "user", "knos", "--", *setup.server_command()] in calls
+    assert not (_home() / ".claude.json").exists(), "it wrote the file by hand as well"
+    assert (_home() / ".claude" / "settings.json").exists(), "the hooks still go in settings.json"
+    assert not any("Restart Claude Code" in ln for ln in said.splitlines())
+
+    calls.clear()
+    rc, said = run(capsys, "init", "--undo", "--hosts", "claude")
+    assert rc == 0
+    assert ["/usr/bin/claude", "mcp", "remove", "--scope", "user", "knos"] in calls
+
+
+def test_without_the_claude_cli_the_config_file_is_written(capsys):
+    rc, _ = _init(capsys, "--hosts", "claude")
+    assert rc == 0
+    assert _json(_home() / ".claude.json")["mcpServers"]["knos"]["args"] == setup.server_command()[1:]
+
+
+def test_the_server_command_is_an_absolute_path_or_this_interpreter(monkeypatch):
+    """A GUI app starts the server with its own PATH and no shell profile, so a bare `knos` would not be found."""
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(setup, "own_script", lambda: None)
+    assert setup.server_command() == [sys.executable, "-m", "knos", "mcp"]
+    fake = str(Path("/opt/pipx/bin/knos"))
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: fake if name == "knos" else None)
+    assert setup.server_command() == [fake, "mcp"]
+    # the script installed beside this interpreter wins over whatever `knos` is first on PATH
+    mine = str(Path("/venv/bin/knos"))
+    monkeypatch.setattr(setup, "own_script", lambda: mine)
+    assert setup.server_command() == [mine, "mcp"]
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_config_paths_resolve_on_every_platform(platform, monkeypatch):
+    monkeypatch.setattr(setup.sys, "platform", platform)
+    where = setup.mcp_files()
+    assert sorted(where) == sorted(setup.HOSTS)
+    home = _home()
+    desktop = {"linux": home / ".config" / "Claude", "darwin": home / "Library" / "Application Support" / "Claude",
+               "win32": home / "AppData" / "Roaming" / "Claude"}[platform]
+    assert where["desktop"] == desktop / "claude_desktop_config.json"
+    assert where["cursor"] == home / ".cursor" / "mcp.json"
+    assert where["codex"] == home / ".codex" / "config.toml"
+
+
+def test_init_names_the_exact_restart_for_each_app_that_needs_one():
+    """"Restart your agents" makes a person guess which app and how. Claude Code is absent: `claude mcp add` and the
+    hooks reach a running session."""
+    assert set(setup.RESTART) == {"desktop", "cursor", "opencode", "codex"}
+    for host, line in setup.RESTART.items():
+        assert line.startswith(setup.NAMES[host] + ":"), line
+        assert line.endswith("."), line
+
+
+# ---- knos init --undo --------------------------------------------------------------------------------------------
+
+
+def _seed() -> dict[Path, bytes]:
+    """A home where a person already configured things, in their own formatting."""
+    seeded = {
+        _home() / ".cursor" / "mcp.json": b'{"mcpServers":{"fs":{"command":"npx"}},"x":1}',
+        _home() / ".claude" / "settings.json": b'{\n    "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": []}]}\n}',
+        setup.codex_config(): b'# mine\nmodel = "o4"\n',
+        setup.desktop_config(): b'{"mcpServers": {}}\r\n',
+    }
+    for path, raw in seeded.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    return seeded
+
+
+def test_undo_restores_every_file_byte_for_byte(capsys):
+    seeded = _seed()
+    created = [p for p in _every_file() if p not in seeded]
+
+    rc, said = _init(capsys, "--hosts", ",".join(setup.HOSTS))
+    assert rc == 0, said
+    assert all(p.read_bytes() != raw for p, raw in seeded.items())
+
+    rc, said = run(capsys, "init", "--undo")
+    assert rc == 0, said
+    for name in setup.NAMES.values():
+        assert f"Removed from {name}." in said
+    for path, raw in seeded.items():
+        assert path.read_bytes() == raw, path
+    for path in created:
+        assert not path.exists(), f"{path} was made by knos init and is still there"
+
+
+def test_undo_after_a_person_edited_the_file_removes_only_knos(capsys):
+    mcp = _home() / ".cursor" / "mcp.json"
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text('{"mcpServers": {"fs": {"command": "npx"}}}', encoding="utf-8")
+    rc, _ = _init(capsys, "--hosts", "cursor")
+    assert rc == 0
+
+    data = _json(mcp)
+    data["mcpServers"]["added-later"] = {"command": "uvx"}
+    mcp.write_text(json.dumps(data), encoding="utf-8")
+
+    rc, said = run(capsys, "init", "--undo", "--hosts", "cursor")
+    assert rc == 0, said
+    assert "Removed from Cursor." in said
+    after = _json(mcp)
+    assert "knos" not in after["mcpServers"]
+    assert set(after["mcpServers"]) == {"fs", "added-later"}
+    assert not (_home() / ".cursor" / "hooks.json").exists() or "knos-guard" not in (
+        _home() / ".cursor" / "hooks.json").read_text(encoding="utf-8")
+
+
+def test_undo_when_nothing_was_installed(capsys):
+    rc, said = run(capsys, "init", "--undo")
+    assert rc == 0
+    assert "Nothing to remove" in said
+
+
+def test_undo_leaves_an_unreadable_file_alone(capsys):
+    rc, _ = _init(capsys, "--hosts", "cursor")
+    assert rc == 0
+    mcp = _home() / ".cursor" / "mcp.json"
+    mcp.write_text("{ broken since", encoding="utf-8")
+
+    rc, said = run(capsys, "init", "--undo", "--hosts", "cursor")
+    assert "not readable JSON, so knos left it alone" in said
+    assert mcp.read_text(encoding="utf-8") == "{ broken since"
+
+
+# ---- the hidden old names -----------------------------------------------------------------------------------------
+
+
+def test_guard_shows_whether_each_agent_is_guarded(capsys):
+    rc, said = run(capsys, "guard")
+    assert rc == 0
+    assert re.search(r"cursor\s+not wired", said)
+    assert "knos init wires it" in said
+
+    _init(capsys, "--hosts", "cursor")
+    rc, said = run(capsys, "guard")
+    assert re.search(r"cursor\s+guarding", said)
+    assert re.search(r"claude\s+not wired", said)
+
+
+def test_guard_install_and_uninstall_are_init_and_undo(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (_home() / ".cursor").mkdir()
+    tested = []
+    monkeypatch.setattr(setup, "selftest", lambda *a, **k: tested.append(1) or [])
+
+    rc, said = run(capsys, "guard", "--install")
+    assert rc == 0, said
+    assert tested, "guard --install skipped the self-test knos init runs"
+    assert "knos-guard" in (_home() / ".cursor" / "hooks.json").read_text(encoding="utf-8")
+
+    rc, said = run(capsys, "guard", "--uninstall")
+    assert rc == 0, said
+    assert not (_home() / ".cursor" / "hooks.json").exists()
+    assert not (_home() / ".cursor" / "mcp.json").exists()
+
+
+def test_a_config_written_by_0_1_still_starts_the_server(monkeypatch):
+    """0.1 wrote `knos plane mcp` into host configs; after an upgrade that must still start the server."""
+    import types
+
+    import knos
+
+    started = []
+    fake = types.ModuleType("knos.mcp")
+    fake.main = lambda: started.append(1)
+    monkeypatch.setitem(sys.modules, "knos.mcp", fake)
+    monkeypatch.setattr(knos, "mcp", fake, raising=False)
+    assert main(["plane", "mcp"]) == 0
+    assert started == [1]
+
+
+def test_hook_guard_exits_zero_when_it_breaks(monkeypatch):
+    from knos import guard_hook
+
+    def explode(argv=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(guard_hook, "main", explode)
+    assert main(["hook", "guard", "--client", "claude"]) == 0
+    assert main(["hook", "nonsense"]) == 0
+
+
+def test_init_self_test_starts_the_server_and_the_guard(capsys):
+    """The one test that starts the memory server the way an agent does: handshake, four tools, and the guard
+    allowing an empty edit."""
+    rc, said = run(capsys, "init", "--hosts", "cursor", "--no-read")
+    assert rc == 0, said
+    assert "Self-test passed" in said
+
+
+def test_init_reads_the_repo_it_is_run_in(knos_home, repo, capsys):
+    from knos import paths
+
+    rc, said = run(capsys, "init", "--hosts", "cursor", "--no-test")
+    assert rc == 0, said
+    assert "read repo into Sibyl memory" in said
+    assert paths.has_store(repo)
+
+
+# ---- the files that carry the product -----------------------------------------------------------------------------
+
+
+def test_the_plugin_manifests_agree_with_the_package():
+    """Two ways in, one server. A version or command that drifts between them is a broken install for whoever
+    picked that path."""
+    version = re.search(r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+                        re.M).group(1)
+
+    market = _json(ROOT / ".claude-plugin" / "marketplace.json")
     assert market["plugins"][0]["source"] == "./plugins/knos"
     assert market["plugins"][0]["version"] == version
 
-    plugin = json.loads(
-        (root / "plugins" / "knos" / ".claude-plugin" / "plugin.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    plugin = _json(ROOT / "plugins" / "knos" / ".claude-plugin" / "plugin.json")
     assert plugin["version"] == version
-    assert plugin["mcpServers"]["knos"]["args"] == ["-m", "knos.mcp"]
-
-
-def test_the_readme_leads_with_the_problem_and_the_action():
-    """A stranger scanning the first screen must not have to guess.
-
-    Rewritten three times now, and every rewrite was about who is reading.
-    It first asserted the MCP server and its three tools were on the first
-    screen; then the pull request check; then where the memory is written.
-
-    It now asserts the first screen leads with the thing that costs a reader
-    nothing: the Action, copyable, with no install in front of it. Almost
-    nobody wants to run a server to find out whether a tool is worth running,
-    so the server is no longer what greets them. What moved is checked below
-    rather than dropped - the store, the deletion test and the three tools
-    are all still in the file.
-    """
-    from pathlib import Path
-
-    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
-        encoding="utf-8"
-    )
-    first = readme[:1800]
-    assert "same thing" in first, "the first screen does not state the problem"
-    assert "knos demo" in first, "the one command a judge runs is not on the first screen"
-    assert "install" in first.lower(), "the first screen does not address the cost"
-
-    # The Action and the copyable workflow moved down one screen when `knos
-    # demo` took the top. They are still the zero-install path and must still
-    # be reachable without scrolling far.
-    near = readme[:5200]
-    assert "drexthealpha/Knos/action@" in near, "the Action fell too far down"
-    assert "knos-claims.yml" in near, "no workflow a maintainer can copy"
-
-    # The embeddable core is the other zero-server path, and is named early.
-    #
-    # The bound moved out to 4,200 when the page started leading with the
-    # live evidence URL and the partner badges. That is a deliberate trade:
-    # a judge who can check every number without installing anything is worth
-    # more than the embeddable core sitting two hundred characters higher.
-    # The bound stays a bound so the core cannot keep sliding, and the length
-    # cap below is what actually stops the page growing back.
-    #
-    # 4,300 since the payout line. The hackathon organisers asked for the
-    # winning wallet address at the top of the README, which is a hundred
-    # characters that were not the page's choice. Measured against the text
-    # below that line, the core sits where it did.
-    assert "knos.core" in readme[:4300], "the importable core is not near the top"
-    assert len(readme) < 12000, (
-        "the README is growing back into a document nobody reads to the end "
-        "of; the long version belongs in docs/GUIDE.md"
-    )
-
-    # Moved, not dropped.
-    assert "memory.db" in readme, "the store is no longer named anywhere"
-    assert "test_sibyl_is_load_bearing" in readme, "the deletion test is gone"
-    assert "pull_request" in readme
-    for tool in ("search", "about", "remember"):
-        assert tool in readme, tool
-
-
-def test_claude_code_is_added_through_its_own_cli_when_that_exists(
-    knos_home, tmp_path, monkeypatch
-):
-    """`claude mcp add` registers the server with the running session, so its
-    tools work without a restart. Writing ~/.claude.json by hand does not:
-    a session already running has read that file and will not read it again.
-    """
-    from knos import cli
-
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-
-        class Done:
-            returncode = 0
-            stdout = "Added knos"
-            stderr = ""
-
-        return Done()
-
-    monkeypatch.setattr(cli, "_claude_cli", lambda: "/usr/bin/claude")
-    monkeypatch.setattr("subprocess.run", fake_run)
-    monkeypatch.setattr(cli, "_config_files", lambda: [("Claude Code", str(tmp_path / ".claude.json"))])
-
-    result = runner.invoke(app, ["connect"])
-    assert result.exit_code == 0
-    assert calls, "never asked the claude CLI"
-    assert calls[0][1:4] == ["mcp", "add", "--scope"]
-    assert calls[0][-2:] == ["-m", "knos.mcp"]
-    assert "nothing to restart" in result.stdout
-    # And it did not also write the file by hand.
-    assert not (tmp_path / ".claude.json").exists()
-
-
-def test_without_the_claude_cli_the_config_is_written_and_a_restart_is_asked_for(
-    knos_home, tmp_path, monkeypatch
-):
-    import json
-
-    from knos import cli
-
-    monkeypatch.setattr(cli, "_claude_cli", lambda: None)
-    target = tmp_path / ".claude.json"
-    monkeypatch.setattr(cli, "_config_files", lambda: [("Claude Code", str(target))])
-
-    result = runner.invoke(app, ["connect"])
-    assert result.exit_code == 0
-    assert "Restart" in result.stdout
-    assert json.loads(target.read_text(encoding="utf-8"))["mcpServers"]["knos"]["args"] == [
-        "-m",
-        "knos.mcp",
-    ]
-
-
-def test_opencode_gets_the_shape_opencode_reads(knos_home, tmp_path, monkeypatch):
-    """OpenCode names the key `mcp`, marks a local server `"type": "local"`,
-    and takes one command array. Writing Claude's shape into it would look
-    like it worked and do nothing."""
-    import json
-
-    from knos import cli
-
-    target = tmp_path / "opencode.json"
-    monkeypatch.setattr(cli, "_claude_cli", lambda: None)
-    monkeypatch.setattr(cli, "_config_files", lambda: [("OpenCode", str(target))])
-
-    assert runner.invoke(app, ["connect"]).exit_code == 0
-    written = json.loads(target.read_text(encoding="utf-8"))
-    assert "mcpServers" not in written
-    knos_entry = written["mcp"]["knos"]
-    assert knos_entry["type"] == "local"
-    assert knos_entry["command"][-2:] == ["-m", "knos.mcp"]
-    assert knos_entry["enabled"] is True
-    assert written["$schema"] == "https://opencode.ai/config.json"
-
-    # Run twice: it must not duplicate or rewrite.
-    assert runner.invoke(app, ["connect"]).exit_code == 0
-    assert "already has it" in runner.invoke(app, ["connect"]).stdout
-
-
-def test_opencode_config_location_follows_its_own_env_var(monkeypatch, tmp_path):
-    from knos import cli
-
-    monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "custom.json"))
-    where = dict((n, w) for n, w in cli._config_files())
-    assert where["OpenCode"].endswith("custom.json")
+    assert plugin["mcpServers"]["knos"] == {"command": "knos", "args": ["mcp"]}
 
 
 def test_every_check_command_in_the_readme_selects_a_real_test():
-    """The README tells a stranger to run these to verify each claim. A
-    renamed test would leave an instruction that quietly selects nothing,
-    which is worse than not offering the check at all.
-
-    Collection happens once, not once per command. Spawning a pytest for
-    each backtick cost eight minutes and grew every time the README offered
-    another check, which is a good way to make people stop offering them.
-    """
-    import re
+    """The README tells a stranger to run these to verify each claim. A renamed test would leave an instruction that
+    quietly selects nothing. Collection happens once, not once per command."""
     import shlex
-    import subprocess
-    import sys
-    from pathlib import Path
 
-    root = Path(__file__).resolve().parents[1]
-    commands = re.findall(
-        r"`(pytest [^`]+)`", (root / "README.md").read_text(encoding="utf-8")
-    )
+    commands = re.findall(r"`(pytest [^`]+)`", (ROOT / "README.md").read_text(encoding="utf-8"))
     assert commands, "the README stopped offering any way to check it"
 
-    # -m "" clears the critical-path default in pyproject, so non-critical
-    # tests named in the README still show up here.
     done = subprocess.run(
-        [sys.executable, "-m", "pytest", "-m", "", "--collect-only", "-q"],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-    )
+        [sys.executable, "-m", "pytest", "-m", "", "-o", "addopts=", "-p", "no:cacheprovider", "--collect-only", "-q"],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=600)
     ids = [line.strip() for line in done.stdout.splitlines() if "::" in line]
     assert ids, f"nothing collected at all: {done.stdout[-2000:]}"
 
     for command in commands:
         args = shlex.split(command)[1:]
-        paths = [a for a in args if a.endswith(".py")]
-        selector = ""
-        if "-k" in args:
-            selector = args[args.index("-k") + 1]
-
+        files = [a for a in args if a.endswith(".py")]
+        selector = args[args.index("-k") + 1] if "-k" in args else ""
         picked = ids
-        if paths:
-            wanted = {p.replace("\\", "/") for p in paths}
+        if files:
+            wanted = {p.replace("\\", "/") for p in files}
             picked = [i for i in picked if i.replace("\\", "/").split("::")[0] in wanted]
             assert picked, f"README says `{command}` but that file has no tests"
         if selector:
-            # -k takes an expression; the names in it are what must exist.
-            words = [
-                w
-                for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", selector)
-                if w not in {"or", "and", "not"}
-            ]
+            words = [w for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", selector) if w not in {"or", "and", "not"}]
             picked = [i for i in picked if any(w in i for w in words)]
         assert picked, f"README says `{command}` but that selects no tests"
-
-
-@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
-def test_config_paths_resolve_on_every_platform(platform, monkeypatch, tmp_path):
-    """A stale `import os` inside the Windows branch made `os` local to the
-    whole function, so every non-Windows caller hit UnboundLocalError before
-    it could read OPENCODE_CONFIG. It passed on Windows and broke `knos
-    connect` on Linux and macOS.
-    """
-    from knos import cli
-
-    monkeypatch.setattr(cli.sys, "platform", platform)
-    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
-    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
-
-    where = dict(cli._config_files())
-    assert sorted(where) == ["Claude Code", "Claude Desktop", "Cursor", "OpenCode"]
-    assert all(w for w in where.values())
-
-
-def test_connect_names_the_exact_restart_for_each_client_that_needs_one():
-    """`knos connect` telling somebody to "restart your agents" makes them
-    guess which app and how. Each line names the app and the keystroke, and
-    Claude Code is deliberately absent because it needs no restart."""
-    from knos.cli import RESTART
-
-    assert set(RESTART) == {"Cursor", "Claude Desktop", "OpenCode"}
-    assert "Claude Code" not in RESTART
-    for name, line in RESTART.items():
-        assert name in line, name
-        assert line.endswith(".") or line.endswith(")"), line
-
-
-def test_every_command_has_a_help_page():
-    """`knos help export` said "No command called export" while export was
-    in the command list and worked. Help drifted from the CLI because
-    nothing compared them."""
-    from knos import help as knos_help
-    from knos.cli import app
-
-    commands = {c.name or (c.callback and c.callback.__name__) for c in app.registered_commands}
-    commands = {c.replace("_cmd", "").replace("_", "-") for c in commands if c}
-    commands -= {"help"}  # help itself is the thing being asked for
-    missing = sorted(c for c in commands if c not in knos_help.PER_COMMAND)
-    assert not missing, f"no `knos help` page for: {missing}"

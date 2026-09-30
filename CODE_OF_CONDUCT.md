@@ -26,7 +26,8 @@ Examples of unacceptable behaviour:
 
 ## Enforcement
 
-Report unacceptable behaviour to **zulibro1999@gmail.com**. All complaints
+Report unacceptable behaviour privately to the maintainer, through GitHub's private vulnerability reporting on
+this repository (Security → Report a vulnerability) or a direct message to @drexthealpha. All complaints
 will be reviewed and investigated promptly and fairly. The maintainer will
 respect the privacy and security of the reporter.
 

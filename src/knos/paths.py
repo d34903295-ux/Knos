@@ -9,6 +9,39 @@ from functools import lru_cache
 from pathlib import Path
 
 
+def remove_tree(path: Path | str, tries: int = 5) -> bool:
+    """Delete a temporary folder knos made, on every OS. Windows refuses to delete read-only files (git's objects
+    are read-only) and files another handle still has open (a SQLite store closing), so make files writable and
+    retry briefly. Returns whether the folder is gone."""
+    import shutil
+    import stat
+    import sys
+    import time
+
+    def writable(func, target, _exc):
+        try:
+            os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+            func(target)
+        except OSError:
+            pass
+
+    target = Path(path)
+    for attempt in range(tries):
+        if not target.exists():
+            return True
+        try:
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(target, onexc=writable)
+            else:
+                shutil.rmtree(target, onerror=writable)
+        except OSError:
+            pass
+        if not target.exists():
+            return True
+        time.sleep(0.2 * (attempt + 1))
+    return not target.exists()
+
+
 def home() -> Path:
     """The knos data directory. Override with KNOS_HOME."""
     override = os.environ.get("KNOS_HOME")
@@ -84,9 +117,12 @@ def worktrees(repo: Path) -> list[Path]:
     ]
 
 
+SIBYL_STORE = "memory.db"
+
+
 def store_for(repo: Path) -> Path:
-    """The sqlite file holding memory for one repo, worktrees included."""
-    return work_root(repo) / "memory.db"
+    """The Sibyl store holding memory for one repo, worktrees included."""
+    return work_root(repo) / SIBYL_STORE
 
 
 @lru_cache(maxsize=64)
@@ -147,7 +183,7 @@ def pointed_repo() -> Path | None:
 
 def has_store(repo: Path) -> bool:
     """Whether knos has read this repo. Does not create anything."""
-    return (home() / slug(shared_root(repo)) / "memory.db").exists()
+    return (home() / slug(shared_root(repo)) / SIBYL_STORE).exists()
 
 
 def current_repo() -> Path | None:

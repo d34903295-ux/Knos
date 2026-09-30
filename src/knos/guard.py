@@ -1,43 +1,28 @@
-"""Refusing the edit itself, not only the answer.
+"""The edit guard: refuse an edit to files another agent has claimed. Nothing else.
 
-Everywhere else in knos the rule is the same one: knos owns what it knows, so
-the most it can do about work somebody else claimed is decline to be the
-source. That is true of MCP and it is the honest limit of a server — the
-protocol gives it no way to see an edit, let alone stop one.
+Every host ships a hook that runs before a tool call and can refuse it:
 
-Every one of these clients ships a hook system anyway, outside MCP, and each
-one can refuse a tool call before it runs:
+    Claude Code   PreToolUse on Edit|Write|MultiEdit|NotebookEdit   permissionDecision "deny", or exit 2
+    Cursor        preToolUse                                        permission "deny", or exit 2
+    OpenCode      tool.execute.before                               throw
 
-    Claude Code   PreToolUse       permissionDecision "deny", or exit 2
-    Cursor        preToolUse       permission "deny", or exit 2
-    OpenCode      tool.execute.before   throw
+The guard refuses one thing: a path covered by a live claim held by a different agent (`claims.py`, `identity.py`),
+including a claimed file that has been renamed. Git sees the rename, or the new file is byte-identical to the
+committed one, so `git mv parser.py helper.py` does not launder the claim.
 
-So the guard is not a second product. It is the claim knos already holds,
-consulted one step earlier, at the moment an agent reaches for the file
-instead of at the moment it asks a question about it.
+The rules it keeps (the product's invariants):
 
-Two things get refused, and only two:
-
-  - a path whose subject somebody else has claimed, matched by the same
-    `same_subject` the withhold uses, so a claim on "the parser" covers
-    `src/parser/lexer.py` exactly as it covers a question about the parser -
-    including the path a claimed file was *renamed to*, because otherwise
-    `git mv parser.py helper.py` launders the claim in one command;
-  - a path a rule in this repo's own CLAUDE.md or AGENTS.md forbids in
-    words a machine can check — "never edit `src/generated/`" is a pattern,
-    "write idiomatic code" is not, and this only ever reads the first kind.
-
-Nothing here guesses. A rule with no path in it is not a rule this module
-has an opinion about, and a claim that does not match is not a claim.
-
-This is off unless somebody runs `knos guard --install`. A hook that denies
-an edit wrongly is worse than no hook, so it is never written by
-`knos connect` and `knos guard --uninstall` takes it back out.
+  - the agent that holds a claim is never refused (same host and the same session or host process);
+  - it refuses only a verified collision, or (Knos Pro, only when a person set one) an agent spend cap that has
+    been reached. Rules in CLAUDE.md, withdrawn decisions and text similarity never block;
+  - it guards edits, not reads. Shell commands that write files (`sed -i`, `mv`, a script) are not seen by any of
+    these hooks, and this does not pretend otherwise;
+  - anything unexpected (no store, a crash, an old version, an unreadable payload) exits 0 and writes one line to
+    ~/.knos/hook.log. A broken install must never stand between an agent and its own repository.
 """
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 import re
@@ -45,37 +30,20 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-from . import answer, paths, rules
-from .memory import Memory
+from . import paths
+from .identity import Agent
 
-# Both hook runners treat 2 as "refuse this call", whatever else is printed.
-# Every client also has its own JSON shape and knos prints the right one, but
-# the exit code is what actually holds if a schema moves under us.
 REFUSE = 2
 ALLOW = 0
 
 CLIENTS = ("claude", "cursor", "opencode")
 
-# A rule earns an opinion here only if it says not to do something *and*
-# names where. Both halves are required: "never commit secrets" has no path
-# and "src/generated/ is generated" has no prohibition.
-_NO = re.compile(
-    r"\b(never|do not|don't|dont|no one should|must not|mustn't|avoid|forbidden|off[- ]limits)\b",
-    re.I,
-)
-# A path inside backticks. Bare words are not paths: "never touch config"
-# would match half a repo, so the rule has to have marked it as a path.
-_PATH = re.compile(r"`([^`\n]+)`")
-# What separates a path from an ordinary backticked word like `pytest`.
-_LOOKS_LIKE_PATH = re.compile(r"[/\\*]|\.[A-Za-z0-9]{1,6}$")
-
 
 @dataclass(frozen=True)
 class Verdict:
-    """What the guard decided, and the sentence a person will read."""
-
     allow: bool
     reason: str = ""
 
@@ -84,113 +52,33 @@ class Verdict:
         return ALLOW if self.allow else REFUSE
 
 
-def _subject(path: str) -> str:
-    """The part of a path a claim could plausibly be about.
-
-    Matching the whole path pulls in `src`, `lib` and `app`, which almost
-    every claim shares a stem with once identifiers are split. The file and
-    the directory holding it are what somebody means when they claim "the
-    parser", so those are what gets compared.
-    """
-    p = Path(str(path).replace("\\", "/"))
-    parts = [p.stem]
-    if p.parent.name:
-        parts.append(p.parent.name)
-    return " ".join(parts)
+def log(line: str) -> None:
+    """One line in ~/.knos/hook.log; never raises."""
+    try:
+        with open(paths.home() / "hook.log", "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.now(timezone.utc).isoformat()} {line}\n")
+    except Exception:
+        pass
 
 
-# The guard runs before every tool call an agent makes, so anything it does
-# twice is something an agent waits for twice. Two answers here cost a git
-# subprocess each - finding the rule files, and spotting a rename - and on
-# Windows the spawn is most of the cost. Both are cached against exactly what
-# would have to change for the answer to be wrong.
-#
-# Not against a clock. A one second cache would be long enough to rename a
-# claimed file and edit it while the guard is still answering from before the
-# move, which is the bypass this all exists to close.
-_FILES_CACHE: dict[str, tuple[tuple, list[Path]]] = {}
-_RULES_CACHE: dict[str, tuple[tuple, list[tuple[str, str]]]] = {}
-_MOVED_CACHE: dict[tuple[str, str], tuple[tuple, tuple]] = {}
+def _as_agent(who: Agent | str) -> Agent:
+    if isinstance(who, Agent):
+        return who
+    from .identity import host_from_client
+    return Agent(host=host_from_client(str(who)))
 
 
-def _stamp(*paths: Path) -> tuple:
-    """Modification times; a missing file is a state of its own."""
-    out = []
-    for path in paths:
-        try:
-            out.append(path.stat().st_mtime_ns)
-        except OSError:
-            out.append(None)
-    return tuple(out)
-
-
-def _index(repo: Path) -> Path:
-    """Git's index, whose mtime moves whenever the tracked set does."""
-    return repo / ".git" / "index"
-
-
-def rule_files(repo: Path) -> list[Path]:
-    """`rules.files`, without asking git again when nothing has been staged."""
-    key = str(repo)
-    now = _stamp(_index(repo))
-    hit = _FILES_CACHE.get(key)
-    if hit is not None and hit[0] == now:
-        return hit[1]
-    found = rules.files(repo)
-    _FILES_CACHE[key] = (now, found)
-    return found
-
-
-def path_rules(repo: Path) -> list[tuple[str, str]]:
-    """(glob, where) for every rule in this repo that forbids a path.
-
-    Read out of the same CLAUDE.md and AGENTS.md `rules.read` already parses,
-    so a repo that has told knos its rules has told the guard at the same
-    time and there is no second file to keep in step.
-    """
-    key = str(repo)
-    files = rule_files(repo)
-    now = (_stamp(_index(repo)), tuple(str(f) for f in files), _stamp(*files))
-    hit = _RULES_CACHE.get(key)
-    if hit is not None and hit[0] == now:
-        return hit[1]
-
-    out: list[tuple[str, str]] = []
-    for rule in rules.read(repo):
-        if not _NO.search(rule.text):
-            continue
-        for candidate in _PATH.findall(rule.text):
-            token = candidate.strip().lstrip("./")
-            if not token or not _LOOKS_LIKE_PATH.search(token):
-                continue
-            glob = token.rstrip("/") + "/*" if token.endswith("/") else token
-            out.append((glob, rule.where))
-    _RULES_CACHE[key] = (now, out)
-    return out
-
-
-def _forbidden(repo: Path, rel: str) -> tuple[str, str] | None:
-    for glob, where in path_rules(repo):
-        if fnmatch.fnmatch(rel, glob) or fnmatch.fnmatch(rel, f"*/{glob}"):
-            return glob, where
-    return None
-
+# ---- renames: a claimed file moved to a new name is still claimed -------------------
 
 def _moved(repo: Path) -> tuple[list[str], set[str], dict[str, str]]:
-    """What git says has been deleted, added, or renamed but not committed.
-
-    Returns (deleted tracked paths, untracked paths, {new: old} for renames
-    git has already spotted). Read once per check and only when a claim
-    exists, because this shells out.
-    """
+    """(deleted tracked paths, untracked paths, {new: old} renames git spotted), from `git status`."""
     try:
-        out = subprocess.run(
-            ["git", "status", "--porcelain", "--find-renames"],
-            cwd=repo, capture_output=True, text=True, timeout=10, check=False,
-        ).stdout
+        # --untracked-files=all: a file moved into a brand-new folder must show up as that file, not as the folder
+        out = subprocess.run(["git", "status", "--porcelain", "--find-renames", "--untracked-files=all"], cwd=repo,
+                             capture_output=True,
+                             text=True, timeout=10, check=False).stdout
     except (OSError, subprocess.SubprocessError):
         return [], set(), {}
-
     gone: list[str] = []
     fresh: set[str] = set()
     renamed: dict[str, str] = {}
@@ -208,80 +96,70 @@ def _moved(repo: Path) -> tuple[list[str], set[str], dict[str, str]]:
     return gone, fresh, renamed
 
 
-def _moved_near(repo: Path, rel: str) -> tuple[list[str], set[str], dict[str, str]]:
-    """`_moved`, reused while nothing that could change it has moved.
-
-    Keyed on the index and on the directory holding the path being checked.
-    Moving a file into a directory updates that directory's mtime, so the one
-    check that must not be served stale - the edit that follows a rename -
-    always misses the cache.
-    """
-    where = (repo / rel).parent
-    key = (str(repo), str(where))
-    now = (_stamp(_index(repo)), _stamp(where), _stamp(repo))
-    hit = _MOVED_CACHE.get(key)
-    if hit is not None and hit[0] == now:
-        return hit[1]
-    got = _moved(repo)
-    _MOVED_CACHE[key] = (now, got)
-    return got
-
-
-def _flat(raw: bytes) -> bytes:
-    """Line endings removed from the comparison.
-
-    `git show` runs the smudge filters, so on a machine with autocrlf the
-    committed copy comes back with CRLF and the file on disk has LF, and two
-    identical files compare unequal. `cat-file` avoids the filter; flattening
-    as well means the check does not depend on which of them git applied.
-    """
-    return raw.replace(b"\r\n", b"\n")
-
-
 def _committed(repo: Path, rel: str) -> bytes | None:
-    """The bytes of `rel` as last committed, or None if git has no answer."""
     try:
-        done = subprocess.run(
-            ["git", "cat-file", "blob", f"HEAD:{rel}"],
-            cwd=repo, capture_output=True, timeout=10, check=False,
-        )
+        done = subprocess.run(["git", "cat-file", "blob", f"HEAD:{rel}"], cwd=repo, capture_output=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
-    return _flat(done.stdout) if done.returncode == 0 else None
+    return done.stdout.replace(b"\r\n", b"\n") if done.returncode == 0 else None
 
 
-def _renamed_out_of(repo: Path, topic: str, rel: str, moved) -> str | None:
-    """The claimed file `rel` used to be, if this really is a rename.
+def may_have_moved(repo: Path, claims) -> bool:
+    """Cheap test before asking git: could a claimed file have been moved away since it was claimed?
 
-    Two shapes. Git has already recognised the rename, in which case it says
-    so and is believed; or the working tree shows the old path deleted and a
-    new untracked file, which is what a plain `mv` leaves behind.
+    A literal claimed path that still exists was not moved. For a glob, a file moved out of a folder changes that
+    folder's modification time, so if no folder under the glob's literal prefix changed since the claim was taken,
+    nothing left it. Anything unsure answers True and git decides."""
+    for claim in claims:
+        try:
+            since = datetime.fromisoformat(claim.taken_at.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return True
+        for g in claim.globs:
+            literal = not re.search(r"[*?\[]", g)
+            if literal and not (repo / g).exists():
+                return True
+            if literal and not (repo / g).is_dir():
+                continue  # a single file that is still there was not moved
+            if literal:
+                top = repo / g.rstrip("/")  # a folder claim covers everything under it: watch the folder
+            else:
+                prefix = re.split(r"[*?\[]", g, 1)[0].rsplit("/", 1)[0] if "/" in g else ""
+                top = repo / prefix if prefix else repo
+            if not top.is_dir():
+                return True
+            seen = 0
+            for root, dirs, _files in os.walk(top):
+                dirs[:] = [d for d in dirs if d not in (".git", "node_modules", ".venv", "__pycache__")]
+                seen += 1
+                if seen > 2000:
+                    return True
+                try:
+                    if os.stat(root).st_mtime > since - 1:
+                        return True
+                except OSError:
+                    return True
+    return False
 
-    The second shape needs evidence, not a guess. Treating every new file as
-    the destination of a missing one refuses honest work with a sentence that
-    is not true - "notes.md is risk_guard.py renamed" - and a guard that
-    misdescribes what it is looking at is worse than one that lets an edit
-    through. So the bytes have to match what was committed. The hook runs
-    before the edit, so at this moment a moved file is still byte-identical.
-    """
-    gone, fresh, renamed = moved
 
+def renamed_from(repo: Path, rel: str, is_claimed) -> str | None:
+    """The claimed path `rel` used to be, when this is really a rename (git says so, or the bytes are identical)."""
+    gone, fresh, renamed = _moved(repo)
     was = renamed.get(rel)
-    if was is not None and answer.same_subject(topic, _subject(was)):
+    if was is not None and is_claimed(was):
         return was
-
     if rel not in fresh:
         return None
     here = None
     for old in gone:
-        if not answer.same_subject(topic, _subject(old)):
+        if not is_claimed(old):
             continue
         before = _committed(repo, old)
         if before is None:
             continue
         if here is None:
             try:
-                here = _flat((repo / rel).read_bytes())
+                here = (repo / rel).read_bytes().replace(b"\r\n", b"\n")
             except OSError:
                 return None
         if here == before:
@@ -289,161 +167,120 @@ def _renamed_out_of(repo: Path, topic: str, rel: str, moved) -> str | None:
     return None
 
 
-def _who_has_it(holder: str) -> str:
-    """Who is on this work, in words that fit whoever is being told.
+# ---- the decision ---------------------------------------------------------------
 
-    A person can claim at the terminal, and `knos claim` writes that claim
-    under the name "you". Dropped into a sentence built for an agent's name
-    it came out as "which you claimed and is working on now. Ask them" -
-    wrong person, wrong verb, and told to go and ask themselves, in the one
-    line a viewer reads when the edit is refused. The withhold has always
-    had this branch; the guard did not.
-    """
-    if holder == "you":
-        return "which you claimed and are working on now"
-    return f"which {holder} claimed and is working on now"
+def _since(ts: str) -> str:
+    try:
+        t = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+        return t.strftime("%H:%M")
+    except ValueError:
+        return "earlier"
 
 
-def _what_to_do(holder: str) -> str:
-    """The way out of the refusal, addressed to whoever hit it."""
-    if holder == "you":
-        return "Finish it, or `knos done` to give it back."
-    return "Ask them, or take something else."
+def refusal(rel: str, claim, was: str | None = None) -> str:
+    """The one line an agent (and the person watching) reads."""
+    what = f"{rel} (renamed from {was})" if was else rel
+    left = max(1, round(claim.minutes_left))
+    return (f"knos: {what} is claimed by {claim.label} since {_since(claim.taken_at)} ({claim.description}). "
+            f"Ask them, or take other work; the claim lapses in {left} min. A person can release it: knos done --all")
 
 
-def check(repo: Path, target: str, who: str) -> Verdict:
-    """Whether `who` may edit `target` in `repo`, and why not if not."""
+def check(repo: Path, target: str, who: Agent | str) -> Verdict:
+    """Whether `who` may edit `target` in `repo`, and the one-line reason if not."""
+    from .claims import Claims, claims_db
+
+    agent = _as_agent(who)
     repo = Path(repo).resolve()
     try:
         rel = Path(target).resolve().relative_to(repo).as_posix()
     except (ValueError, OSError):
-        # Outside the repo entirely. Knos has nothing recorded about it and
-        # refusing on no evidence is the failure mode this whole module has
-        # to avoid.
-        return Verdict(True)
-
-    hit = _forbidden(repo, rel)
-    if hit:
-        glob, where = hit
-        return Verdict(
-            False,
-            f"{rel} is off limits: this repo's own rule at {where} says not to "
-            f"touch {glob}. If the rule is wrong, change the rule.",
-        )
-
-    subject = _subject(rel)
+        return Verdict(True)  # outside the repo: nothing recorded, nothing to refuse
+    if not claims_db(repo).exists() and not (paths.home() / "team.json").exists():
+        return Verdict(True)  # no local claims and no team server: nothing can be held
     try:
-        moved = None  # read from git lazily, and only once
-        with Memory(repo) as mem:
-            for work in mem.claims():
-                topic = str(work.get("topic", ""))
-                holder = str(work.get("who", "")) or "another agent"
-                if not topic or holder == who:
-                    continue
-                if not answer.same_subject(topic, subject):
-                    # The name does not match, but a claimed file may have
-                    # been renamed to this one. Refusing the old name and
-                    # allowing the new one is not a refusal at all.
-                    if moved is None:
-                        moved = _moved_near(repo, rel)
-                    was = _renamed_out_of(repo, topic, rel, moved)
-                    if was is None:
-                        continue
-                    return Verdict(
-                        False,
-                        f"{rel} is {was} renamed, and {was} is part of {topic}, "
-                        f"{_who_has_it(holder)}. Renaming a file does not "
-                        f"release the claim on it. "
-                        f"{_what_to_do(holder)}",
-                    )
-                lapses = work.get("holds")
-                try:
-                    lapses = int(lapses)
-                except (TypeError, ValueError):
-                    lapses = 30
-                return Verdict(
-                    False,
-                    f"{rel} is part of {topic}, {_who_has_it(holder)}. "
-                    f"{_what_to_do(holder)} This claim lapses on its own "
-                    f"{lapses} minutes after it was taken, and `knos done` "
-                    f"gives it back sooner.",
-                )
-
-            # A claim is about who is moving. This is about what was settled
-            # and then reversed: work reasoned from a decision somebody has
-            # since changed is exactly the work nobody thinks to revisit, so
-            # the edit is held until someone says they have looked.
-            from . import decide
-
-            found = decide.is_suspect(mem, subject)
-            if found is not None:
-                return Verdict(False, decide.refusal(found))
-    except Exception:
-        # A store that cannot be read must not become a wall between an agent
-        # and its own repo. Silence here is a decision: the guard is a
-        # refinement on top of the claim, never a gate in front of the disk.
+        with Claims(repo) as c:
+            live = [x for x in c.live() if not x.advisory and not x.held_by(agent)]
+            if not live:
+                return Verdict(True)
+            for claim in live:
+                if claim.covers(rel):
+                    c.note_block(agent, rel, claim)
+                    return Verdict(False, refusal(rel, claim))
+            if not may_have_moved(repo, live):
+                return Verdict(True)
+            was = renamed_from(repo, rel, lambda p: any(x.covers(p) for x in live))
+            if was is not None:
+                claim = next(x for x in live if x.covers(was))
+                c.note_block(agent, rel, claim)
+                return Verdict(False, refusal(rel, claim, was))
+    except Exception as exc:
+        log(f"guard allowed {rel}: {type(exc).__name__}: {exc}")
         return Verdict(True)
-
     return Verdict(True)
 
 
-# --- talking to each client -------------------------------------------------
+# ---- talking to each client ------------------------------------------------------------
+
+EDIT_TOOLS = {"edit", "write", "multiedit", "notebookedit", "str_replace_editor", "apply_patch", "edit_file", "write_file"}
 
 
 def target_of(client: str, event: dict) -> str:
-    """The path a hook payload is about, or "" when it is about nothing."""
+    """The path an edit hook payload is about, or "" when it is not an edit."""
     if client == "claude":
         got = event.get("tool_input") or {}
         return str(got.get("file_path") or got.get("notebook_path") or "")
     if client == "cursor":
+        tool = str(event.get("tool_name") or "").lower().replace(" ", "_")
+        if tool and not any(t in tool for t in ("edit", "write", "patch", "create", "replace")):
+            return ""  # reads and searches are never guarded
         if event.get("file_path"):
             return str(event["file_path"])
         got = event.get("tool_input") or event.get("arguments") or {}
-        return str(got.get("file_path") or got.get("path") or "")
+        return str(got.get("file_path") or got.get("path") or got.get("target_file") or "")
     got = event.get("args") or event.get("tool_input") or {}
     return str(got.get("filePath") or got.get("file_path") or got.get("path") or "")
 
 
 def render(client: str, verdict: Verdict) -> str:
-    """The refusal in the shape this client reads."""
     if verdict.allow:
         return ""
     if client == "claude":
-        return json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": verdict.reason,
-                }
-            }
-        )
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                  "permissionDecisionReason": verdict.reason}})
     if client == "cursor":
-        return json.dumps(
-            {
-                "permission": "deny",
-                "user_message": verdict.reason,
-                "agent_message": verdict.reason,
-            }
-        )
+        return json.dumps({"permission": "deny", "user_message": verdict.reason, "agent_message": verdict.reason})
     return json.dumps({"deny": True, "reason": verdict.reason})
 
 
 def decide(client: str, event: dict, repo: Path | None = None) -> Verdict:
-    """One hook call, start to finish."""
+    from . import identity
+
     target = target_of(client, event)
     if not target:
         return Verdict(True)
     root = Path(repo or event.get("cwd") or Path.cwd())
-    # The payload names the directory the client is in, which inside a repo
-    # is often a subdirectory. The claim is kept against the repo, so walk up
-    # to it; `repo_here` returns None when there is no repo above us, and
-    # then there is nothing recorded to refuse on anyway.
     found = paths.repo_here(root)
     if found is not None:
         root = found
-    who = str(event.get("agent_type") or event.get("session_id") or client)
-    return check(root, target, who)
+    if not Path(target).is_absolute():
+        target = str(root / target)
+    capped = _over_budget(root)
+    if capped:
+        return Verdict(False, capped)
+    return check(root, target, identity.for_hook(client, event))
+
+
+def _over_budget(repo: Path | None = None) -> str | None:
+    """Knos Pro's spend cap, when one is set: a one-line refusal once it is reached. No cap, no cost (one stat)."""
+    home = paths.home()
+    mine, team = (home / "budget.json").exists(), (home / "team.json").exists()
+    if not mine and not team:
+        return None
+    try:
+        from .pro import budget
+    except ImportError:
+        return None
+    return (budget.refusal(repo) if mine else None) or (budget.team_refusal(budget.CHECK_EVERY) if team else None)
 
 
 def run(client: str, stdin_text: str) -> tuple[str, int]:
@@ -451,33 +288,51 @@ def run(client: str, stdin_text: str) -> tuple[str, int]:
     try:
         event = json.loads(stdin_text or "{}")
     except ValueError:
+        log(f"guard ({client}): unreadable payload, allowed")
         return "", ALLOW
     if not isinstance(event, dict):
         return "", ALLOW
-    verdict = decide(client, event)
+    try:
+        verdict = decide(client, event)
+    except Exception as exc:
+        log(f"guard ({client}) allowed: {type(exc).__name__}: {exc}")
+        return "", ALLOW
     return render(client, verdict), verdict.code
 
 
-# --- installing and removing ------------------------------------------------
+# ---- installing and removing ---------------------------------------------------------
+
+MARK = "knos-guard"
 
 
-def _knos_cmd() -> list[str]:
-    """How a hook should call knos back.
+def _script() -> str | None:
+    from .init import own_script
 
-    The interpreter is spelled out because a hook runs with the client's
-    environment, not the shell that installed it, and `python` there may be
-    a different one or none at all.
+    return own_script() or shutil.which("knos")
 
-    Forward slashes, and quoted. Every client runs this string through a
-    shell, and on Windows that shell is usually bash, which eats the
-    backslashes: the interpreter path arrived with every separator gone,
-    the hook failed to start, that failure was non-blocking, and so every
-    edit went through unguarded while `knos guard` still reported itself
-    installed. Windows accepts forward slashes everywhere, and the quotes
-    cover the spaces in a path like `C:/Program Files`.
-    """
-    exe = sys.executable.replace('\\', "/")
-    return [f'"{exe}"', "-m", "knos.guard_hook"]
+
+def knos_cmd() -> list[str]:
+    """How a hook calls knos: the `knos` script installed with the knos that ran `knos init` (a stale copy earlier on
+    PATH is not used), by absolute path, quoted with forward slashes (a Windows path through bash loses its
+    backslashes). Without a script, this interpreter with -m."""
+    exe = _script()
+    if exe:
+        return [f'"{exe.replace(os.sep, "/")}"']
+    return [f'"{sys.executable.replace(os.sep, "/")}"', "-m", "knos"]
+
+
+def knos_cmd_argv() -> list[str]:
+    """knos_cmd for subprocess (no shell quoting)."""
+    exe = _script()
+    return [exe] if exe else [sys.executable, "-m", "knos"]
+
+
+def _knos_cmd() -> list[str]:  # kept for callers from 0.1
+    return knos_cmd()
+
+
+def hook_cmd(kind: str, client: str) -> str:
+    return " ".join(knos_cmd() + ["hook", kind, "--client", client])
 
 
 def claude_settings() -> Path:
@@ -494,22 +349,28 @@ def opencode_plugin() -> Path:
     return root / "opencode" / "plugin" / "knos-guard.js"
 
 
-def _backup(path: Path) -> Path | None:
-    if not path.exists():
-        return None
-    keep = path.with_name(path.name + ".before-knos")
-    shutil.copy2(path, keep)
-    return keep
+class Unreadable(Exception):
+    """A settings file that is not JSON knos understands. It is left exactly as it is, never overwritten."""
 
 
 def _load(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        got = json.loads(path.read_text(encoding="utf-8") or "{}")
-    except ValueError:
+        got = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+    except (ValueError, OSError) as why:
+        raise Unreadable(f"{path} is not readable JSON, so knos left it alone") from why
+    if not isinstance(got, dict):
+        raise Unreadable(f"{path} is not a JSON object, so knos left it alone")
+    return got
+
+
+def _peek(path: Path) -> dict:
+    """_load for reading only: an unreadable file reads as empty."""
+    try:
+        return _load(path)
+    except Unreadable:
         return {}
-    return got if isinstance(got, dict) else {}
 
 
 def _save(path: Path, data: dict) -> None:
@@ -517,50 +378,45 @@ def _save(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-MARK = "knos-guard"
-
-
 def install_claude() -> Path:
+    """PreToolUse on edits -> the guard; SessionStart -> the notice (and the session record identity needs)."""
     path = claude_settings()
-    _backup(path)
     data = _load(path)
     hooks = data.setdefault("hooks", {})
-    entries = [h for h in hooks.get("PreToolUse", []) if MARK not in json.dumps(h)]
-    entries.append(
-        {
-            "matcher": "Edit|Write|NotebookEdit",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": " ".join(_knos_cmd() + ["--client", "claude", f"#{MARK}"]),
-                }
-            ],
-        }
-    )
-    hooks["PreToolUse"] = entries
+    if not isinstance(hooks, dict):
+        hooks = data["hooks"] = {}
+    pre = [h for h in (hooks.get("PreToolUse") or []) if MARK not in json.dumps(h)]
+    pre.append({"matcher": "Edit|Write|MultiEdit|NotebookEdit",
+                "hooks": [{"type": "command", "command": hook_cmd("guard", "claude") + f" #{MARK}"}]})
+    hooks["PreToolUse"] = pre
+    start = [h for h in (hooks.get("SessionStart") or []) if MARK not in json.dumps(h)]
+    start.append({"hooks": [{"type": "command", "command": hook_cmd("start", "claude") + f" #{MARK}"}]})
+    hooks["SessionStart"] = start
     _save(path, data)
     return path
 
 
 def install_cursor() -> Path:
     path = cursor_hooks()
-    _backup(path)
     data = _load(path)
     data.setdefault("version", 1)
     hooks = data.setdefault("hooks", {})
-    for event in ("preToolUse", "beforeReadFile"):
-        kept = [h for h in hooks.get(event, []) if MARK not in json.dumps(h)]
-        kept.append(
-            {"command": " ".join(_knos_cmd() + ["--client", "cursor", f"#{MARK}"])}
-        )
-        hooks[event] = kept
+    if not isinstance(hooks, dict):
+        hooks = data["hooks"] = {}
+    for event in ("preToolUse", "beforeReadFile"):   # beforeReadFile only to remove what 0.1 put there
+        kept = [h for h in (hooks.get(event) or []) if MARK not in json.dumps(h)]
+        if event == "preToolUse":
+            kept.append({"command": hook_cmd("guard", "cursor") + f" #{MARK}"})
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
     _save(path, data)
     return path
 
 
-_OPENCODE_JS = """// knos-guard - installed by `knos guard --install`, removed by --uninstall.
-// Refuses an edit to work another agent has claimed, or to a path this repo's
-// own CLAUDE.md / AGENTS.md forbids. Remove this file and nothing else changes.
+_OPENCODE_JS = """// knos-guard - installed by `knos init`, removed by `knos init --undo`.
+// Refuses an edit to files another agent has claimed. Remove this file and nothing else changes.
 export const KnosGuard = async ({{ $ }}) => ({{
   "tool.execute.before": async (input, output) => {{
     const name = String(input?.tool ?? "");
@@ -569,7 +425,7 @@ export const KnosGuard = async ({{ $ }}) => ({{
     const done = await ${quoted}.catch((e) => e);
     if ((done?.exitCode ?? 0) === 2) {{
       const said = String(done?.stdout ?? "");
-      let why = "knos: this work is claimed by another agent.";
+      let why = "knos: another agent has claimed this file.";
       try {{ why = JSON.parse(said).reason || why; }} catch {{}}
       throw new Error(why);
     }}
@@ -580,38 +436,38 @@ export const KnosGuard = async ({{ $ }}) => ({{
 
 def install_opencode() -> Path:
     path = opencode_plugin()
-    _backup(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    argv = " ".join(_knos_cmd() + ["--client", "opencode"])
-    quoted = "`echo ${payload} | " + argv + "`"
+    quoted = "`echo ${payload} | " + hook_cmd("guard", "opencode") + "`"
     path.write_text(_OPENCODE_JS.format(quoted=quoted), encoding="utf-8")
     return path
 
 
 def uninstall_claude() -> bool:
     path = claude_settings()
-    data = _load(path)
+    data = _peek(path)
     hooks = data.get("hooks") or {}
-    before = json.dumps(hooks.get("PreToolUse", []))
-    if MARK not in before:
-        return False
-    hooks["PreToolUse"] = [
-        h for h in hooks.get("PreToolUse", []) if MARK not in json.dumps(h)
-    ]
-    if not hooks["PreToolUse"]:
-        hooks.pop("PreToolUse")
-    _save(path, data)
-    return True
+    took = False
+    for event in ("PreToolUse", "SessionStart"):
+        kept = [h for h in (hooks.get(event) or []) if MARK not in json.dumps(h)]
+        if len(kept) != len(hooks.get(event) or []):
+            took = True
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
+    if took:
+        _save(path, data)
+    return took
 
 
 def uninstall_cursor() -> bool:
     path = cursor_hooks()
-    data = _load(path)
+    data = _peek(path)
     hooks = data.get("hooks") or {}
     took = False
     for event in ("preToolUse", "beforeReadFile"):
-        kept = [h for h in hooks.get(event, []) if MARK not in json.dumps(h)]
-        if len(kept) != len(hooks.get(event, [])):
+        kept = [h for h in (hooks.get(event) or []) if MARK not in json.dumps(h)]
+        if len(kept) != len(hooks.get(event) or []):
             took = True
         if kept:
             hooks[event] = kept
@@ -631,11 +487,6 @@ def uninstall_opencode() -> bool:
 
 
 def installed() -> dict[str, bool]:
-    """Which clients currently have the guard wired, asked of the files."""
-    claude = MARK in json.dumps((_load(claude_settings()).get("hooks") or {}))
-    cursor = MARK in json.dumps((_load(cursor_hooks()).get("hooks") or {}))
-    return {
-        "claude": claude,
-        "cursor": cursor,
-        "opencode": opencode_plugin().exists(),
-    }
+    return {"claude": MARK in json.dumps(_peek(claude_settings()).get("hooks") or {}),
+            "cursor": MARK in json.dumps(_peek(cursor_hooks()).get("hooks") or {}),
+            "opencode": opencode_plugin().exists()}

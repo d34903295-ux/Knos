@@ -50,6 +50,9 @@ def _safe(repo: Path, text: str, about: str) -> bool:
     same check an agent's query goes through, so a note about `.env` is no
     more shareable than the file itself.
     """
+    # A note that quotes a key goes nowhere near a file the team commits: once in git history it is out for good.
+    if private._quotes_a_secret({"text": f"{about} {text}"}):
+        return False
     for token in (about, text):
         for word in str(token).split():
             # Strip quotes and trailing punctuation only. Stripping "." from
@@ -91,7 +94,13 @@ def export(repo: Path, mem: Any) -> tuple[str, int, int]:
         for n in mem.notes()
         if str(n.get("note", "")).strip() and _safe(repo, n.get("note", ""), n.get("about", ""))
     ]
-    claims = [c for c in mem.claims() if str(c.get("topic", "")).strip()]
+    from .claims import Claims, claims_db
+
+    claims: list[dict[str, Any]] = []
+    if claims_db(repo).exists():
+        with Claims(repo) as held:
+            claims = [{"topic": c.description or ", ".join(c.globs), "who": c.label, "when": c.taken_at,
+                       "globs": list(c.globs)} for c in held.live()]
 
     out = [HEADER]
     out.append("\n## Decisions\n")
@@ -108,13 +117,14 @@ def export(repo: Path, mem: Any) -> tuple[str, int, int]:
     out.append("\n## Being worked on right now\n")
     if claims:
         out.append(
-            "An agent reading this should ask the person named before changing"
-            " these, and CI will say so on a pull request that touches them.\n"
+            "An agent reading this should ask the agent named before changing"
+            " these files.\n"
         )
         for c in claims:
             who = str(c.get("who", "")) or "someone"
             when = str(c.get("when", ""))[:16].replace("T", " ")
-            out.append(f"- `{str(c.get('topic', '')).strip()}` — held by **{who}** since {when} UTC")
+            files = ", ".join(c.get("globs") or []) or "advisory"
+            out.append(f"- `{str(c.get('topic', '')).strip()}` — held by **{who}** since {when} UTC ({files})")
     else:
         out.append("_Nothing claimed._")
 

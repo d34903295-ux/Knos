@@ -12,6 +12,7 @@ process per query, and nothing left running between commands.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -87,7 +88,10 @@ class Symbol:
         return f"{self.path}:{self.line}" if self.line else self.path
 
 
-def binary() -> str:
+@functools.lru_cache(maxsize=1)
+def _find_binary() -> str | None:
+    """Looked up once per process: a PATH scan stats every PATH folder, and under WSL the Windows folders on PATH
+    make each scan cost ~100 ms, which was most of a search's time."""
     found = shutil.which(BINARY)
     if found:
         return found
@@ -99,6 +103,13 @@ def binary() -> str:
     for g in guesses:
         if g.exists():
             return str(g)
+    return None
+
+
+def binary() -> str:
+    found = _find_binary()
+    if found:
+        return found
     raise CodeUnavailable(
         "ctags is not installed.\n" "Install it:  https://github.com/universal-ctags/ctags"
     )
@@ -363,8 +374,9 @@ def _count(tags: Path) -> int:
         return sum(1 for line in handle if not line.startswith("!_TAG_"))
 
 
+@functools.lru_cache(maxsize=1)
 def readtags() -> str | None:
-    """ctags ships a query tool beside itself. Use it if it is there."""
+    """ctags ships a query tool beside itself. Use it if it is there. Looked up once per process."""
     found = shutil.which("readtags")
     if found:
         return found

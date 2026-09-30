@@ -43,8 +43,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if out:
-        sys.stdout.write(out)
-        sys.stdout.flush()
+        try:
+            sys.stdout.write(out)
+            sys.stdout.flush()
+        except (OSError, ValueError, UnicodeError):
+            # a closed pipe or a console code page that cannot encode a quoted path must not turn into a
+            # traceback and a nonzero exit; the refusal (exit 2) or the allow (exit 0) still stands
+            pass
     return code
 
 

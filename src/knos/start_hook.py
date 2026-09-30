@@ -1,108 +1,103 @@
 """What every agent is told at the start of a session, before it asks anything.
 
-Knos has always been able to answer "who is on what" - but only when an agent
-chose to call a tool. An agent that never calls `search` never learns that
-somebody else is mid-change on the file it is about to open, and the first
-thing it does is the collision this product exists to prevent.
+A `SessionStart` hook runs once when a session opens. It does two things:
 
-A `SessionStart` hook closes that. It runs once when a session opens, prints
-the live claims and the most recent decisions, and the client puts them in the
-session's own context. No tool call, no cooperation from the model, no
-prompting the person to remember to ask.
+  - it records the host's `session_id` against the host process (`claims.Claims.record_session`), which is how the
+    MCP server that host starts learns which session it serves (`identity.py`);
+  - it prints the live claims and the most recent notes, which the host puts into the session's own context. It prints
+    nothing when there is nothing claimed and nothing written down.
 
-Deliberately small, and deliberately quiet:
-
-  - it prints nothing at all when nothing is claimed and nothing was decided,
-    because a hook that speaks every time teaches people to ignore it
-  - it never fails a session: any error exits 0 with no output, the same rule
-    `guard_hook` follows, because a broken install must not sit between an
-    agent and its own repository
-  - it imports the store and nothing else - no Typer, no rich - since this is
-    on the path of opening a session
-
-What it is not: it does not claim anything, write anything, or change what the
-agent may do. It is the notice board, read aloud once on the way in.
+It never fails a session: any error exits 0, writes one line to ~/.knos/hook.log and prints nothing. It imports only
+the store, since it is on the path of opening every session.
 """
 
 from __future__ import annotations
 
+import json
 import sys
+from pathlib import Path
 
-# Enough to be useful at a glance, few enough that nobody scrolls past it.
 CLAIMS = 6
 DECISIONS = 3
 
 
+def _payload() -> dict:
+    """The hook's JSON input when a host sent one (Claude Code does); {} from a terminal."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        raw = sys.stdin.read()
+        got = json.loads(raw) if raw.strip() else {}
+        return got if isinstance(got, dict) else {}
+    except Exception:
+        return {}
+
+
 def _lines(repo) -> list[str]:
-    """The notice, or an empty list when there is nothing worth saying."""
-    from .memory import INTENT_HOLDS, Memory, _minutes_since
+    from .claims import Claims, claims_db
+    from .memory import Memory
 
     said: list[str] = []
-    with Memory(repo) as mem:
-        claims = mem.claims()[:CLAIMS]
-        if claims:
-            said.append("Work other agents are holding here right now:")
-            for one in claims:
-                who = str(one.get("who") or "somebody")
-                topic = str(one.get("topic") or "").strip()
-                # What is left, not what it started with. `holds` is the
-                # length the claim was written with, so printing it raw told
-                # an agent a claim taken twenty-five minutes ago still had
-                # thirty to run - in the one line somebody reads to decide
-                # whether waiting is worth it. The withhold has always
-                # subtracted the elapsed time; this now does too.
-                try:
-                    holds = int(one.get("holds", INTENT_HOLDS))
-                except (TypeError, ValueError):
-                    holds = INTENT_HOLDS
-                left = holds - _minutes_since(str(one.get("when", "")))
-                when = ""
-                if left == left and left > 0:  # not NaN, not already lapsed
-                    when = f", lapses in about {max(1, round(left))} min"
-                said.append(f"  - {topic} - {who}{when}")
+    if claims_db(repo).exists():
+        with Claims(repo) as c:
+            live = c.live()[:CLAIMS]
+        if live:
+            said.append("Files other agents are holding here right now:")
+            for one in live:
+                where = ", ".join(one.globs[:3]) or "(advisory, no files)"
+                said.append(f"  - {where}: {one.description} - {one.label}, lapses in about {max(1, round(one.minutes_left))} min")
             said.append("")
-            said.append(
-                "Before you change any of that, ask knos about it. If you take "
-                "something, say so with remember(claiming=true), and call "
-                "done(about) when you finish."
-            )
+            said.append("Editing a claimed file is refused by the knos guard. Claim what you are about to change with "
+                        "remember(claiming=true, paths=[...]) and call done() when you finish.")
 
-        # `notes()` returns rows keyed `note`, not `text`. Reading the wrong
-        # one filtered every note out and the decisions half printed nothing -
-        # the same trap `written_rules` fell into, where a bare `source` key
-        # lives inside `extra`. Both are read here.
-        def said_in(row: dict) -> str:
-            return " ".join(str(row.get("note") or row.get("text") or "").split())
+    def said_in(row: dict) -> str:
+        return " ".join(str(row.get("note") or row.get("text") or "").split())
 
+    from . import paths
+
+    notes = []
+    if paths.has_store(repo):  # never create a store from a hook
         try:
-            notes = [n for n in mem.notes() if said_in(n)]
+            with Memory(repo) as mem:
+                notes = [n for n in mem.notes() if said_in(n)]
         except Exception:
             notes = []
-        if notes:
-            if said:
-                said.append("")
-            said.append("Recently written down here:")
-            for note in notes[:DECISIONS]:
-                said.append(f"  - {said_in(note)[:160]}")
+    if notes:
+        if said:
+            said.append("")
+        said.append("Recently written down here:")
+        for note in notes[:DECISIONS]:
+            said.append(f"  - {said_in(note)[:160]}")
     return said
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Print the notice. Never fail the session."""
+    """Record the session, print the notice. Never fail the session."""
     try:
-        from . import paths
+        from . import identity, paths
+        from .claims import Claims
 
-        repo = paths.repo_here()
-        if repo is None or not paths.has_store(repo):
+        event = _payload()
+        client = "claude"
+        args = list(sys.argv[1:] if argv is None else argv)
+        if "--client" in args and args.index("--client") + 1 < len(args):
+            client = args[args.index("--client") + 1]
+        repo = paths.repo_here(Path(event["cwd"]) if event.get("cwd") else None)
+        if repo is None:
             return 0
-        said = _lines(repo)
-        if not said:
-            # Nothing claimed, nothing decided. Say nothing: a hook that
-            # speaks on every session is a hook people learn to skip.
-            return 0
-        sys.stdout.write("knos, this repo's shared memory:\n" + "\n".join(said) + "\n")
-    except Exception:
-        # A session must open whatever state knos is in.
+        agent = identity.for_hook(client, event)
+        if agent.session:
+            with Claims(repo) as c:
+                c.record_session(agent.host, agent.session, agent.anchor)
+        said = _lines(repo)  # claims live in claims.db, so they are told even before the repo's memory is read
+        if said:
+            sys.stdout.write("knos, this repo's shared memory:\n" + "\n".join(said) + "\n")
+    except Exception as exc:
+        try:
+            from .guard import log
+            log(f"session start: {type(exc).__name__}: {exc}")
+        except Exception:
+            pass
         return 0
     return 0
 

@@ -1,6 +1,60 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (October 2026)
+
+One product: shared memory, file claims and an edit guard for every coding agent on the machine, with Knos Pro for
+spend and payments. Built 29 Sep - Oct 2026 on top of 0.1.8.
+
+### Fixed (each has a regression test in `tests/test_v1_fixes.py`)
+1. `knos point` deleted the store (and left its -wal/-shm files). Reading is now incremental and never deletes. Starting
+   over is `knos reset --yes`, which backs up first.
+2. The guard could block the agent holding a claim: the MCP server and the hooks disagreed on who an agent was. One
+   identity now, (host, session), shared by MCP, hooks and CLI. The session hook records the session against the host
+   process, and the server finds that process on Windows, macOS and Linux.
+3. `done` released every claim in the repo. It releases only your own now; `knos done --all` asks first.
+4. Claims matched words, so "update the readme" blocked `scripts/update_deps.py`. Claims are now path globs taken in
+   one transaction (exactly one winner). A claim naming no resolvable file or symbol is advisory and never blocks.
+5. Answers about claimed work were withheld, and `about` leaked them anyway. Nothing is withheld now: answers are
+   annotated with who holds which files.
+6. The server answered from the last repo anybody pointed at. It answers for the repo it runs in, or says there is
+   none.
+7. `knos demo` crashed, and errors printed as tracebacks. The console script is `main()`, and every error is one line
+   with the fix.
+8. `knos remember` said "Noted" when a full store had written nothing. It says so and exits 1.
+9. `connect` crashed on some configs and pinned an interpreter path. `knos init` replaces it: it writes the `knos`
+   command, backs up every file, never overwrites a file it cannot parse, runs a self-test, and undoes byte for byte.
+10. Cursor's guard ran on reads. It guards edits only. The claim that "a pull request is told" is gone.
+
+Also fixed:
+- Cursor turns are dated when they were said, not by the database's mtime.
+- A session in a parent folder no longer leaks into a child repo.
+- Claude Code project folders with `.`, `_` or spaces in the path are found.
+- A re-taken claim no longer counts as a new one.
+- A search no longer rescans PATH for ctags each time; under WSL that was ~400 ms.
+
+### Added
+- `knos init [--undo] [--hosts]`, including Codex (`~/.codex/config.toml`).
+- Codex sessions are read into memory.
+- `knos claim -p`, `knos reset --yes`, `knos compact`, `knos board`, `knos bench`.
+- Knos Pro (`src/knos/pro/`, FSL-1.1-MIT):
+  - the spend meter (`knos spend`, from Claude Code and Codex logs);
+  - one cap across tokens and agent payments (`knos budget`), enforced by the edit guard;
+  - `knos pro buy` with Solana Pay (USDC) or Tempo (`transferWithMemo`), verified on chain;
+  - signed licence codes;
+  - agent budget wallets (`knos budget fund/agents/sweep`);
+  - agents paying APIs over MPP (Tempo) and x402 (Solana) with `knos pay` and the `pay` tool.
+- Knos Team: `knos serve`, a self-hosted server for claims, notes and one pooled spend cap across machines, joined with
+  `knos init --remote`.
+  - Seat tokens are stored as hashes.
+  - Host names are checked against an allow-list, and it binds to loopback by default.
+  - Every error comes back as JSON.
+  - Machines fail open when the server is unreachable.
+
+### Removed
+The plane (gateway, control plane, on-chain program and TypeScript agents), withholding, overrides and stand-downs,
+`knos changed/reconsider/held/at/verify/why/receipts`, the GitHub Action, and the Knos-own store: Sibyl is the only
+memory store.
+## 0.1.x (unreleased notes kept for history)
 
 The length of a claim is learned. Every hold used to be thirty minutes,
 whoever made it, which is wrong in both directions: an agent that closes its

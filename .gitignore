@@ -7,18 +7,17 @@ dist/
 build/
 .pytest_cache/
 
-# knos's own data, and the keys it made. Neither belongs to anyone else.
-# `decisions.md` is the exception: it is what `knos export` writes for the
-# repository to carry, and the Action reads it out of the checkout, so it has
-# to be committed. Nothing else under .knos/ is shareable.
+# Knos's own data lives in ~/.knos, never in a repo. `knos export` writes .knos/decisions.md for a repo that wants
+# to carry its decisions; nothing else under .knos/ is shareable.
 .knos/*
 !.knos/decisions.md
+
+# Secrets and keys, in case one ever lands here
 .knos-keys/
+.knos-admin/
+*.keypair.json
 *.keystore
 keystore/
-access.json
-
-# Secrets, in case one ever lands here
 .env
 .env.*
 *.pem
@@ -27,18 +26,5 @@ id_rsa*
 .npmrc
 .pypirc
 
-# Machine-specific agent config. `knos connect` prints the right one for
-# whoever cloned this, so a copy of mine is worse than none.
+# Machine-specific agent config: `knos init` writes the right one for whoever cloned this
 .mcp.json
-
-# Node
-node_modules/
-agent/node_modules/
-
-# Foundry: build output, and dependencies that `forge install` fetches
-contracts/out/
-contracts/cache/
-contracts/broadcast/
-contracts/lib/
-knos.mcpb
-

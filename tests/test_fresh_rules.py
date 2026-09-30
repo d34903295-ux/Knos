@@ -14,6 +14,9 @@ file still says it, and cited at the line the file says it now.
 The middle case is the one worth keeping tests on. A rule that has simply
 moved down the file is still true, and refusing it would be as wrong as
 serving it with the old line number.
+
+0.2.0: `worth.tally` takes the repo as well as the store, and a withdrawn rule is reported as "no longer served".
+Nothing dropped.
 """
 
 from __future__ import annotations
@@ -184,10 +187,32 @@ def test_worth_counts_a_withdrawn_rule(repo: Path) -> None:
     _ask(repo)
 
     with Memory(repo) as mem:
-        got = worth.tally(mem)
+        got = worth.tally(repo, mem)
 
     assert got["withdrawn"] == 1
-    assert "deleted after knos read it" in worth.sentence(got)
+    assert got["claimed"] == 0
+    said = worth.sentence(got)
+    assert said.startswith("One rule this repo's instruction files stopped carrying is no longer served."), said
+    assert "Nothing has been claimed here yet" in said
+
+
+def test_worth_counts_each_withdrawn_rule_once(tmp_path: Path) -> None:
+    """Two rules dropped, however often they are asked about, is two."""
+    repo = _repo(
+        tmp_path,
+        f"# Working here\n\n{RULE}\n\n## Deploys\nNever deploy on a Friday afternoon.\n\n{STYLE}\n",
+    )
+    _read(repo)
+    (repo / "CLAUDE.md").write_text(f"# Working here\n\n{STYLE}\n", encoding="utf-8")
+    for _ in range(2):
+        _ask(repo)
+        _ask(repo, "can we deploy on a Friday afternoon")
+
+    with Memory(repo) as mem:
+        got = worth.tally(repo, mem)
+
+    assert got["withdrawn"] == 2, got
+    assert "2 rules this repo's instruction files stopped carrying are no longer served" in worth.sentence(got)
 
 
 def test_the_journal_still_has_the_rule_that_was_withdrawn(repo: Path) -> None:

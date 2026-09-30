@@ -212,15 +212,53 @@ def visible(
     """
     if identity == OWNER:
         return records
-    kept = [r for r in records if not is_private(repo, r.get("path") or "")]
+    # A path rule cannot see a secret that lives in words: a key pasted into a chat turns up in a session fact
+    # or a commit message with no private path at all. Such a record is dropped for agents the same silent way.
+    kept = [r for r in records if not is_private(repo, r.get("path") or "") and not _quotes_a_secret(r)]
     if identity != GUEST:
         return kept
-    folders = [f.strip("./") for f in (allowed or [])]
+    folders = [_rel(f) for f in (allowed or [])]
     return [r for r in kept if _under_any(str(r.get("path") or ""), folders)]
+
+
+_SECRET_TEXT: Any = None
+
+
+def _quotes_a_secret(record: dict) -> bool:
+    """Whether a record's own words carry a key, a token or a private key block."""
+    global _SECRET_TEXT
+    if _SECRET_TEXT is None:
+        # well-known credential shapes; compiled once, no socket involved
+        _SECRET_TEXT = re.compile("|".join(f"(?:{p})" for _, p in SECRET_PATTERNS))
+    text = " ".join(str(record.get(k) or "") for k in ("text", "note", "evaluated"))
+    return bool(text) and _SECRET_TEXT.search(text) is not None
+
+
+SECRET_PATTERNS = (
+    ('private-key', r'-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----'),
+    ('aws-access-key', r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'),
+    ('github-token', r'\bgh[pousr]_[A-Za-z0-9]{36,}\b'),
+    ('anthropic-key', r'\bsk-ant-api\d{2}-[A-Za-z0-9_\-]{20,}'),
+    ('openai-key', r'\bsk-(?:proj-)?[A-Za-z0-9_\-]{32,}'),
+    ('slack-token', r'\bxox[baprs]-[A-Za-z0-9-]{10,}'),
+    ('stripe-live-key', r'\b(?:sk|rk)_live_[A-Za-z0-9]{20,}'),
+    ('google-api-key', r'\bAIza[0-9A-Za-z_\-]{35}\b'),
+)
+
+
+def _rel(path: str) -> str:
+    """A repo-relative posix path: separators unified, a leading ``./`` removed (a prefix, not the characters,
+    so ``.github`` stays ``.github``), trailing slash dropped."""
+    out = path.replace("\\", "/")
+    while out.startswith("./"):
+        out = out[2:]
+    return out.rstrip("/")
 
 
 def _under_any(path: str, folders: list[str]) -> bool:
     if not path or not folders:
         return False
-    path = path.replace("\\", "/").strip("./")
-    return any(path == f or path.startswith(f.rstrip("/") + "/") for f in folders)
+    path = _rel(path)
+    if ".." in path.split("/"):
+        return False                     # a path that climbs out of a shared folder is never inside it
+    return any(f and (path == f or path.startswith(f + "/")) for f in folders)

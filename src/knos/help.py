@@ -1,296 +1,167 @@
-"""What a person sees when they do not know what to type.
-
-One screen. Twenty-four lines or fewer, eighty columns or narrower, and no
-word that a developer would have to look up. There is no mention of MCP,
-tiers, indexes, graphs or servers, because none of that is something the
-person asking for help needs to do.
-"""
+"""What a person sees when they do not know what to type. One screen, 80 columns."""
 
 from __future__ import annotations
 
-MAIN = """  knos — one local memory every coding agent on this machine shares,
-         and it knows which of them is in your code right now
+MAIN = """  knos - one local memory every coding agent on this machine shares,
+         and the list of which files each of them is changing right now
 
-  Setup was one line:  pip install knos && knos connect
-  Claude Code needs no restart; Claude Desktop and Cursor read their
-  settings at startup, so restart those. Nothing leaves this machine.
+  Once:
+      knos init                  wire Claude Code, Codex, Cursor, OpenCode
+      knos demo                  the whole product on a throwaway repo
 
-  Four things you might type:
-
-      knos ask "what are the rules here?"
-      knos claim "the parser"    your agents are refused until: knos done
-      knos status                what it read, and who is holding what
-      knos worth                 what it has actually done here
+  Every day (mostly your agents do this for you):
+      knos ask "why did we drop redis?"
+      knos claim "the parser" -p src/parser/**    other agents' edits refused
+      knos done                  give your claims back
+      knos status                what it holds, who is working where
+      knos board                 the same, live, in your browser
 
   More
       knos remember, notes, forget    things you tell your agents
-      knos private                    keep a path from them
-      knos point .                    re-read after a lot of changes
-      knos receipts, verify           the on-chain claims; the record
-      knos help <cmd>                 more about one command
-
-  While one agent is mid-change, the others are told, and knos holds
-  back what it knows. A CLAUDE.md cannot do that: a file has no idea
-  who is reading it, or when."""
+      knos private <path>             keep a path from your agents
+      knos point, compact             catch up now; make room in memory
+      knos worth, bench               what it has done; measure it
+      knos spend, report, budget      Pro: spend, one cap across agents
+      knos pay, pro                   Pro: agent wallets; buy or check Pro
+      knos serve                      Team: share claims across machines
+      knos help <cmd>                 more about one command"""
 
 
 PER_COMMAND = {
-    "point": """\
-  knos point .           re-read the repo, and read its code structure
-  knos point ~/work/api  read another one
+    "init": """\
+  knos init                  add knos to every agent found on this machine
+  knos init --hosts claude,cursor
+  knos init --undo           take out everything it added
+  knos init --print          show what it would write, change nothing
 
-  It reads three things: what past agent sessions said, what your commits
-  say, and how the code is put together. Secrets are left out.
-
-  Run it again whenever you want it to catch up: it re-reads from scratch,
-  so twice in a row is the same as once. It never runs on its own.""",
+  Writes the memory server (MCP) into each agent's config, and for Claude
+  Code, Cursor and OpenCode the edit guard and the session notice. Every
+  file is copied to ~/.knos/backups first. Then it starts the server once
+  to prove it answers.""",
     "ask": """\
   knos ask "why did we drop redis?"
+  knos ask "..." --in ~/work/api
 
-  Answers come back as what was actually said or written, and under each
-  one, where it came from: a file and line, a session and a date, or a
-  commit. knos does not write the answer itself, so there is nothing to
-  double-check except the source.
+  Answers are what was actually said or written - past agent sessions,
+  commits, your instruction files, the code - each with its source. If a
+  file in the answer is claimed by another agent, it says who has it.""",
+    "claim": """\
+  knos claim "the parser" -p src/parser/** -p tests/test_parser.py
+  knos claim "fix handler_12" --for 60
 
-  Ask about another repo:  knos ask "..." --in ~/work/api""",
+  Other agents' edits to those files are refused by the edit guard until
+  you run knos done or the claim lapses (30 minutes by default). Your own
+  edits never are. Without -p, knos looks for exact file and symbol names
+  in what you wrote; if none match, the claim is advisory: others are
+  told, nothing is blocked.""",
+    "done": """\
+  knos done                  release all of your claims here
+  knos done "the parser"     release one
+  knos done --all            release every agent's (asks first)
+
+  Only ever your own, unless you say --all.""",
+    "point": """\
+  knos point                 read what is new since last time, now
+
+  knos reads a repo by itself the first time you ask, and catches up when
+  something changed. This is the same thing on demand. It never deletes;
+  to start over, knos reset --yes (which keeps a backup).""",
+    "reset": """\
+  knos reset --yes
+
+  Starts this repo's memory over. The store is copied to ~/.knos/backups
+  first, notes included.""",
     "status": """\
   knos status
 
-  What knos has read, which agents it found history for, and how many
-  kinds of secret it is keeping from them.""",
-    "connect": """\
-  knos connect           add knos to every agent you have, keeping a copy
-                         of each settings file as it was
-  knos connect --print   just show what to paste, and change nothing
+  What knos has read, what is claimed and by whom, whether the edit guard
+  is wired, and which store it uses.""",
+    "remember": """\
+  knos remember "we dropped redis because the cache was never the problem"
 
-  Your other agent then knows everything this one does. One store, not a
-  CLAUDE.md and an AGENTS.md and a rules file drifting apart.
-
-  Restart the agent afterwards. It gets four tools.""",
-    "notes": """\
-  knos notes             what your agents have written down
-  knos forget <name>     drop one of them
-
-  Your sessions, commits and code are read fresh every time you run
-  knos point, so there is nothing to tidy there. These are the things an
-  agent chose to write down, which is the part a CLAUDE.md used to hold.
-
-  Forgetting one stops your agents repeating it.""",
-    "demo": """  knos demo
-
-  The whole product in about a minute, on a throwaway repo that is
-  deleted afterwards. Your own repos are not touched.
-
-  A claim, a second agent refused, an edit blocked, a purchase that
-  costs nothing the second time, a reversed decision holding the work
-  under it, and then the store deleted so you watch all of it stop.
-
-  Every line is a real call. Nothing in it is a transcript.""",
-    "restore": """  knos restore
-
-  Rebuilds this repo's decisions from .knos/decisions.md, the file
-  knos export writes and you commit.
-
-  That is what makes the memory portable: a fresh clone on a machine
-  that has never run knos still carries what was decided, and the file
-  is markdown you can read in a pull request rather than a blob.
-
-  Claims are not restored. A hold is about who is moving right now.""",
-    "changed": """\
-  knos changed "the risk guard" "unknown assets pass with a warning"
-
-  Says a decision has been reversed. The old wording is archived rather
-  than dropped, so "why did we do it that way" still has an answer.
-
-  Everything on the same subject is then held: an agent editing it is
-  refused, and a paid answer about it is refused, until somebody says
-  they have looked.
-
-  See what is held:  knos held
-  Clear one:         knos reconsider, naming the thing.""",
-    "reconsider": """\
-  knos reconsider "the risk guard tests"
-
-  Says you have looked at something again after the decision under it
-  changed. Work on it stops being held.
-
-  It costs one line, on purpose. Carrying on without looking is the only
-  expensive path here.""",
-    "receipts": """  knos receipts
-
-  Resolves every transaction this repo points at, against the chain it
-  is documented against. No account, no key, public endpoints.
-
-  One line per receipt, and it stops with an error if any of them fails
-  to resolve, so it is worth running rather than reading.
-
-  This and knos share are the only two commands here that open a
-  socket. Answering, withholding, guarding and gating never do.""",
-    "verify": """  knos verify
-
-  Checks that nobody edited the record of who claimed what, who stood
-  down, and who overrode a claim.
-
-  Every entry is chained to the last one its writer made, so altering or
-  removing one breaks the rest of that writer's chain and this says
-  which entry and which agent.
-
-  It is tamper-evident, not tamper-proof. Whoever holds the file could
-  rewrite a whole chain from the start; what they cannot do is quietly
-  change one line in the middle.""",
-    "at": """  knos at "2026-09-08 14:00"
-  knos at 2h
-
-  Who held what at a moment that has already passed, and what the
-  store had been told by then.
-
-  Everything else here answers about now. This is the one that answers
-  about then, which is the question after two agents collide: what did
-  the machine know, and who was holding it.
-
-  A claim with no recorded close counts as live for exactly the hold
-  its agent had earned by that moment - not the one it has earned
-  since, because the older number is the one that decided whether the
-  edit was refused.""",
-    "why": """  knos why
-
-  Whether you have the problem knos is for, counted on your own
-  machine rather than argued for.
-
-  Claude Code writes a timestamped transcript for every session it
-  runs, and knos already reads those as a source. This counts the
-  windows in which two or more of your sessions were each doing
-  something - at four widths, because a share that only holds at one
-  of them is a property of the bucketing rather than of your day.
-
-  That is the precondition for a collision, not a collision: two
-  agents in the same minute may be nowhere near each other in your
-  tree. Nothing here says they met.
-
-  If you have never run two at once it says so, and says knos is
-  probably not for you. Reads only, writes nothing, and nothing
-  leaves the machine.""",
-    "worth": """  knos worth
-
-  What knos has actually done in this repo: how often an agent asked
-  about work somebody else was holding and went elsewhere, how often
-  one went ahead anyway with a reason on record, and what is waiting
-  on a decision that changed.
-
-  Every refusal here is invisible when it works - the collision that
-  did not happen leaves no trace in your day. This is where it left
-  one.
-
-  If the numbers are zero it says so. Nothing has collided yet is a
-  true and useful thing to be told.""",
-    "who": """\
-  knos who
-
-  Which agents finish what they claim, and how long a claim from each
-  of them is worth.
-
-  A claim used to lapse after the same thirty minutes whoever made it.
-  Now it is what that agent has earned: fifteen minutes for one that
-  never closes its work, forty five for one that always does, and the
-  flat thirty for anyone knos has seen fewer than twice.
-
-  It is counted from the journal, so it is the record of a name rather
-  than a setting anybody typed. Delete the store and everyone is a
-  stranger worth thirty minutes again.""",
-    "held": """\
-  knos held
-
-  What knos is holding, and why. Each one names the decision that
-  changed, what it used to say, and what it says now.
-
-  Nothing is held forever: reconsider it, naming the thing.""",
-    "claim": """\
-  knos claim "the risk guard"
-
-  Says you are working on something. Your agents are then withheld from
-  it: they are told you hold it, not what knos knows about it.
-
-  An agent can take it anyway, but only by giving a reason, and the
-  reason goes in the journal under its name.
-
-  It lapses on its own, sooner or later depending on how often you
-  finish what you claim (see: knos who), or when you say:  knos done""",
-    "done": """\
-  knos done
-
-  An agent starting a piece of work says so, and knos then withholds what
-  it knows about it from your other agents. This says that is over.
-
-  It says so by itself when the claim lapses anyway, because a warning that
-  is always on is one nobody reads.""",
-    "forget": """\
-  knos forget "deploy window"
-
-  Drops something your agents wrote down. They stop repeating it.
-
-  See what there is first:  knos notes""",
+  Every agent you connect will know it, as your words. If the store has no
+  room, it says so and writes nothing.""",
+    "notes": "  knos notes\n\n  What has been written down.  Drop one:  knos forget <name>",
+    "forget": "  knos forget \"deploy window\"\n\n  Archives a note so agents stop repeating it.",
     "private": """\
-  knos private .env
   knos private notes/salary.md
 
-  That path stops reaching your agents. Not blanked out, not counted:
-  they are told nothing about it at all.
+  That path stops reaching your agents: not blanked, not counted. You can
+  still search it yourself. Already private: .env, keys, certificates,
+  .ssh, .aws.""",
+    "board": """\
+  knos board
 
-  You can still search it yourself.
+  A live page of this repo on 127.0.0.1 with a one-off token: claims,
+  agents seen today, recent refusals, and spend when Pro is on.""",
+    "bench": """\
+  knos bench --out docs/BENCH.md
 
-  Already private without asking: .env, keys, certificates, .ssh, .aws.""",
-    "remember": """  knos remember "we dropped redis because the cache was never the problem"
+  Collisions, wrong refusals, recall and speed, against the simplest way
+  of doing without knos. Runs in a temporary folder.""",
+    "demo": "  knos demo\n\n  The whole product on a throwaway repo. Every line is a real call.",
+    "worth": "  knos worth\n\n  Claims taken and released, and edits refused, counted from the record.",
+    "spend": """\
+  knos spend                 today, per agent and model
+  knos spend --days 7
 
-  Tells your agents something they would otherwise have to be told again
-  in every session. It comes back as your own words, under your name.
+  Knos Pro. Read from Claude Code's and Codex's own logs, priced at API
+  list prices. Nothing leaves the machine.""",
+    "budget": """\
+  knos budget set 20 --per day      one cap: model tokens + API payments
+  knos budget set 5 --repo .        count and cap only this repo
+  knos budget raise 10
+  knos budget clear
+  knos budget fund --agent claude 5 --chain tempo    an agent's own wallet
+  knos budget agents                each wallet: cap, spent, balance
+  knos budget sweep --agent claude --to <your address>
 
-  See what there is:  knos notes      Drop one:  knos forget""",
-    "export": """  knos export
+  Knos Pro. Past the cap, the edit guard refuses your agents' edits and
+  says why, until a person raises it. An agent wallet holds only what you
+  fund it with, so the chain itself stops it at that amount.""",
+    "report": """\
+  knos report                last 7 days
+  knos report --days 30 --out report.md
 
-  Writes .knos/decisions.md: what you have told your agents, and what is
-  claimed right now. Commit it. A fresh clone reads it on its first
-  question, so the decisions outlive this machine.
+  Knos Pro. Spend by agent and model, agents' API payments against their
+  caps, and in this repo: claims taken and edits refused.""",
+    "pay": """\
+  knos pay https://api.example.com/paid --agent claude
 
-  Claims in it are a snapshot. They lapse on their own, so a claim
-  written into the file is not one that is still held when it is read.
+  Knos Pro. Fetches an API; if it answers 402 Payment Required (MPP on
+  Tempo, or x402 on Solana), pays it from that agent's own wallet, inside
+  its cap. Agents get the same thing as the `pay` tool.""",
+    "pro": """\
+  knos pro                   status and plans
+  knos pro buy               10 USDC / 30 days, from any Solana wallet
+  knos pro buy --year        100 USDC / year
+  knos pro buy --chain tempo pay with USDC.e or pathUSD on Tempo
+  knos pro buy --network devnet     try it with devnet USDC (testnet: Tempo)
+  knos pro activate <code>   or:  knos pro activate --tempo <tx>
 
-  --to writes somewhere else, if your repo already keeps decisions
-  somewhere: knos export --to docs/decisions/0001-knos.md
+  14 days free. Memory, claims and the guard are free forever (MIT).""",
+    "serve": """\
+  knos serve                          run the team server on 127.0.0.1:8766
+  knos serve --host 0.0.0.0 --name knos.lan    on your network
+  knos serve seat add alice           a seat and its token (shown once)
+  knos serve budget 100 --per day     one cap for the whole team
 
-  Knos reads .knos/decisions.md, DECISIONS.md, WORKLOG.md and docs/adr/*.md
-  back on the next question. Write anywhere else and the file is still
-  written and still worth committing, but the next agent will not find it,
-  and knos export says so rather than letting you assume otherwise.""",
-    "guard": """  knos guard --install
+  Knos Team. On each machine:  knos init --remote http://knos.lan:8766
+  --token <seat token>. Claims, notes and spend are then shared: a claim
+  on one machine blocks an edit on another. Leave: knos init --leave-team""",
+    "compact": """\
+  knos compact
+  knos compact --older-than 7
 
-  Everything else knos does is decline to answer. This refuses the edit.
-
-  Claude Code, Cursor and OpenCode each run a hook before a tool call, and
-  a hook can say no. With the guard installed, an agent about to edit a file
-  that belongs to work another agent has claimed is stopped and told who has
-  it, and so is an agent about to edit a path this repo's own CLAUDE.md or
-  AGENTS.md forbids in words a machine can check - "never edit `src/gen/`"
-  is a pattern, "write idiomatic code" is not, and only the first kind is
-  ever read.
-
-  Off unless you run it, because a hook that refuses wrongly is worse than
-  no hook. Every file it edits is copied to <name>.before-knos first, and
-  `knos guard --uninstall` takes all of it back out. If the store cannot be
-  read, the guard allows the edit: it is a refinement on the claim, never a
-  gate in front of your own disk.
-
-  Claude Desktop is not in the list. It has no hooks.""",
-    "share": """  knos share ~/work/api/docs alice
-
-  Lets a teammate's agent read one folder of this repo, and nothing else.
-  Everything not shared stays invisible to them, not redacted.
-
-  Stop it again:  knos unshare ~/work/api/docs alice""",
-    "unshare": """  knos unshare ~/work/api/docs alice
-
-  Stops a teammate's agent reading a folder you shared. From the next
-  question on, they are told nothing about it.""",
+  Makes room in Sibyl memory: drops notes forgotten long ago and gives the
+  freed space back. Nothing an answer uses is lost. Past Sibyl's free 5 MB,
+  Sibyl Pro has no cap:  sibyl upgrade""",
+    "export": "  knos export\n\n  Writes .knos/decisions.md: decisions and current claims, to commit.",
+    "restore": "  knos restore\n\n  Reads .knos/decisions.md back. Claims are not restored.",
+    "who": "  knos who\n\n  Which agents close what they claim, and the hold that has earned them.",
 }
+PER_COMMAND["connect"] = PER_COMMAND["init"]
+PER_COMMAND["guard"] = PER_COMMAND["init"]
 
 
 def main() -> str:
@@ -298,10 +169,4 @@ def main() -> str:
 
 
 def for_command(name: str) -> str:
-    known = PER_COMMAND.get(name)
-    if known:
-        return known
-    return (
-        f"  No command called {name}.\n\n"
-        "  See what there is:  knos help"
-    )
+    return PER_COMMAND.get(name) or f"  No command called {name}.\n\n  See what there is:  knos help"

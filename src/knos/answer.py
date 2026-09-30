@@ -128,54 +128,6 @@ def looks_structural(question: str) -> bool:
     return bool(SYMBOL.search(question))
 
 
-def _lapses_in(minutes: float | None) -> str:
-    """One sentence about when the work frees up, or nothing.
-
-    An agent told to go away and come back has no way to judge whether that
-    means two minutes or forty. It used to be half an hour for everybody and
-    the documents said so; the hold is earned per agent now, so the only
-    honest place for the number is the refusal itself.
-    """
-    if minutes is None or minutes != minutes or minutes < 0:  # None or NaN
-        return ""
-    if minutes < 1:
-        return " It lapses within the minute if they do not finish sooner."
-    if minutes < 2:
-        return " It lapses in about a minute if they do not finish sooner."
-    return f" It lapses in about {round(minutes)} minutes if they do not finish sooner."
-
-
-def withheld(held: str, by_the_person: bool, minutes: float | None = None) -> str:
-    """What an agent is told about work somebody else has claimed.
-
-    Lives here rather than in the server so `knos claim` can show you the
-    exact words your agents will get, in the same breath as claiming it.
-    A person should not have to open a second tool to find out what the
-    first one just did.
-    """
-    soon = _lapses_in(minutes)
-    if by_the_person:
-        return (
-            f"Withheld. The person you are working with said they are on"
-            f" {held} right now, so knos is not the place you find out about"
-            " it. Ask them where they have got to, or pick up something else."
-            + soon +
-            "\n\nIf they say go ahead, call this again with"
-            ' override="their reason". That is recorded against your name.'
-            "\n\nTell them this, in these words, before you do anything else."
-        )
-    return (
-        f"Withheld. {held} is being worked on right now, so knos is not the"
-        " place you find out about it. Ask them, or work on something else."
-        + soon +
-        "\n\nIf you must have it anyway, call this again with"
-        ' override="your reason". That is recorded against your name.'
-        "\n\nTell the person this, in these words, before you do anything"
-        " else. A collision they are not shown is one they find out about at"
-        " merge time."
-    )
-
-
 def looks_like_rules(question: str) -> bool:
     """Whether this asks what the rules of the repo are."""
     low = question.lower()
@@ -221,6 +173,8 @@ def point(
     on_progress: Any = None,
     code_budget: float | None = None,
     budget: float | None = None,
+    seen: Any = None,
+    offsets: dict[str, int] | None = None,
 ) -> dict[str, int]:
     """Read this repo: its sessions, its commits, its structure.
 
@@ -239,7 +193,7 @@ def point(
 
     from . import sessions
 
-    deadline = (time.monotonic() + budget) if budget else None
+    deadline = (time.monotonic() + budget) if budget is not None else None
 
     def out_of_time() -> bool:
         return deadline is not None and time.monotonic() > deadline
@@ -253,10 +207,23 @@ def point(
         "private": 0,
         "full": 0,
         "ran_out": 0,
+        "known": 0,
         "skipped": [],
     }
     say = on_progress or (lambda *_: None)
     repo = Path(repo).resolve()
+
+    def keep(fact: Fact) -> str:
+        """'new' when written, 'known' when read before (never written twice), 'full' when there was no room."""
+        key = seen.key(fact.source, fact.where, fact.text) if seen is not None else ""
+        if key and seen.has(key):
+            counts["known"] += 1
+            return "known"
+        if not mem.record(fact):
+            return "full"
+        if key:
+            seen.add(key)
+        return "new"
 
     mem.set_reference(INTERNAL + "repo", {"path": str(repo), "name": repo.name})
 
@@ -268,7 +235,7 @@ def point(
         if private.is_private(repo, rule.path):
             counts["private"] += 1
             continue
-        if not mem.record(
+        got = keep(
             Fact(
                 text=rule.text,
                 source="rules",
@@ -277,10 +244,12 @@ def point(
                 about=rule.path,
                 path=rule.path,
             )
-        ):
+        )
+        if got == "full":
             counts["full"] = 1
             break
-        counts["rules"] += 1
+        if got == "new":
+            counts["rules"] += 1
 
     if not counts["full"]:
         # Commits arrive newest first, so the first time a file or a person
@@ -296,17 +265,18 @@ def point(
         # a busy transcript the store filled before a single commit was read.
         # Commits go first now and stop at their share of the cap, which
         # leaves the rest for the sessions rather than taking it all in turn.
-        room = mem.size_mb() + FREE_TIER_MB * COMMIT_SHARE
+        # Only a capped store (Sibyl's free tier) needs commits held to a share of it.
+        room = mem.size_mb() + FREE_TIER_MB * COMMIT_SHARE if mem.capped else float("inf")
+        known_in_a_row = 0
         for n, commit in enumerate(() if counts["ran_out"] else git.read_commits(repo)):
             # Measuring the store is not free, so ask every so often rather
             # than once per commit. Overshooting the share by a few facts is
             # fine; reading none of the other source is not.
-            if n and not n % 25 and mem.size_mb() >= room:
+            if mem.capped and n and not n % 25 and mem.size_mb() >= room:
                 counts["commits_capped"] = 1
                 break
             visible = [f for f in commit.files if not private.is_private(repo, f)]
-            counts["private"] += len(commit.files) - len(visible)
-            if not mem.record(
+            got = keep(
                 Fact(
                     text=_trim(commit.text),
                     source="git",
@@ -315,9 +285,18 @@ def point(
                     about=commit.author,
                     path=visible[0] if visible else "",
                 )
-            ):
+            )
+            if got == "full":
                 counts["full"] = 1
                 break
+            if got == "known":
+                # Commits arrive newest first: a long run of ones already read means the rest were read too.
+                known_in_a_row += 1
+                if known_in_a_row >= 50:
+                    break
+                continue
+            known_in_a_row = 0
+            counts["private"] += len(commit.files) - len(visible)
             # Only people get a canonical record here. A file used to get one
             # per commit that touched it, which on a real repo was hundreds of
             # writes at twenty-five milliseconds each, for something the
@@ -343,8 +322,8 @@ def point(
     # reaches the store first.
     if not counts["full"]:
         say("looking for past agent sessions")
-        for turn in reversed(sessions.read_all(repo)):
-            if not mem.record(
+        for turn in reversed(sessions.read_all(repo, offsets)):
+            got = keep(
                 Fact(
                     text=_trim(turn.text),
                     source="session",
@@ -352,9 +331,12 @@ def point(
                     when=turn.when,
                     about=turn.client,
                 )
-            ):
+            )
+            if got == "full":
                 counts["full"] = 1
                 break
+            if got == "known":
+                continue
             counts["sessions"] += 1
             if counts["sessions"] % 100 == 0:
                 say(f"{counts['sessions']} things said in past sessions")

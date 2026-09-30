@@ -1,144 +1,197 @@
-"""Sharing a folder with a teammate, and stopping.
+"""Knos Team: `knos serve` shares claims, notes and one budget across machines, and refuses anyone without a seat.
 
-The contract itself is tested in `contracts/test/Access.t.sol`. What is
-tested here is the part that decides what a teammate's agent actually sees.
+"Two machines" are two KNOS_HOMEs, each with its own clone of the same repo, talking to one server on 127.0.0.1. The
+test the prompt asks for: a claim on one machine blocks an edit on the other.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import urllib.error
+import urllib.request
+from pathlib import Path
+
 import pytest
 
-from knos import answer, private
-from knos.memory import Fact, Memory
-
-SECRET = "sk_live_quokka_9931"
-
-
-def _records():
-    return [
-        {"path": "src/auth.py", "text": "login lives here"},
-        {"path": "docs/plan.md", "text": "the plan"},
-        {"path": ".env", "text": SECRET},
-        {"path": "", "text": "something with no file"},
-    ]
+from knos import guard
+from knos.claims import Claims
+from knos.identity import Agent
+from knos.pro import agentpay, budget, licence, team
 
 
-def test_a_guest_starts_with_nothing(repo):
-    """The opposite default from your own agent: theirs begins empty."""
-    assert private.visible(repo, _records(), private.GUEST, allowed=[]) == []
+@pytest.fixture()
+def server(tmp_path, monkeypatch):
+    host_home = tmp_path / "server-home"
+    monkeypatch.setenv("KNOS_HOME", str(host_home))
+    token_a, token_b = team.seat_add("alice"), team.seat_add("bob")
+    srv, url = team.run_in_thread()
+    yield {"url": url, "a": token_a, "b": token_b, "home": host_home}
+    srv.shutdown()
+    srv.server_close()
 
 
-def test_a_guest_sees_only_what_was_shared(repo):
-    seen = private.visible(repo, _records(), private.GUEST, allowed=["src"])
-    assert [r["path"] for r in seen] == ["src/auth.py"]
+def _raw(url: str, route: str, token: str | None = None, host: str | None = None, body: bytes | None = None):
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    if host:
+        headers["Host"] = host
+    req = urllib.request.Request(url + route, data=body, method="POST" if body is not None else "GET", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
 
 
-def test_sharing_one_folder_does_not_share_another(repo):
-    seen = private.visible(repo, _records(), private.GUEST, allowed=["docs"])
-    assert [r["path"] for r in seen] == ["docs/plan.md"]
+# ---- the server's own safety ---------------------------------------------------------------------------------------
 
 
-def test_a_guest_never_sees_a_secret_even_if_its_folder_is_shared(repo):
-    """Sharing the whole repo does not share the keys in it."""
-    seen = private.visible(repo, _records(), private.GUEST, allowed=["", ".", "src", "docs"])
-    assert all(SECRET not in r["text"] for r in seen)
-    assert all(".env" not in r["path"] for r in seen)
+def test_no_seat_no_answer(server) -> None:
+    assert _raw(server["url"], "/v1/whoami")[0] == 401
+    assert _raw(server["url"], "/v1/whoami", token="knos_team_guessed")[0] == 401
+    code, body = _raw(server["url"], "/v1/whoami", token=server["a"])
+    assert code == 200 and body["seat"] == "alice"
 
 
-def test_your_own_agent_is_not_limited_to_shared_folders(repo):
-    """A guest list is a guest list. It does not narrow your own agent."""
-    seen = private.visible(repo, _records(), private.AGENT, allowed=[])
-    assert [r["path"] for r in seen] == ["src/auth.py", "docs/plan.md", ""]
+def test_a_foreign_host_name_is_refused(server) -> None:
+    """DNS rebinding: a web page that points its own name at 127.0.0.1 gets nothing."""
+    code, _ = _raw(server["url"], "/v1/whoami", token=server["a"], host="evil.example.com")
+    assert code == 421
 
 
-def test_unsharing_is_just_an_empty_list(repo):
-    """Revoking is not a special case: the folder leaves the list."""
-    before = private.visible(repo, _records(), private.GUEST, allowed=["src"])
-    after = private.visible(repo, _records(), private.GUEST, allowed=[])
-    assert before and not after
+def test_tokens_are_kept_only_as_hashes(server) -> None:
+    raw = (server["home"] / "team-server" / "team.db").read_bytes()
+    assert server["a"].encode() not in raw and server["b"].encode() not in raw
 
 
-def test_a_guest_query_returns_nothing_before_a_share(knos_home, repo):
-    with Memory(repo) as mem:
-        mem.record(
-            Fact(
-                text="we moved the retry logic",
-                source="session",
-                where="Claude Code session aaaa1111 2026-08-20",
-                when="2026-08-20",
-                path="src/auth.py",
-            )
-        )
-        before = answer.ask(repo, mem, "retry logic", identity=private.GUEST, allowed=[])
-        after = answer.ask(
-            repo, mem, "retry logic", identity=private.GUEST, allowed=["src"]
-        )
-    assert before == []
-    assert any("retry logic" in p.text for p in after)
+def test_big_bodies_bad_routes_and_errors_come_back_as_json(server) -> None:
+    code, body = _raw(server["url"], "/v1/notes", token=server["a"], body=b"x" * (team.MAX_BODY + 10))
+    assert code == 413 and "error" in body
+    code, body = _raw(server["url"], "/v1/nothing", token=server["a"])
+    assert code == 400 and "error" in body
+    code, body = _raw(server["url"], "/v1/claims/live?repo=../../etc", token=server["a"])
+    assert code == 400 and "bad repo" in body["error"]
 
 
-def test_the_words_a_teammate_never_sees(repo):
-    """6.1 in one line: the mechanism is not the teammate's problem."""
-    from knos import team
-
-    said = " ".join(
-        [
-            "Cannot share {path} yet.",
-            f"{'alice'} can read {'./src'}.",
-            "Stop them later:  knos unshare ./src --with alice",
-            f"{'alice'} can no longer read {'./src'}.",
-        ]
-    ).lower()
-    for word in ("wallet", "gas", "onchain", "chain", "transaction", "contract", "key"):
-        assert word not in said
-    assert team is not None
+def test_a_removed_seat_stops_working(server) -> None:
+    team.seat_remove("bob")
+    assert _raw(server["url"], "/v1/whoami", token=server["b"])[0] == 401
 
 
-def test_a_guest_still_gets_code_when_the_repo_is_noisy(knos_home, repo, monkeypatch):
-    """Enough is counted over what the guest can see, not the whole repo.
+# ---- two machines --------------------------------------------------------------------------------------------------
 
-    A teammate shared one folder has most of the repo filtered away. Judging
-    "we already found plenty" against passages they are not allowed to see
-    left a real grant answering nothing at all.
-    """
-    from knos import answer, code
 
-    # The symbol below is mocked, but the file it cites is not: a citation is
-    # re-read before it is printed now, and a stand-in pointing at a file that
-    # was never written is dropped for the right reason. Writing it keeps this
-    # test about what it is named for.
-    src = repo / "src"
-    src.mkdir(exist_ok=True)
-    (src / "auth.py").write_text(
-        "\n".join(["# auth"] * 11 + ["def retry(n):", "    return n"]) + "\n",
-        encoding="utf-8",
-    )
+@pytest.fixture()
+def machines(server, repo, tmp_path, monkeypatch):
+    clone = tmp_path / "clone-on-b"
+    subprocess.run(["git", "clone", "-q", str(repo), str(clone)], check=True, capture_output=True)
+    homes = {"a": tmp_path / "home-a", "b": tmp_path / "home-b"}
 
-    with Memory(repo) as mem:
-        for i in range(8):
-            mem.record(
-                Fact(
-                    text=f"chatter number {i} about the retry logic",
-                    source="session",
-                    where=f"Claude Code session aaaa111{i} 2026-08-20",
-                    when="2026-08-20",
-                    path="docs/notes.md",  # a folder the guest was not shared
-                )
-            )
-        monkeypatch.setattr(
-            code, "installed", lambda: True
-        )
-        monkeypatch.setattr(
-            code,
-            "search",
-            lambda repo, word, limit=20: (
-                [code.Symbol(name="retry", kind="function", path="src/auth.py", line=12)],
-                1.0,
-            ),
-        )
-        found = answer.ask(
-            repo, mem, "retry logic", identity=private.GUEST, allowed=["src"]
-        )
+    def on(name: str) -> Path:
+        monkeypatch.setenv("KNOS_HOME", str(homes[name]))
+        from knos import paths
 
-    assert found, "a guest with a real grant got nothing"
-    assert all(p.path.startswith("src") for p in found)
+        paths.shared_root.cache_clear()
+        paths.work_root.cache_clear()
+        return repo if name == "a" else clone
+
+    on("a")
+    team.join(server["url"], server["a"])
+    on("b")
+    team.join(server["url"], server["b"])
+    return on
+
+
+@pytest.mark.critical
+def test_a_claim_on_one_machine_blocks_an_edit_on_the_other(machines) -> None:
+    repo_a = machines("a")
+    alice = Agent("claude", "sess-a")
+    with Claims(repo_a) as c:
+        took, _, mine = c.take(alice, "the auth rewrite", ["src/auth.py"])
+    assert took and mine.globs == ("src/auth.py",)
+
+    repo_b = machines("b")
+    bob = Agent("cursor", "sess-b")
+    v = guard.check(repo_b, str(repo_b / "src" / "auth.py"), bob)
+    assert not v.allow and "claude/sess-a" in v.reason
+    with Claims(repo_b) as c:
+        took, conflict, _ = c.take(bob, "auth too", ["src/**"])
+    assert not took and conflict.globs == ("src/auth.py",)
+
+    repo_a = machines("a")
+    assert guard.check(repo_a, str(repo_a / "src" / "auth.py"), alice).allow  # the holder is never blocked
+    with Claims(repo_a) as c:
+        assert [x.description for x in c.release(alice)] == ["the auth rewrite"]
+    repo_b = machines("b")
+    assert guard.check(repo_b, str(repo_b / "src" / "auth.py"), bob).allow
+
+
+def test_the_same_session_id_on_two_machines_is_two_agents(machines) -> None:
+    repo_a = machines("a")
+    with Claims(repo_a) as c:
+        assert c.take(Agent("claude", "same-id"), "auth", ["src/auth.py"])[0]
+    repo_b = machines("b")
+    import socket
+
+    # both "machines" share this computer's name, so make b look like another machine
+    import knos.pro.team as t
+
+    real = t.machine
+    t.machine = lambda: "other-box"
+    try:
+        assert not guard.check(repo_b, str(repo_b / "src" / "auth.py"), Agent("claude", "same-id")).allow
+    finally:
+        t.machine = real
+    assert socket.gethostname()
+
+
+def test_notes_are_shared_across_machines(machines) -> None:
+    repo_a = machines("a")
+    team.share_note("the retry queue was dropped: the importer is idempotent", "retry queue", "claude", repo_a)
+    repo_b = machines("b")
+    got = team.team_notes("why was the retry queue dropped", repo_b)
+    assert got and "idempotent" in got[0]["fact"] and "alice" in got[0]["who"]
+
+
+def test_the_team_budget_is_pooled(machines, server, monkeypatch) -> None:
+    monkeypatch.setenv("KNOS_HOME", str(server["home"]))
+    team.set_team_cap(1.0, "day")  # on the server host
+    machines("a")
+    got = team.report_spend({"day": 0.6, "week": 0.6, "month": 0.6})
+    assert got is not None and not got["over"] and abs(got["team_usd"] - 0.6) < 1e-9
+    machines("b")
+    got = team.report_spend({"day": 0.5, "week": 0.5, "month": 0.5})
+    assert got["over"] and abs(got["team_usd"] - 1.1) < 1e-9  # neither machine alone is over; together they are
+    # the guard's path: machine b's real metered spend (a $5 Claude Code call) is reported, and the team is over
+    from datetime import datetime, timezone
+
+    logs = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "-x"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "s.jsonl").write_text(json.dumps({
+        "type": "assistant", "requestId": "r1", "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "message": {"id": "m1", "model": "claude-opus-5", "usage": {"input_tokens": 1_000_000, "output_tokens": 0}}}) + "\n")
+    said = budget.team_refusal() or ""
+    assert "team's day spend cap of $1.00" in said and "knos serve budget" in said
+
+
+def test_an_unreachable_team_server_fails_open(repo, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KNOS_HOME", str(tmp_path / "lonely"))
+    team.join("http://127.0.0.1:9", "knos_team_x")  # nothing listens on port 9
+    v = guard.check(repo, str(repo / "src" / "auth.py"), Agent("cursor", "s"))
+    assert v.allow
+    assert "guard allowed" in (tmp_path / "lonely" / "hook.log").read_text(encoding="utf-8")
+
+
+def test_joining_checks_the_token_first(server, repo, capsys) -> None:
+    from knos.cli import main
+
+    assert main(["init", "--remote", server["url"], "--token", "knos_team_wrong", "--no-test", "--no-read",
+                 "--hosts", "cursor"]) == 1
+    assert "Not joined" in capsys.readouterr().out and team.config() is None
+    (Path(os.environ["KNOS_HOME"]).parent / ".cursor").mkdir(exist_ok=True)
+    rc = main(["init", "--remote", server["url"], "--token", server["a"], "--no-test", "--no-read", "--hosts", "cursor"])
+    assert rc == 0 and team.config()["url"] == server["url"]
+    assert main(["init", "--leave-team"]) == 0 and team.config() is None

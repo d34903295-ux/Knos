@@ -1,13 +1,12 @@
 """The knos command line.
 
-Two commands do the work. There is no account, no key, no config file and no
-join step. Every command is something a person typed; knos does nothing on
-its own between them.
+`knos init` once, then your agents do the work. Every command here is something a person typed; knos does nothing on
+its own between them. Every failure is one line that says what happened and the command that fixes it.
 """
 
 from __future__ import annotations
 
-import os
+import getpass
 import sys
 import time
 from pathlib import Path
@@ -17,43 +16,37 @@ from rich.console import Console
 
 from . import answer, builtin_reader, code, errors, help as help_text, link, paths, private, sessions
 from . import version
-from .memory import TOPIC, Fact, Memory, StoreFull
+from .memory import TOPIC, Fact, Memory, StoreGone
 
-app = typer.Typer(
-    add_completion=False,
-    help="one local memory every coding agent here shares, and it knows who is in your code now",
-)
-# Answers are quoted from other people's writing, which on Windows routinely
-# contains characters the console's default code page cannot encode. Ask for
-# UTF-8, and settle for replacing what will not fit rather than failing on an
-# em dash.
+app = typer.Typer(add_completion=False, pretty_exceptions_enable=False,
+                  help="one local memory every coding agent here shares, and it knows who is in your code now")
+
+# Answers quote other people's writing, which on Windows routinely contains characters the console's code page cannot
+# encode. Ask for UTF-8 and replace what will not fit rather than fail on an em dash.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     except (AttributeError, ValueError):
         pass
 
-# Lines here are written to fit 80 columns already; let them, rather than
-# having Rich rewrap a command someone needs to copy.
 out = Console(soft_wrap=True, highlight=False)
 
 
-def _quote(text: str) -> None:
-    """Print something a person or an agent wrote.
+class Stop(Exception):
+    """A failure a person can fix: printed as one line (plus the fix), exit 1."""
 
-    Markup is off: a commit message containing [dim] is a commit message,
-    not an instruction to Rich.
-    """
+    def __init__(self, said: str, fix: str = "") -> None:
+        super().__init__(said)
+        self.said, self.fix = said, fix
+
+
+def _quote(text: str) -> None:
     out.print(text, markup=False)
 
 
 @app.callback(invoke_without_command=True)
-def _no_command(
-    ctx: typer.Context,
-    show_version: bool = typer.Option(
-        False, "--version", help="print the installed version and stop"
-    ),
-) -> None:
+def _no_command(ctx: typer.Context,
+                show_version: bool = typer.Option(False, "--version", help="print the installed version and stop")) -> None:
     """Typing `knos` on its own shows the one screen, not a usage box."""
     if show_version:
         out.print(version())
@@ -63,136 +56,253 @@ def _no_command(
 
 
 def _stop(problem: errors.Problem) -> None:
-    out.print(problem.said)
-    out.print(problem.fix)
-    raise typer.Exit(1)
+    raise Stop(problem.said, problem.fix)
 
 
-def _read(repo: Path, code_budget: float | None = None) -> tuple[dict, float]:
-    """Read a repo, showing progress. The one place that does it."""
-    started = time.perf_counter()
+def _repo(given: str | None = None) -> Path:
+    """The repo a command is about: --in when given, else the git repo this shell is in. Never another repo."""
+    if given:
+        repo = Path(given).expanduser().resolve()
+        if not repo.is_dir():
+            _stop(errors.no_such_folder(given))
+        return repo
+    here = paths.repo_here()
+    if here is None:
+        _stop(errors.nothing_indexed())
+    return here  # type: ignore[return-value]
+
+
+def _fresh(repo: Path, force: bool = False) -> dict | None:
+    """Read what is new in the repo, showing progress on the first read. Never deletes."""
+    from . import refresh
+
+    first = not paths.has_store(repo)
+    if first:
+        out.print(f"[dim]First time in {repo.name}. Reading it now.[/dim]")
 
     def progress(note: str) -> None:
-        # Live, on one line, so a long read looks like work rather than a
-        # hang. Anything already read stays read if this is interrupted.
-        out.print(f"  {note}...", end="\r", highlight=False)
+        if first or force:
+            out.print(f"  {note}...", end="\r")
 
-    with Memory(repo) as mem:
-        counts = answer.point(
-            repo, mem, on_progress=progress, code_budget=code_budget
-        )
-    paths.remember_pointed(repo)
-    out.print(" " * 60, end="\r")
-    return counts, time.perf_counter() - started
+    counts = refresh.ensure(repo, force=force, on_progress=progress)
+    if first or force:
+        out.print(" " * 60, end="\r")
+    return counts
 
 
-def _repo(given: str | None) -> Path:
-    if given:
-        return Path(given).resolve()
+def _me(repo: Path):
+    """Who is typing: an agent's shell (by the host process above us) or a person at a terminal."""
+    from . import identity
+    from .claims import lookup_session
 
-    # Reading a repo was a step you had to know about before knos would say
-    # anything, which put a command and a concept between install and the
-    # first answer. It is the same work either way, so knos does it and says
-    # so, rather than sending you away to type it yourself.
+    agent = identity.for_cli(lookup_session(repo))
+    if agent.host == "terminal":
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = "you"
+        return identity.Agent(host="terminal", session=user)
+    return agent
+
+
+# ---- setup ------------------------------------------------------------------------------
+
+
+@app.command()
+def init(
+    undo: bool = typer.Option(False, "--undo", help="take out everything knos init put in"),
+    hosts: str = typer.Option(None, "--hosts", help="only these: claude,codex,cursor,desktop,opencode"),
+    show: bool = typer.Option(False, "--print", help="show what would be written, change nothing"),
+    test: bool = typer.Option(True, "--test/--no-test", help="start the server once to prove it answers"),
+    read: bool = typer.Option(True, "--read/--no-read", help="read this repo into memory now (within the budget)"),
+    remote: str = typer.Option(None, "--remote", help="Team: join this knos serve (with --token)"),
+    token: str = typer.Option(None, "--token", help="Team: this machine's seat token"),
+    leave_team: bool = typer.Option(False, "--leave-team", help="Team: stop sharing claims with the team server"),
+) -> None:
+    """Wire knos into every agent on this machine (memory server, edit guard, session notice)."""
+    from . import init as setup
+
+    if leave_team:
+        from .pro import team
+
+        out.print("Left the team: claims are local again." if team.leave() else "This machine was not in a team.")
+        return
+    if remote:
+        from .pro import team
+
+        if not token:
+            raise Stop("Joining a team needs this machine's seat token.",
+                       "On the server:  knos serve seat add <name>   then:  knos init --remote <url> --token <token>")
+        try:
+            team._call({"url": remote.rstrip("/"), "token": token}, "GET", "/v1/whoami", timeout=5)
+            team.join(remote, token)
+        except (team.TeamUnreachable, ValueError) as why:
+            raise Stop(f"Not joined: {why}", "Check the address and the token, and that knos serve is running.") \
+                from None
+        out.print(f"Joined the team at {remote.rstrip('/')}: claims, notes and the budget are shared from now on.")
+    started = time.perf_counter()
+    try:
+        chosen = setup.pick(hosts)
+    except ValueError as why:
+        raise Stop(str(why), "Example:  knos init --hosts claude,cursor") from None
+
+    if show:
+        cmd = setup.server_command()
+        out.print("Would add this MCP server to: " + (", ".join(setup.NAMES[h] for h in chosen) or "(no agents found)"))
+        _quote(f'  "knos": {{"command": "{cmd[0]}", "args": {cmd[1:]}}}')
+        out.print("and the edit guard + session notice hooks for Claude Code, Cursor and OpenCode.")
+        return
+
+    if undo:
+        rep = setup.undo(chosen or list(setup.HOSTS))
+        for name in rep.done:
+            out.print(f"Removed from {name}.")
+        if not rep.done:
+            out.print("Nothing to remove: knos was not wired into any agent here.")
+        for p in rep.problems:
+            out.print(f"[yellow]{p}[/yellow]", markup=True)
+        if rep.backups:
+            out.print(f"[dim]Copies of every file as it was: {rep.backups}[/dim]")
+        return
+
+    if not chosen:
+        raise Stop("No coding agent found on this machine (Claude Code, Claude Desktop, Cursor, OpenCode).",
+                   "Install one, or name it:  knos init --hosts claude")
     here = paths.repo_here()
-    if here is not None and not paths.has_store(here):
-        out.print(f"[dim]First time in {here.name}. Reading it now.[/dim]")
-        _read(here, code_budget=code.CODE_BUDGET)
-        return here
+    if read and here is not None:
+        from . import refresh
 
-    current = paths.current_repo()
-    if current is None:
-        _stop(errors.nothing_indexed())
-    return current  # type: ignore[return-value]
+        try:
+            counts = refresh.ensure(here, force=True, budget=setup.READ_BUDGET, index_code=False) or {}
+            got = [f"{counts.get('commits', 0)} commits", f"{counts.get('sessions', 0)} things said in past sessions"]
+            if counts.get("rules"):
+                got.append(f"{counts['rules']} rules from CLAUDE.md / AGENTS.md")
+            more = "; the rest is read on the first question" if counts.get("ran_out") else ""
+            out.print(f"[green]+[/green] read {here.name} into Sibyl memory: {', '.join(got)}{more}")
+        except Exception as why:  # reading is a convenience here; wiring the agents is the job
+            out.print(f"[yellow]![/yellow] could not read {here.name} yet ({type(why).__name__}); "
+                      "the first question reads it")
+    rep = setup.install(chosen)
+    for line in rep.done:
+        out.print(f"[green]+[/green] {line}")
+    for p in rep.problems:
+        out.print(f"[yellow]![/yellow] {p}")
+    if rep.backups:
+        out.print(f"[dim]Copies of every file it changed: {rep.backups}   Undo:  knos init --undo[/dim]")
+    if test:
+        problems = setup.selftest()
+        if problems:
+            for p in problems:
+                out.print(f"[red]self-test: {p}[/red]")
+            raise typer.Exit(1)
+        out.print("[green]Self-test passed:[/green] the memory server answered with its four tools and the guard "
+                  "allowed an empty edit.")
+    for line in rep.restart:
+        out.print(f"  Restart {line}")
+    out.print(f"[dim]Done in {time.perf_counter() - started:.1f}s.[/dim]")
+    out.print('Try it:  knos ask "what did we decide about auth?"   or   knos demo')
+    if rep.problems:
+        raise typer.Exit(1)
+
+
+@app.command("connect", hidden=True)
+def connect(show: bool = typer.Option(False, "--print"), hosts: str = typer.Option(None, "--hosts")) -> None:
+    """Old name for `knos init`."""
+    init(undo=False, hosts=hosts, show=show, test=True, read=True, remote=None, token=None, leave_team=False)
+
+
+@app.command("guard", hidden=True)
+def guard_cmd(install: bool = typer.Option(False, "--install"), uninstall: bool = typer.Option(False, "--uninstall")) -> None:
+    """Old name: the guard is part of `knos init` now."""
+    from . import guard
+
+    if install:
+        init(undo=False, hosts=None, show=False, test=True, read=True, remote=None, token=None, leave_team=False)
+        return
+    if uninstall:
+        init(undo=True, hosts=None, show=False, test=False, read=False, remote=None, token=None, leave_team=False)
+        return
+    for name, on in guard.installed().items():
+        out.print(f"  {name:<10} {'guarding' if on else 'not wired'}")
+    out.print("  knos init wires it; knos init --undo takes it out.")
+
+
+# ---- reading and asking -------------------------------------------------------------------
 
 
 @app.command()
 def point(path: str = typer.Argument(".", help="the repo to read")) -> None:
-    """Read this repo."""
-    repo = Path(path).resolve()
+    """Catch up on a repo: read what is new since last time. Never deletes anything."""
+    repo = Path(path).expanduser().resolve()
     if not repo.is_dir():
         _stop(errors.no_such_folder(path))
-
-    # Reading a repo replaces what knos knew about it, rather than adding to
-    # it. Run this again whenever you want it to catch up: twice in a row is
-    # the same as once, which is the only behaviour that is not a trap.
-    try:
-        paths.store_for(repo).unlink(missing_ok=True)
-    except OSError:
-        # Windows will not delete a file another process still has open,
-        # which here means a second knos is reading this repo right now.
-        _stop(errors.busy(repo))
-
-    counts, took = _read(repo)
+    started = time.perf_counter()
+    counts = _fresh(repo, force=True) or {}
+    took = time.perf_counter() - started
     out.print(f"Read {repo.name} in {took:.0f}s.")
     if counts.get("rules"):
         out.print(f"  {counts['rules']} rules written down in this repo")
-    out.print(f"  {counts['sessions']} things said in past agent sessions")
-    out.print(f"  {counts['commits']} commits")
-    if counts["code"]:
+    out.print(f"  {counts.get('sessions', 0)} new things said in agent sessions")
+    out.print(f"  {counts.get('commits', 0)} new commits")
+    if counts.get("code"):
         out.print(f"  {counts['code']} pieces of code structure")
-    if counts["private"]:
+    if counts.get("known"):
+        out.print(f"  [dim]{counts['known']} already known, not written twice[/dim]")
+    if counts.get("private"):
         out.print(f"  {counts['private']} private, kept from your agents")
-
     skipped = errors.report_skipped(counts.get("skipped") or [])
     if skipped:
         out.print(skipped)
     if counts.get("full"):
-        out.print("")
-        out.print(str(errors.memory_full(
-            repo, counts["sessions"] + counts["commits"], counts["commits"])))
-    if not counts["commits"] and not counts["code"]:
-        out.print("")
-        out.print(str(errors.not_a_repo(str(repo))))
-    out.print("")
-    if _already_connected():
-        out.print('Ask it something:  knos ask "what did we decide about auth?"')
-    else:
-        out.print("Give your agents this memory:  knos connect")
+        out.print("[yellow]The Sibyl store is full (5 MB free tier); the oldest part was not read.[/yellow] "
+                  "Make room:  knos compact   or Sibyl Pro, uncapped:  sibyl upgrade")
+
+
+@app.command()
+def reset(yes: bool = typer.Option(False, "--yes", help="really start over (a backup is kept)")) -> None:
+    """Start this repo's memory over. The old store is copied to ~/.knos/backups first."""
+    from . import refresh
+
+    repo = _repo()
+    if not yes:
+        raise Stop(f"This starts {repo.name}'s memory over (notes included; a backup is kept).",
+                   "To go ahead:  knos reset --yes")
+    try:
+        backup = refresh.reset(repo)
+    except OSError:
+        _stop(errors.busy(repo))
+    out.print(f"Started {repo.name} over." + (f" Backup: {backup}" if backup else " There was no store."))
+    out.print("The next question reads it again.")
 
 
 @app.command()
 def ask(
     question: str = typer.Argument(..., help="what you want to know"),
     path: str = typer.Option(None, "--in", help="the repo to ask about"),
-    limit: int = typer.Option(
-        8, "--limit", "-n", min=1, help="how many answers to print"
-    ),
+    limit: int = typer.Option(8, "--limit", "-n", min=1, help="how many answers to print"),
 ) -> None:
-    """Ask about it."""
+    """Ask about this repo."""
+    from .claims import Claims, claims_db
+
     repo = _repo(path)
+    _fresh(repo)
     started = time.perf_counter()
     with Memory(repo) as mem:
-        # Asked for one thing, the answer printed eight, and the seven
-        # underneath it were commits that merely shared a word. The best
-        # answer is the first one; everything after it is there for a person
-        # reading, not for a person being shown.
         found = answer.ask(repo, mem, question, limit=limit)
         joined = link.cross(repo, found)
-        # The person asking is the one who can actually resolve a collision,
-        # and until now they only saw it afterwards in `knos status`.
-        live = [
-            w
-            for w in mem.claims()
-            if answer.same_subject(str(w.get("topic", "")), question)
-        ]
     took = (time.perf_counter() - started) * 1000
-
-    for work in live:
-        holder = str(work.get("who") or "Another agent")
-        started = "You are" if holder == "you" else f"{holder} is"
-        out.print(f"[yellow]{started} working on {work.get('topic')} right now.[/yellow]")
-    if live:
-        out.print("")
-
+    if claims_db(repo).exists():
+        me = _me(repo)
+        with Claims(repo) as c:
+            for x in c.about(question + "\n" + "\n".join(p.text + " " + p.where for p in found)):
+                who = "You hold" if x.held_by(me) else f"{x.label} holds"
+                out.print(f"[yellow]{who} {', '.join(x.globs) or '(advisory)'} ({x.description}).[/yellow]")
     if not found:
         _stop(errors.nothing_found(repo))
-
     for hop in joined:
         _quote(hop.text)
-        out.print(f"    [dim]{hop.where}[/dim]")
+        out.print(f"    [dim]{hop.where}[/dim]", markup=True)
         out.print("")
-
     shown = {h.decision.text for h in joined}
     for p in found:
         if p.text in shown:
@@ -201,341 +311,11 @@ def ask(
         if len(text) > 400:
             text = text[:400].rsplit(" ", 1)[0] + "..."
         _quote(text)
-        out.print(f"    [dim]{p.where}[/dim]")
+        out.print("    " + f"[dim]{p.where}[/dim]", markup=True)
         out.print("")
     out.print(f"[dim]{len(found)} found in {took:.0f}ms[/dim]")
-
-    # Said here rather than only after `point`, because this is the question
-    # where a missing code reader is actually felt.
     if answer.looks_structural(question) and not code.indexed(repo):
-        out.print("")
-        out.print(str(errors.structure_unread(repo)))
-
-
-@app.command()
-def connect(
-    show: bool = typer.Option(
-        False, "--print", help="just show what to paste, and change nothing"
-    ),
-) -> None:
-    """Let your agents use it."""
-    # The full path to this interpreter, not a bare "python3". The agent
-    # launches the server itself, with its own PATH and no shell profile, so
-    # a bare name finds a different Python than the one knos is installed
-    # into — or none at all. Absolute is what makes a venv, a pipx install
-    # and a WSL install all work without the person editing the entry.
-    exe = Path(sys.executable).as_posix()
-    if not show:
-        # Adding it was behind a flag, and the flag was the last step people
-        # did not take. It is what the command is for, every file it touches
-        # is copied first, and --print is there for anyone who would rather
-        # do it by hand.
-        _write_configs(exe)
-        return
-    entry = (
-        '"knos": {\n'
-        f'  "command": "{exe}",\n'
-        '  "args": ["-m", "knos.mcp"]\n'
-        '}'
-    )
-
-    for name, where in _config_files():
-        out.print(name)
-        out.print(f"  {where}")
-        out.print("")
-    out.print('  Add this inside "mcpServers":')
-    out.print("")
-    for line in entry.splitlines():
-        out.print(f"    {line}")
-    out.print("")
-    out.print("Restart the agent. You should see four tools: search, about,")
-    out.print("remember and done. Then ask it something you only told the")
-    out.print("other one.")
-    out.print("")
-    out.print("Or let knos do it, keeping a copy of each file:  knos connect")
-
-
-def _already_connected() -> bool:
-    """Whether any agent on this machine has been pointed at knos."""
-    import json
-
-    for _, where in _config_files():
-        try:
-            existing = json.loads(Path(where).read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            continue
-        if "knos" in (existing.get("mcpServers") or {}):
-            return True
-        if "knos" in (existing.get("mcp") or {}):
-            return True
-    return False
-
-
-def _claude_cli() -> str | None:
-    """Claude Code's own command line, if it is on this machine."""
-    import shutil
-
-    return shutil.which("claude")
-
-
-def _add_via_claude_cli(exe: str) -> bool:
-    """Ask Claude Code to add knos itself.
-
-    Writing ~/.claude.json by hand works, but a session already running has
-    read that file and will not read it again, so the person has to restart.
-    `claude mcp add` registers the server with the running session and its
-    tools are usable straight away. Same file, no restart.
-    """
-    import subprocess
-
-    tool = _claude_cli()
-    if tool is None:
-        return False
-    try:
-        done = subprocess.run(
-            [tool, "mcp", "add", "--scope", "user", "knos", "--", exe, "-m", "knos.mcp"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    if done.returncode != 0:
-        # Already registered is a success, not a failure.
-        return "already exists" in (done.stdout + done.stderr).lower()
-    return True
-
-
-def _write_configs(exe: str) -> None:
-    """Add knos to each agent's settings, keeping a copy of what was there.
-
-    Editing somebody's editor settings without being asked would be rude,
-    which is why this is a flag and not the default. Being asked and then
-    making them paste JSON by hand would just be unhelpful.
-    """
-    import json
-
-    entry = {"command": exe, "args": ["-m", "knos.mcp"]}
-    touched = False
-    live = _add_via_claude_cli(exe)  # Claude Code, without a restart
-    added: list[str] = []
-    for name, where in _config_files():
-        if name == "Claude Code" and live:
-            continue  # done already, and usable already
-        path = Path(where)
-        if not path.parent.is_dir():
-            out.print(f"{name} is not installed here, so nothing to do.")
-            continue
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        except (ValueError, OSError):
-            out.print(f"{name}: {path} is not readable, so knos left it alone.")
-            out.print("  Add it by hand:  knos connect")
-            continue
-
-        # OpenCode names the key `mcp`, marks a stdio server `"type": "local"`
-        # and takes the command as one array rather than a command plus args.
-        # Same server, written the way each client reads it.
-        if name == "OpenCode":
-            servers = existing.setdefault("mcp", {})
-            mine = {"type": "local", "command": [exe, "-m", "knos.mcp"], "enabled": True}
-            existing.setdefault("$schema", "https://opencode.ai/config.json")
-        else:
-            servers = existing.setdefault("mcpServers", {})
-            mine = entry
-        if servers.get("knos") == mine:
-            out.print(f"{name} already has it.")
-            continue
-        if path.exists():
-            backup = path.with_suffix(path.suffix + ".before-knos")
-            backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-        if not isinstance(existing, dict):
-            out.print(f"{name}: {path} is not what knos expected, so it left it alone.")
-            continue
-        servers["knos"] = mine
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        added.append(name)
-        touched = True
-
-    if live:
-        out.print("Added to Claude Code. Its tools work in the session you are in")
-        out.print("already; there is nothing to restart.")
-    for name in added:
-        # Name the app and the exact action, because that is the whole
-        # remaining step and a vague "restart your agents" makes people
-        # guess which one and how.
-        out.print(f"Added to {name}. {RESTART.get(name, f'Restart {name}.')}")
-        out.print(
-            "    Why: it reads its MCP config at startup, and nothing in the"
-            " MCP spec lets a server join a session already running."
-        )
-    if live or touched:
-        out.print("")
-        # "That is all" was a dead end: installed, and nothing to do with it.
-        # This is the shortest path from here to the one thing knos does that
-        # a file cannot.
-        out.print("To see what you just gained:")
-        out.print('  knos claim "the parser"    your agents are refused, and')
-        out.print("                             you see the words they get")
-        out.print("  knos done                  give it back")
-    else:
-        out.print("Nothing changed.")
-
-
-# What is actually left to do, per client, in the words of that app. Claude
-# Code is absent on purpose: `claude mcp add --scope user` registers with the
-# running session, so there is nothing to restart.
-RESTART = {
-    "Cursor": "Quit Cursor and open it again (Ctrl/Cmd+Q, then reopen).",
-    "Claude Desktop": (
-        "Quit Claude Desktop and open it again - closing the window is not"
-        " enough on Windows or macOS, it keeps running in the tray."
-    ),
-    "OpenCode": "Exit OpenCode and start it again (Ctrl+C, then `opencode`).",
-}
-
-
-def _config_files() -> list[tuple[str, str]]:
-    """Where each client keeps its settings, on this machine.
-
-    Printed rather than written: these are the person's own editor settings,
-    and a tool that edits them behind your back is worse than one that tells
-    you the path.
-    """
-    home = Path.home()
-    if sys.platform == "darwin":
-        desktop = home / "Library/Application Support/Claude/claude_desktop_config.json"
-    elif sys.platform.startswith("win"):
-        roaming = Path(os.environ.get("APPDATA", home / "AppData/Roaming"))
-        desktop = roaming / "Claude" / "claude_desktop_config.json"
-    else:
-        desktop = home / ".config/Claude/claude_desktop_config.json"
-    opencode = os.environ.get("OPENCODE_CONFIG")
-    if opencode:
-        oc = Path(opencode)
-    elif sys.platform.startswith("win"):
-        oc = Path(os.environ.get("PROGRAMDATA", home)) / "opencode" / "opencode.json"
-    else:
-        oc = home / ".config" / "opencode" / "opencode.json"
-    return [
-        # Claude Code keeps user-scoped servers at the top level of this
-        # file. It was the one client knos told you to wire by hand, which
-        # is the client most people are actually using.
-        ("Claude Code", (home / ".claude.json").as_posix()),
-        ("Claude Desktop", desktop.as_posix()),
-        ("Cursor", (home / ".cursor" / "mcp.json").as_posix()),
-        ("OpenCode", oc.as_posix()),
-    ]
-
-
-@app.command()
-def status() -> None:
-    """What it has read."""
-    repo = paths.current_repo()
-    if repo is None:
-        _stop(errors.nothing_indexed())
-    with Memory(repo) as mem:
-        size = mem.size_mb()
-        tiers = mem.tiers()
-        yielded = mem.coordination()
-        claimed = mem.claimed_now()
-        only_here = mem.only_here()
-    found = sessions.clients_found()
-    out.print(f"Reading {repo}")
-    trees = paths.worktrees(repo)
-    if len(trees) > 1:
-        # Worktrees keep files apart on purpose. There is no reason for them
-        # to keep what was decided apart too, so they do not.
-        out.print(f"  {'':<10} [dim]shared with {len(trees) - 1} other"
-                  f" worktree{'s' if len(trees) > 2 else ''} of this repo[/dim]")
-    for name, what, how in tiers:
-        out.print(f"  {name:<10} {what:<34} [dim]{how}[/dim]")
-    for line in claimed:
-        out.print(f"  {'':<10} [dim]{line}[/dim]")
-    # Claims first, because that is the number a person checks when an
-    # agent says it cannot get an answer.
-    held = len(claimed)
-    out.print(
-        f"  {'':<10} {held} claim{'' if held == 1 else 's'} held right now"
-        f"{' - nothing is being withheld' if held == 0 else ''}"
-    )
-    room = f"{size:.1f} MB of 5 MB used"
-    if size >= 5.0:
-        room += "  - FULL; remember and claim will refuse until you knos forget"
-    elif size >= 4.0:
-        room += "  - nearly full; the oldest will stop being read"
-    out.print(f"  {'':<10} {room}")
-    out.print(
-        f"  {'':<10} [bold]{only_here} of them exist nowhere else[/bold]"
-        " - told, claimed, stood down"
-    )
-    out.print(
-        f"  {'':<10} [dim]delete the store and only those go;"
-        " the rest is re-read from your repo[/dim]"
-    )
-    if yielded:
-        out.print("")
-        out.print("  who stood down for whom, while a claim was live")
-        for line in yielded:
-            out.print(f"    [dim]{line}[/dim]")
-    out.print(f"  agent history: {', '.join(k for k, v in found.items() if v) or 'none found'}")
-    if not code.indexed(repo):
-        structure = "still to read"
-    elif code.installed():
-        structure = "read, with universal-ctags"
-    else:
-        structure = f"read, by knos itself ({builtin_reader.languages()} kinds of file)"
-    out.print(f"  code structure: {structure}")
-    kept = len(private.added_patterns(repo))
-    out.print(
-        f"  {len(private.DEFAULT_PATTERNS)} kinds of secret private by default,"
-        f" {kept} added by you"
-    )
-
-
-@app.command("private")
-def private_cmd(path: str = typer.Argument(..., help="a path to keep private")) -> None:
-    """Keep a path from your agents."""
-    repo = _repo(None)
-    private.add(repo, path)
-    out.print(f"{path} is private.")
-    out.print("You can still search it. Your agents cannot see it.")
-
-
-@app.command()
-def share(
-    path: str = typer.Argument(..., help="the folder to share"),
-    with_: str = typer.Option(..., "--with", help="who to share it with"),
-) -> None:
-    """Let a teammate's agent read a folder."""
-    from . import team
-
-    try:
-        team.share(path, with_)
-    except team.NotSetUp as why:
-        out.print(f"Cannot share {path} yet.")
-        out.print(f"  {why}")
-        raise typer.Exit(1)
-    out.print(f"{with_} can read {path}.")
-    out.print(f"Stop them later:  knos unshare {path} --with {with_}")
-
-
-@app.command()
-def unshare(
-    path: str = typer.Argument(..., help="the folder to stop sharing"),
-    with_: str = typer.Option(..., "--with", help="who to stop"),
-) -> None:
-    """Stop a teammate's agent reading a folder."""
-    from . import team
-
-    try:
-        team.unshare(path, with_)
-    except team.NotSetUp as why:
-        out.print(f"Cannot change {path} yet.")
-        out.print(f"  {why}")
-        raise typer.Exit(1)
-    out.print(f"{with_} can no longer read {path}.")
+        out.print(str(errors.structure_unread(repo)), markup=False)
 
 
 @app.command()
@@ -543,33 +323,237 @@ def remember(
     fact: str = typer.Argument(..., help="something your agents should know"),
     about: str = typer.Option(None, "--about", help="what to file it under"),
 ) -> None:
-    """Tell your agents something."""
+    """Tell your agents something. Says so plainly if it could not be written."""
     from datetime import datetime, timezone
 
-    repo = _repo(None)
+    repo = _repo()
     now = datetime.now(timezone.utc).isoformat()
     name = about or answer.topic_of(fact)
     with Memory(repo) as mem:
-        mem.record(
-            Fact(
-                text=fact,
-                source="note",
-                where=f"you said so, {now[:10]}",
-                when=now,
-                about=name,
-            )
-        )
+        written = mem.record(Fact(text=fact, source="note", where=f"you said so, {now[:10]}", when=now, about=name))
+        if written is None:
+            raise Stop("Not remembered: the Sibyl store is full (5 MB free tier) and nothing was written.",
+                       "Make room:  knos compact   or Sibyl Pro, uncapped:  sibyl upgrade")
         mem.note_thing(TOPIC, name, {"note": fact, "when": now[:10]})
-    out.print(f"Noted, under {name}.")
-    out.print(f"Every agent you connect will know. Drop it:  knos forget {name}")
+        near = mem.near_full()
+    out.print(f"Noted, under {name}. Every agent you connect will know. Drop it:  knos forget \"{name}\"")
+    if near:
+        out.print("[yellow]Sibyl memory is over 80% of its 5 MB free tier.[/yellow] "
+                  "Make room:  knos compact   or Sibyl Pro, uncapped:  sibyl upgrade")
 
 
 @app.command()
-def demo() -> None:
-    """Run the whole product on a throwaway repo, then delete its memory."""
-    from . import demo as demo_mod
+def notes() -> None:
+    """What your agents (and you) have written down."""
+    repo = _repo()
+    with Memory(repo) as mem:
+        written = mem.notes()
+    if not written:
+        out.print("Nothing written down yet. Your agents add to this with their remember tool, or:  knos remember")
+        return
+    for n in written:
+        _quote(f"{n['about']}: {n['note']}")
+        out.print(f"    [dim]{n['when']}[/dim]")
+    out.print(f"[dim]{len(written)} written down. Drop one:  knos forget <name>[/dim]")
 
-    raise typer.Exit(demo_mod.run(out))
+
+@app.command()
+def forget(about: str = typer.Argument(..., help="the note to drop")) -> None:
+    """Drop something written down. It is archived, not erased."""
+    repo = _repo()
+    with Memory(repo) as mem:
+        if not mem.remembered(about):
+            raise Stop(f"Nothing written down about {about}.", "See what there is:  knos notes")
+        mem.supersede(TOPIC, about, "the person dropped it")
+    out.print(f"Forgotten: {about}. Your agents will not repeat it.")
+
+
+@app.command()
+def compact(days: int = typer.Option(30, "--older-than", help="drop notes forgotten more than this many days ago")) -> None:
+    """Make room in Sibyl memory: drop long-forgotten notes and give freed space back. Nothing answers use is lost."""
+    repo = _repo()
+    with Memory(repo) as mem:
+        got = mem.compact(days)
+        capped = mem.capped
+    mb = lambda b: b / (1024 * 1024)  # noqa: E731
+    out.print(f"{mb(got['before']):.2f} MB -> {mb(got['after']):.2f} MB"
+              + (" of Sibyl's 5 MB free tier" if capped else "") + f". Dropped {got['dropped']} forgotten note(s).")
+    if got["duplicates"]:
+        out.print(f"[dim]{got['duplicates']} journal entries were recorded twice; Sibyl's journal is append-only, so "
+                  "they stay (answers show each once).[/dim]")
+    if capped and got["after"] >= 0.8 * 5 * 1024 * 1024:
+        out.print("Still over 80%. Sibyl Pro has no cap:  sibyl upgrade   (https://docs.sibyllabs.org/memory/tiers)")
+
+
+@app.command("private")
+def private_cmd(path: str = typer.Argument(..., help="a path to keep private")) -> None:
+    """Keep a path from your agents."""
+    repo = _repo()
+    private.add(repo, path)
+    out.print(f"{path} is private. You can still search it; your agents cannot see it.")
+
+
+# ---- claims ------------------------------------------------------------------------------
+
+
+@app.command()
+def claim(
+    what: str = typer.Argument(..., help="what you are about to work on"),
+    files: list[str] = typer.Option(None, "--path", "-p", help="files, folders or globs (repeatable)"),
+    minutes: int = typer.Option(30, "--for", help="how long the claim holds, in minutes"),
+) -> None:
+    """Claim files, so every other agent's edit to them is refused until you are done."""
+    from .claims import Claims
+
+    repo = _repo()
+    me = _me(repo)
+    with Claims(repo) as c:
+        took, conflict, mine = c.take(me, what, list(files or []) or None, holds_min=minutes)
+    if not took and conflict is not None:
+        from .guard import _since
+        raise Stop(f"Not claimed: {', '.join(conflict.globs)} is held by {conflict.label} since "
+                   f"{_since(conflict.taken_at)} ({conflict.description}).",
+                   "Ask them, or take other work. A person can release it:  knos done --all")
+    if mine is None or mine.advisory:
+        out.print(f"Claimed \"{what}\" as advisory: no file named in it resolved, so other agents are told but "
+                  "nothing is blocked. Name files:  knos claim \"...\" -p src/parser/**")
+    else:
+        out.print(f"Claimed {', '.join(mine.globs)} for {mine.holds_min} min. Other agents' edits to it are refused.")
+    out.print("Give it back:  knos done")
+
+
+@app.command()
+def done(
+    what: str = typer.Argument("", help="one claim (description or id); empty means all of yours"),
+    everyone: bool = typer.Option(False, "--all", help="release every agent's claims in this repo (asks first)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="with --all: do not ask"),
+) -> None:
+    """Release your claims. Only ever your own, unless you say --all."""
+    from .claims import Claims
+
+    repo = _repo()
+    me = _me(repo)
+    with Claims(repo) as c:
+        if everyone:
+            live = c.live()
+            if not live:
+                out.print("Nothing is claimed here.")
+                return
+            others = [x for x in live if not x.held_by(me)]
+            if others and not yes:
+                for x in others:
+                    out.print(f"  {x.label}: {', '.join(x.globs) or '(advisory)'} ({x.description})")
+                if not sys.stdin.isatty() or not typer.confirm(f"Release {len(others)} claim(s) other agents hold?"):
+                    raise Stop("Nothing released.", "To release them all without asking:  knos done --all --yes")
+            gone = c.release(me, what, everyone=True)
+        else:
+            gone = c.release(me, what)
+    if not gone:
+        out.print("You hold no claims here." if not what else f"You hold no claim on {what} here.")
+        out.print("[dim]This releases only your own. Every agent's:  knos done --all[/dim]")
+        return
+    for x in gone:
+        out.print(f"Released {', '.join(x.globs) or '(advisory)'} ({x.description}, {x.label}).")
+
+
+@app.command()
+def status() -> None:
+    """What knos holds for this repo, and who is working where."""
+    from . import guard
+    from .claims import Claims, claims_db
+
+    repo = _repo()
+    _fresh(repo)
+    with Memory(repo) as mem:
+        size = mem.footprint() / (1024 * 1024)
+        tiers = mem.tiers()
+        only_here = mem.only_here()
+        capped, near = mem.capped, mem.near_full()
+    out.print(f"[bold]{repo}[/bold]")
+    trees = paths.worktrees(repo)
+    if len(trees) > 1:
+        out.print(f"  [dim]shared with {len(trees) - 1} other worktree(s) of this repo[/dim]")
+    for name, what, how in tiers:
+        out.print(f"  {name:<10} {what:<34} [dim]{how}[/dim]")
+    room = f"{size:.1f} MB" + (" of Sibyl's 5 MB free tier (this repo's store plus your own Sibyl memory)" if capped
+                                else " in Sibyl (your Sibyl account: no cap)")
+    if near:
+        room += "  - nearly full: knos compact, or sibyl upgrade"
+    out.print(f"  {'':<10} {room}")
+    out.print(f"  {'':<10} {only_here} notes exist nowhere else; the rest is re-read from your repo")
+    if claims_db(repo).exists():
+        with Claims(repo) as c:
+            live = c.live()
+        for x in live:
+            out.print(f"  [yellow]claimed[/yellow]    {x.label}: {', '.join(x.globs) or '(advisory)'} "
+                      f"({x.description}, {x.minutes_left:.0f} min left)")
+    found = sessions.clients_found()
+    out.print(f"  agent history: {', '.join(k for k, v in found.items() if v) or 'none found'}")
+    if not code.indexed(repo):
+        structure = "still to read (knos point)"
+    elif code.installed():
+        structure = "read, with universal-ctags"
+    else:
+        structure = f"read, by knos itself ({builtin_reader.languages()} kinds of file)"
+    out.print(f"  code structure: {structure}")
+    wired = guard.installed()
+    out.print(f"  edit guard: {', '.join(k for k, v in wired.items() if v) or 'off (knos init)'}")
+    out.print(f"  {len(private.DEFAULT_PATTERNS)} kinds of secret private by default, "
+              f"{len(private.added_patterns(repo))} added by you")
+
+
+@app.command()
+def worth() -> None:
+    """What knos has actually done here: claims, releases, edits refused."""
+    from . import worth as tally
+
+    repo = _repo()
+    with Memory(repo) as mem:
+        got = tally.tally(repo, mem)
+    out.print(f"[bold]{repo.name}[/bold]")
+    out.print(f"  {tally.sentence(got)}")
+    out.print(f"  claimed    {got['claimed']:4}   by {got['agents']} agent(s); {got['live']} live now")
+    out.print(f"  released   {got['released']:4}   given back rather than left to lapse")
+    out.print(f"  blocked    {got['blocked']:4}   edits refused because another agent held the file")
+    out.print(f"  withdrawn  {got['withdrawn']:4}   rules the instruction file stopped carrying")
+    out.print("[dim]Counted from what was written at the time, not from a counter.[/dim]")
+
+
+@app.command()
+def who() -> None:
+    """Which agents finish what they claim, and what hold that has earned them."""
+    from . import record
+
+    repo = _repo()
+    with Memory(repo) as mem:
+        everyone = record.everyone(mem)
+    if not everyone:
+        out.print(f"Nobody has claimed anything here yet. Every agent starts at {record.UNKNOWN} minutes.")
+        return
+    out.print("[bold]who[/bold]                    [dim]claimed  closed  hold[/dim]")
+    for got in everyone:
+        out.print(f"  {got['who'][:22]:22} {got['taken']:4}  {got['finished']:6}  {got['holds']:3} min")
+
+
+# ---- sharing through the repo ------------------------------------------------------------
+
+
+@app.command()
+def export(to: str = typer.Option(None, "--to", metavar="PATH", help="write somewhere else, relative to the repo")) -> None:
+    """Write decisions and current claims into the repo, to commit."""
+    from . import share
+
+    repo = _repo()
+    try:
+        with Memory(repo) as mem:
+            target, decisions, claims = share.write(repo, mem, to)
+    except ValueError as problem:
+        raise Stop(str(problem), "Give a path inside the repo.") from None
+    rel = target.relative_to(repo).as_posix()
+    out.print(f"Wrote {rel}: {decisions} decisions, {claims} claimed. Commit it; a fresh clone reads it back.")
+    if not share.read_back(repo, target):
+        out.print(f"[dim]knos will not read {rel} back; it reads .knos/decisions.md, DECISIONS.md, WORKLOG.md "
+                  "and docs/adr/*.md.[/dim]")
 
 
 @app.command()
@@ -577,503 +561,137 @@ def restore() -> None:
     """Rebuild this repo's decisions from the record committed to it."""
     from . import share
 
-    repo = _repo(None)
+    repo = _repo()
     with Memory(repo) as mem:
         kept, skipped = share.restore(repo, mem)
-
     if kept == 0 and skipped == 0:
         out.print("Nothing to restore: no .knos/decisions.md in this repo.")
-        out.print("  A repo that commits one carries its decisions to any machine.")
         return
-    out.print(f"Restored {kept} decision(s) from .knos/decisions.md.")
-    if skipped:
-        out.print(f"  {skipped} were already here and were left alone.")
-    out.print("")
-    out.print("Claims were not restored, on purpose: a hold is about who is")
-    out.print("moving right now, and rebuilding one on another machine would")
-    out.print("claim a collision that is not happening.")
+    out.print(f"Restored {kept} decision(s) from .knos/decisions.md." + (f" {skipped} were already here." if skipped else ""))
+
+
+# ---- showing it ------------------------------------------------------------------------------
 
 
 @app.command()
-def changed(
-    about: str = typer.Argument(..., help="the decision that has changed"),
-    now_is: str = typer.Argument(..., help="what is true instead"),
+def demo(fast: bool = typer.Option(False, "--fast", help="no pauses")) -> None:
+    """Run the whole product on a throwaway repo. Your own repos are not touched."""
+    from . import demo as demo_mod
+
+    raise typer.Exit(demo_mod.run(out, pause=0.0 if fast else demo_mod.PAUSE))
+
+
+@app.command()
+def board(
+    port: int = typer.Option(0, "--port", help="0 picks a free one"),
+    no_open: bool = typer.Option(False, "--no-open", help="print the address, do not open a browser"),
 ) -> None:
-    """Reverse a decision, and hold everything that rested on it."""
-    from datetime import datetime, timezone
+    """A live page of this repo: claims, agents, spend. Loopback only, with a per-run token."""
+    from . import board as board_mod
 
-    from . import decide
-
-    repo = _repo(None)
-    when = datetime.now(timezone.utc).isoformat()
-    with Memory(repo) as mem:
-        hit = decide.supersede(mem, about, now_is, "you", when)
-
-    if hit["superseded"]:
-        out.print(f"[yellow]{about} is no longer what it was.[/yellow]")
-    else:
-        out.print(f"Recorded: {about}.")
-    out.print("  The old wording is archived, not deleted.")
-
-    tainted = hit["suspect"]
-    if not tainted:
-        out.print("")
-        out.print("Nothing else was resting on it.")
-        return
-
-    out.print("")
-    out.print(f"[yellow]{len(tainted)} thing(s) were reasoned from it:[/yellow]")
-    for name in tainted:
-        out.print(f"  {name}")
-    out.print("")
-    out.print("Until each is looked at, knos holds work on it: the edit is")
-    out.print("refused, a paid answer is refused, and a pull request is told.")
-    out.print('Clear one with:  knos reconsider "<name>"')
+    repo = _repo()
+    board_mod.serve(repo, port=port, open_browser=not no_open, say=lambda s: out.print(s, markup=False))
 
 
 @app.command()
-def reconsider(
-    about: str = typer.Argument(..., help="what you have looked at again"),
+def bench(
+    out_file: str = typer.Option(None, "--out", help="also write the results as markdown here"),
+    quick: bool = typer.Option(False, "--quick", help="fewer rounds"),
 ) -> None:
-    """Say you have looked at something after the decision under it changed."""
-    from datetime import datetime, timezone
+    """Measure knos on this machine: collisions, friction, recall, speed. Every number is re-runnable."""
+    from . import bench as bench_mod
 
-    from . import decide
-
-    repo = _repo(None)
-    when = datetime.now(timezone.utc).isoformat()
-    with Memory(repo) as mem:
-        cleared = decide.reconsider(mem, about, "you", when)
-        left = len(decide.suspects(mem))
-
-    if not cleared:
-        out.print(f"Nothing was being held on {about}.")
-        return
-    out.print(f"{about} is clear. Work on it is no longer held.")
-    if left:
-        out.print(f"  {left} still waiting:  knos held")
+    raise typer.Exit(bench_mod.main(out_file, quick=quick, say=lambda s: out.print(s, markup=False)))
 
 
-@app.command()
-def held() -> None:
-    """What knos is holding, because a decision under it changed."""
-    from . import decide
-
-    repo = _repo(None)
-    with Memory(repo) as mem:
-        waiting = decide.suspects(mem)
-
-    if not waiting:
-        out.print("Nothing is held. No decision has been reversed under live work.")
-        return
-    out.print(f"[yellow]{len(waiting)} thing(s) held:[/yellow]")
-    out.print("")
-    for found in waiting:
-        out.print(f"  [bold]{found['about']}[/bold]")
-        out.print(f"    because {found['because']} changed on {found['when'][:10]}")
-        if found["was"]:
-            out.print(f"    was: {found['was']}")
-        out.print(f"    now: {found['now']}")
-        out.print("")
-    out.print('Clear one with:  knos reconsider "<name>"')
+# ---- plumbing --------------------------------------------------------------------------------
 
 
-@app.command()
-def verify() -> None:
-    """Check that nobody edited the record of who claimed and who overrode."""
-    from . import seal
+@app.command("mcp", hidden=True)
+def mcp_cmd() -> None:
+    """The memory MCP server over stdio."""
+    from . import mcp
 
-    repo = _repo(None)
-    with Memory(repo) as mem:
-        counts = seal.counted(mem)
-        broken = seal.check(mem)
-
-    if not counts["sealed"]:
-        out.print("Nothing sealed yet. The journal is empty.")
-        return
-
-    if not broken:
-        out.print(f"[green]{counts['sealed']} entries, "
-                  f"{counts['writers']} writer(s), every chain adds up.[/green]")
-        out.print("")
-        out.print("  Every entry is sealed against being [bold]edited[/bold].")
-        if counts["chained"]:
-            out.print(f"  {counts['chained']} of them, in "
-                      f"{counts['sequences']} sequence(s), are also sealed "
-                      "against being [bold]deleted[/bold].")
-        else:
-            out.print("  None of them is sealed against being [bold]deleted"
-                      "[/bold] yet: a gap needs a line")
-            out.print("  either side to show it, and no writer here has more "
-                      "than one entry so far.")
-        out.print("  The sequences are what agents did - claimed, stood down,"
-                  " overrode.")
-        out.print("  A fact read out of your code names a file and a line as"
-                  " its source,")
-        out.print("  so it is a chain of one.")
-        out.print("")
-        out.print("[dim]Tamper-evident, not tamper-proof: whoever holds the "
-                  "file could rewrite a chain from the start.[/dim]")
-        return
-
-    out.print(f"[red]{len(broken)} break(s) in {counts['sealed']} entries.[/red]")
-    out.print("")
-    for bad in broken:
-        out.print(f"  [bold]{bad['who']}[/bold]  {bad['when']}")
-        out.print(f"    {bad['text']}")
-        out.print(f"    [dim]expected {bad['expected']}, found {bad['found']}[/dim]")
-        out.print("")
-    raise typer.Exit(1)
+    mcp.main()
 
 
-@app.command()
-def receipts() -> None:
-    """Resolve every on-chain claim this repo makes, against the chain."""
-    from . import receipts as check
-
-    raise typer.Exit(check.main())
-
-
-@app.command(name="at")
-def at_cmd(
-    moment: str = typer.Argument(..., help='a time: "14:00", "2026-09-08 14:00", or "2h"'),
-    about: str = typer.Option("", "--about", help="only facts about this"),
-) -> None:
-    """Who held what at a moment that has already passed."""
-    from . import rewind
-
-    repo = _repo(None)
-    when = rewind.when(moment)
-    if not when:
-        out.print(f"I cannot read {moment!r} as a time.")
-        out.print('Try:  knos at "2026-09-08 14:00"   or   knos at 2h')
-        raise typer.Exit(1)
-
-    with Memory(repo) as mem:
-        said = rewind.at(mem, when, about)
-
-    out.print(f"[bold]{when[:19].replace('T', ' ')} UTC[/bold]")
-    out.print("")
-
-    if said["claims"]:
-        out.print(f"  [yellow]{len(said['claims'])} claim(s) live then:[/yellow]")
-        for held in said["claims"]:
-            out.print(f"    [bold]{held['topic']}[/bold] - {held['who']}")
-            out.print(f"      taken {held['taken'][11:19]}, held {held['held_for']:.0f} min"
-                      f" of the {held['would_lapse_after']} it had earned")
-    else:
-        out.print("  Nothing was claimed then.")
-    out.print("")
-
-    if said["collisions"]:
-        out.print(f"  [yellow]{len(said['collisions'])} collision(s) by then:[/yellow]")
-        for hit in said["collisions"]:
-            mark = "yielded " if hit["kind"] == "stood down" else "OVERRODE"
-            out.print(f"    {hit['when'][11:19]}  [bold]{mark}[/bold]  {hit['text'][:66]}")
-        out.print("")
-
-    if said["known"]:
-        out.print(f"  What the store had been told by then:")
-        for fact in said["known"]:
-            out.print(f"    {fact['when'][11:19]}  {fact['text'][:76]}")
-            out.print(f"              [dim]{fact['where']}[/dim]")
-    else:
-        out.print("  It had been told nothing by then.")
-
-    with Memory(repo) as mem:
-        now = mem.claims()
-    if now and not said["claims"]:
-        out.print("")
-        out.print(f"[dim]{len(now)} claim(s) are live right now, though - "
-                  "`knos status` has them.[/dim]")
-
-    floor = said["earliest_the_journal_holds"]
-    if floor and floor > when:
-        out.print("")
-        out.print(f"[dim]The journal here only reaches back to "
-                  f"{floor[:19].replace('T', ' ')}, so this moment is before "
-                  "anything it still holds.[/dim]")
-
-
-@app.command()
-def worth() -> None:
-    """What knos has actually done here, so you can decide to keep it."""
-    from . import worth as tally
-
-    repo = _repo(None)
-    with Memory(repo) as mem:
-        got = tally.tally(mem)
-        said = tally.sentence(got)
-
-    out.print(f"[bold]{repo.name}[/bold]")
-    out.print("")
-    out.print(f"  {said}")
-    out.print("")
-    out.print(f"  stood down   {got['stood_down']:4}   an agent asked, and went elsewhere")
-    out.print(f"  overrode     {got['overrode']:4}   went ahead anyway, with a reason on record")
-    out.print(f"  held         {got['held']:4}   things waiting on a reversed decision")
-    out.print(f"  claims       {got['claims_taken']:4}   of which {got['claims_finished']} were closed"
-              f", across {got['agents']} agent(s)")
-    out.print(f"  withdrawn    {got['withdrawn']:4}   rules the file itself stopped carrying")
-    out.print("")
-    out.print("[dim]Counted from what was written at the time, not from a "
-              "counter. Delete the store and these go with it.[/dim]")
-
-
-@app.command()
-def who() -> None:
-    """Which agents finish what they claim, and what that has earned them."""
-    from . import record
-
-    repo = _repo(None)
-    with Memory(repo) as mem:
-        everyone = record.everyone(mem)
-
-    if not everyone:
-        out.print("Nobody has claimed anything here yet.")
-        out.print("")
-        out.print("Every agent starts at the flat "
-                  f"{record.UNKNOWN} minutes. What it does with its claims "
-                  "is what changes that.")
-        return
-
-    out.print("[bold]who[/bold]        [dim]claimed  closed   closed%  counted  hold[/dim]")
-    out.print("")
-    for got in everyone:
-        # Held back until it is actually being used for something. One claim
-        # in progress is 0% closed and reads like a bad record; it is not a
-        # record at all yet, and `holds` already says so.
-        kept = f"{got['kept']:.0%}" if got["learned"] and got["kept"] is not None else "-"
-        # The number the hold is actually computed from. Without it the row is
-        # arithmetic that does not work: an agent quiet for months reads
-        # "100% closed" beside a hold well under the ceiling, and the person
-        # is left to guess why.
-        counts = f"{got['shrunk']:.0%}" if got["learned"] else "-"
-        note = "" if got["learned"] else "  [dim](too new to judge)[/dim]"
-        if got["learned"] and got["quiet_days"] >= record.HALF_LIFE_DAYS:
-            note = f"  [dim](quiet {got['quiet_days']:.0f} days)[/dim]"
-        out.print(
-            f"  {got['who'][:22]:22} {got['taken']:4}  {got['finished']:5}"
-            f"  {kept:>7}  {counts:>7}  {got['holds']:2} min{note}"
-        )
-    out.print("")
-    out.print(f"[dim]An agent that never closes a claim holds work for "
-              f"{record.FLOOR} minutes; one that always does, "
-              f"{record.CEILING}. Nobody is judged on fewer than "
-              f"{record.PROVEN}, and the ends of that range take "
-              f"{record.STRONG}.[/dim]")
-    out.print(f"[dim]`counted` is `closed%` after two adjustments: a thin "
-              f"record is pooled with the {record.UNKNOWN}-minute prior, and "
-              f"evidence halves every {record.HALF_LIFE_DAYS:.0f} days an "
-              f"agent is quiet. The hold is computed from `counted`.[/dim]")
-    out.print("[dim]This lives in the store and nowhere else. Delete it and "
-              "everyone is a stranger again.[/dim]")
-
-
-@app.command()
-def claim(
-    topic: str = typer.Argument(..., help="what you are about to work on"),
-    who: str = typer.Option("you", "--as", help="the name to claim it under"),
-) -> None:
-    """Say you are working on something, so your agents hold off."""
-    from datetime import datetime, timezone
-
-    repo = _repo(None)
-    now = datetime.now(timezone.utc).isoformat()
-    with Memory(repo) as mem:
-        # No session id: a person is not a connection, and a claim made at
-        # the terminal has to outlive the shell that made it. `knos done`
-        # is how it ends, along with the hold this agent has earned.
-        try:
-            took, holder = mem.claim_if_free(topic, who, now)
-        except StoreFull:
-            out.print("Not claimed. The store is full: 5 MB, Sibyl's free tier.")
-            out.print("Nothing was written. `knos forget` frees room.")
-            raise typer.Exit(1) from None
-    if not took:
-        held_by = str((holder or {}).get("who", "another agent"))
-        out.print(f"Not claimed. {held_by} is already working on {topic}.")
-        lapses = (holder or {}).get("holds", 30)
-        out.print(f"Ask them, or wait — that claim lapses {lapses} minutes"
-                  " after it was taken.")
-        raise typer.Exit(0)
-    out.print(f"Claimed {topic}. Every agent here now gets this, and nothing else:")
-    out.print("")
-    for line in answer.withheld(topic, who == "you").splitlines():
-        out.print(f"  [dim]{line}[/dim]" if line else "")
-    out.print("")
-    out.print("Give it back with:  knos done")
-
-
-@app.command()
-def export(
-    to: str = typer.Option(
-        None,
-        "--to",
-        metavar="PATH",
-        help="write somewhere else, relative to the repo",
-    ),
-) -> None:
-    """Write decisions and current work into the repo, to commit."""
-    from . import share
-
-    repo = _repo(None)
+@app.command("hook", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def hook_cmd(ctx: typer.Context, which: str = typer.Argument(..., help="guard or start")) -> None:
+    """The agent hooks. Always exit 0 or 2 (2 = refuse an edit); never crash in front of an agent."""
     try:
-        with Memory(repo) as mem:
-            target, decisions, claims = share.write(repo, mem, to)
-    except ValueError as problem:
-        _stop(errors.Problem(str(problem), "Give a path inside the repo."))
+        if which == "guard":
+            from . import guard_hook
 
-    rel = target.relative_to(repo).as_posix()
-    out.print(f"Wrote {rel} - {decisions} decisions, {claims} claimed.")
-    out.print("")
-    if share.read_back(repo, target):
-        out.print("Commit it. Anyone who clones this repo reads it on their first")
-        out.print("question, and CI can warn a pull request that touches claimed work.")
-    else:
-        # Said plainly rather than quietly: a file knos will not read back is
-        # still a useful file for people, and pretending otherwise is how
-        # somebody finds out weeks later that the loop never closed.
-        out.print(f"Commit it — but knos will not read {rel} back. It reads")
-        out.print("`.knos/decisions.md`, `DECISIONS.md`, `WORKLOG.md` and")
-        out.print("`docs/adr/*.md`. Anywhere else is for people, not for the")
-        out.print("next agent's first question.")
+            raise typer.Exit(guard_hook.main(list(ctx.args)))
+        if which == "start":
+            from . import start_hook
 
-
-@app.command()
-def guard(
-    install: bool = typer.Option(False, "--install", help="wire the hooks"),
-    uninstall: bool = typer.Option(False, "--uninstall", help="take them back out"),
-) -> None:
-    """Refuse edits to claimed work, in the clients that allow it.
-
-    Off unless you ask for it. Everything else knos does is a refusal to
-    answer, which costs an agent nothing if knos is wrong. This one stops an
-    edit, so it is never installed by `knos connect` and `--uninstall`
-    removes every trace of it.
-    """
-    from . import guard as guard_mod
-
-    if install and uninstall:
-        _stop(errors.Problem("Pick one of --install or --uninstall.", ""))
-
-    if install:
-        wrote = [
-            ("Claude Code", guard_mod.install_claude()),
-            ("Cursor", guard_mod.install_cursor()),
-            ("OpenCode", guard_mod.install_opencode()),
-        ]
-        out.print("The guard is on. Every file it touched was backed up first.")
-        out.print("")
-        for name, path in wrote:
-            out.print(f"  {name:<12} {path}")
-        out.print("")
-        out.print("An agent editing work another agent claimed is now refused, and")
-        out.print("so is an edit to a path your CLAUDE.md or AGENTS.md forbids.")
-        out.print("Claude Desktop has no hooks, so it is not in the list.")
-        out.print("Restart Cursor and OpenCode; Claude Code picks it up next run.")
-        out.print("")
-        out.print("`knos guard --uninstall` takes all of it back out.")
-        return
-
-    if uninstall:
-        gone = [
-            ("Claude Code", guard_mod.uninstall_claude()),
-            ("Cursor", guard_mod.uninstall_cursor()),
-            ("OpenCode", guard_mod.uninstall_opencode()),
-        ]
-        took = [name for name, did in gone if did]
-        if took:
-            out.print("Removed from " + ", ".join(took) + ".")
-        else:
-            out.print("Nothing to remove - the guard was not installed.")
-        return
-
-    state = guard_mod.installed()
-    if any(state.values()):
-        for name, on in state.items():
-            out.print(f"  {name:<10} {'guarding' if on else 'not wired'}")
-    else:
-        out.print("The guard is off. `knos guard --install` turns it on.")
-        out.print("")
-        out.print("It refuses an edit to work another agent has claimed, and an")
-        out.print("edit to a path this repo's own rules forbid. Claude Code,")
-        out.print("Cursor and OpenCode only - Claude Desktop has no hooks.")
-
-
-@app.command()
-def done() -> None:
-    """Say you have finished what you were doing."""
-    repo = _repo(None)
-    with Memory(repo) as mem:
-        mem.done_working()
-    out.print("Noted. Your other agents will stop being warned off it.")
-
-
-@app.command()
-def notes() -> None:
-    """What your agents have written down."""
-    repo = _repo(None)
-    with Memory(repo) as mem:
-        written = mem.notes()
-    if not written:
-        out.print("Nothing written down yet.")
-        out.print('Your agents add to this with their remember tool, or:')
-        out.print('  knos ask "..."   to see what is already known')
-        return
-    for n in written:
-        _quote(f"{n['about']}: {n['note']}")
-        out.print(f"    [dim]{n['when']}[/dim]")
-        out.print("")
-    out.print(f"[dim]{len(written)} written down. Drop one: knos forget <name>[/dim]")
-
-
-@app.command()
-def forget(about: str = typer.Argument(..., help="the note to drop")) -> None:
-    """Drop something your agents wrote down."""
-    repo = _repo(None)
-    with Memory(repo) as mem:
-        if not mem.remembered(about):
-            out.print(f"Nothing written down about {about}.")
-            out.print("See what there is:  knos notes")
-            raise typer.Exit(1)
-        mem.supersede(TOPIC, about, "the person dropped it")
-    out.print(f"Forgotten: {about}.")
-    out.print("Your agents will not repeat it.")
-
-
-@app.command()
-def why() -> None:
-    """Whether you have the problem knos is for, counted on your own machine."""
-    from . import why as measure_why
-
-    got = measure_why.measure()
-    out.print("")
-    out.print(f"  {measure_why.sentence(got)}")
-    out.print("")
-    if got["windows"]:
-        for width, (working, shared, pct) in sorted(got["windows"].items()):
-            out.print(f"  {width:2} minute windows   {shared:5} of {working:5}   {pct:5}%")
-        out.print("")
-        out.print("[dim]Windows in which two or more of your agent sessions each did"
-                  " something. That is the precondition for a collision, not a"
-                  " collision: two agents in the same minute may be nowhere near"
-                  " each other. Nothing was written and nothing left this"
-                  " machine.[/dim]")
-    else:
-        out.print("[dim]knos reads Claude Code's session transcripts. Nothing was"
-                  " written and nothing left this machine.[/dim]")
+            raise typer.Exit(start_hook.main(list(ctx.args)))
+    except typer.Exit:
+        raise
+    except Exception:
+        pass
+    raise typer.Exit(0)
 
 
 @app.command("help")
 def help_cmd(command: str = typer.Argument(None, help="a command to explain")) -> None:
     """More about one command."""
-    out.print(help_text.for_command(command) if command else help_text.main())
+    out.print(help_text.for_command(command) if command else help_text.main(), markup=False)
 
 
-def main() -> None:
-    app()
+def _register_pro() -> None:
+    try:
+        from .pro.cli import register
+    except ImportError:
+        return
+    register(app, out, Stop)
+
+
+_register_pro()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The console script. Errors are one line, never a traceback."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args[:2] == ["plane", "mcp"]:  # host configs written by 0.1 start `knos plane mcp`
+        args = ["mcp"] + args[2:]
+    try:
+        rc = app(args=args, standalone_mode=False, prog_name="knos")
+        return int(rc) if isinstance(rc, int) else 0
+    except Stop as why:
+        out.print(why.said, markup=False)
+        if why.fix:
+            out.print(why.fix, markup=False)
+        return 1
+    except StoreGone as gone:
+        out.print(str(gone), markup=False)
+        return 1
+    except typer.Exit as e:
+        return int(e.exit_code or 0)
+    except typer.Abort:
+        out.print("Stopped.")
+        return 1
+    except KeyboardInterrupt:
+        out.print("Stopped.")
+        return 130
+    except Exception as e:  # usage errors and anything unforeseen: one line
+        # A usage error from click, or from the copy of click newer typers bundle: both carry format_message().
+        if hasattr(e, "format_message") and type(e).__name__.endswith(("UsageError", "BadParameter", "NoSuchOption",
+                                                                       "MissingParameter", "BadOptionUsage",
+                                                                       "ClickException", "BadArgumentUsage")):
+            out.print(e.format_message(), markup=False)
+            out.print("See:  knos help", markup=False)
+            return 2
+        out.print(f"knos stopped: {type(e).__name__}: {e}", markup=False)
+        out.print("If this repeats, please report it with the command you ran.", markup=False)
+        return 1
+    return 0
+
+
+def _entry() -> None:
+    raise SystemExit(main())
 
 
 if __name__ == "__main__":
-    main()
+    _entry()

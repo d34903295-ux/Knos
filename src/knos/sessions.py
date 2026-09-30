@@ -69,9 +69,15 @@ def _text_of(content: object) -> str:
 def _encoded(path: Path) -> str:
     """A path the way Claude Code names the folder it keeps it under.
 
-    `C:\\Users\\me\\work` becomes `C--Users-me-work`: the separators and the
-    drive colon each become a dash.
+    Every character that is not a letter or a digit becomes a dash: `C:\\Users\\me\\my_app.v2` is
+    `C--Users-me-my-app-v2` (separators, the drive colon, `.`, `_`, `-` and spaces alike; see
+    anthropics/claude-code#35162). The encoding is lossy, which is why the per-line `cwd` check still decides.
     """
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def _encoded_legacy(path: Path) -> str:
+    """The rule knos 0.1 assumed (only separators and the colon), kept so folders it matched still match."""
     return re.sub(r"[:\\/]", "-", str(path))
 
 
@@ -101,12 +107,12 @@ def _transcripts(root: Path, repo: Path | None) -> list[Path]:
     # anything under it, plus one folder per ancestor. Every other project on
     # the disk is skipped, and the per-line cwd check below still decides.
     here = Path(repo).resolve()
-    wanted = _encoded(here)
-    ancestors = {_encoded(a) for a in here.parents}
+    wanted = {_encoded(here), _encoded_legacy(here)}
+    ancestors = {enc(a) for a in here.parents for enc in (_encoded, _encoded_legacy)}
     mine = [
         d
         for d in folders
-        if d.name == wanted or d.name.startswith(wanted + "-") or d.name in ancestors
+        if d.name in wanted or any(d.name.startswith(w + "-") for w in wanted) or d.name in ancestors
     ]
     if mine:
         return [f for d in mine for f in d.rglob("*.jsonl")]
@@ -121,7 +127,19 @@ def _transcripts(root: Path, repo: Path | None) -> list[Path]:
     return list(root.rglob("*.jsonl"))
 
 
-def read_claude(repo: Path | None = None) -> Iterator[Turn]:
+def _inside_repo(cwd: str, repo: str) -> bool:
+    """Whether a session's working directory is this repo or inside it.
+
+    A bare prefix test let `.../app` take in the sessions of a sibling `.../app-secret`, and so hand another
+    project's conversations to agents working here. Only the directory itself, or a path under it, counts."""
+    cwd, repo = cwd.rstrip("/\\"), repo.rstrip("/\\")
+    return cwd == repo or cwd.startswith(repo + "/") or cwd.startswith(repo + "\\")
+
+
+def read_claude(repo: Path | None = None, offsets: dict[str, int] | None = None) -> Iterator[Turn]:
+    """Every Claude Code turn about `repo`. With `offsets` ({file: byte offset}), each file is read from where the
+    last read stopped and the dict is advanced to the end of the last complete line: transcripts only grow, so a
+    refresh reads what was appended and nothing else (ported from the plane's import, attach.py)."""
     root = claude_root()
     if not root.exists():
         return
@@ -134,12 +152,24 @@ def read_claude(repo: Path | None = None) -> Iterator[Turn]:
     # doubled, so this is the same test the parsed check makes.
     needle = json.dumps(want)[1:-1] if want else ""
     for f in sorted(_transcripts(root, repo)):
+        key = str(f)
+        start = int((offsets or {}).get(key, 0))
         try:
-            handle = f.open(encoding="utf-8", errors="replace")
+            size = f.stat().st_size
+            if start > size:
+                start = 0  # the file was replaced: read it again from the top
+            handle = f.open("rb")
         except OSError:
             continue  # corrupt or locked: skip it, keep going
         with handle:
-            for line in handle:
+            handle.seek(start)
+            data = handle.read()
+        end = data.rfind(b"\n") + 1
+        if offsets is not None:
+            offsets[key] = start + end
+        lines = data[:end].decode("utf-8", errors="replace").splitlines()
+        if lines:
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue
@@ -164,7 +194,7 @@ def read_claude(repo: Path | None = None) -> Iterator[Turn]:
                 if not MIN_CHARS <= len(text) <= MAX_CHARS:
                     continue
                 cwd = str(rec.get("cwd") or "")
-                if want and cwd and not cwd.lower().startswith(want):
+                if want and cwd and not _inside_repo(cwd.lower(), want):
                     continue
                 yield Turn(
                     client="Claude Code",
@@ -276,10 +306,10 @@ def read_cursor(repo: Path | None = None) -> Iterator[Turn]:
         conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
     except sqlite3.Error:
         return
-    when = datetime.fromtimestamp(src.stat().st_mtime, tz=timezone.utc).isoformat()
     want = Path(repo).resolve() if repo else None
     try:
         folders = _folders_by_composer(conn)
+        started = _composer_dates(conn)
         rows = conn.execute(
             "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
         )
@@ -298,6 +328,9 @@ def read_cursor(repo: Path | None = None) -> Iterator[Turn]:
             text = str(rec.get("text") or "").strip()
             if not MIN_CHARS <= len(text) <= MAX_CHARS:
                 continue
+            # The turn's own time when Cursor recorded one, else its conversation's start. Never the database's
+            # modification time, which dated every turn ever written to the moment Cursor last saved anything.
+            when = _stamp(rec.get("createdAt")) or started.get(composer, "")
             yield Turn(
                 client="Cursor",
                 session=composer,
@@ -313,20 +346,120 @@ def read_cursor(repo: Path | None = None) -> Iterator[Turn]:
         shutil.rmtree(tmp.parent, ignore_errors=True)
 
 
+def _stamp(value: object) -> str:
+    """An ISO timestamp from Cursor's createdAt (epoch milliseconds, or already ISO), or "" when absent."""
+    if isinstance(value, (int, float)) and value > 0:
+        secs = value / 1000 if value > 1e11 else value
+        try:
+            return datetime.fromtimestamp(secs, tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return ""
+    if isinstance(value, str) and value[:4].isdigit():
+        return value
+    return ""
+
+
+def _composer_dates(conn: sqlite3.Connection) -> dict[str, str]:
+    """When each Cursor conversation started, from its composerData record."""
+    out: dict[str, str] = {}
+    try:
+        rows = conn.execute("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
+        for key, value in rows:
+            try:
+                rec = json.loads(value)
+            except (ValueError, TypeError):
+                continue
+            got = _stamp(rec.get("createdAt"))
+            if got:
+                out[key.split(":", 1)[1]] = got
+    except sqlite3.Error:
+        return out
+    return out
+
+
 def _within(folder: Path, repo: Path) -> bool:
+    """Whether a Cursor window's folder is this repo or inside it. A window opened on a parent folder is not this
+    repo's: counting it put every sibling project's conversations into each child repo."""
     try:
         folder = folder.resolve()
     except OSError:
         return False
-    return folder == repo or repo in folder.parents or folder in repo.parents
+    return folder == repo or repo in folder.parents
 
 
-# ---- both -------------------------------------------------------------
+# ---- Codex ------------------------------------------------------------
 
 
-def read_all(repo: Path | None = None) -> list[Turn]:
-    """Every turn from every supported client. Read on demand only."""
-    turns = list(read_claude(repo)) + list(read_cursor(repo))
+def codex_root() -> Path:
+    override = os.environ.get("KNOS_CODEX_HOME") or os.environ.get("CODEX_HOME")
+    return (Path(override) if override else Path.home() / ".codex") / "sessions"
+
+
+def _codex_text(content: object) -> str:
+    if not isinstance(content, list):
+        return ""
+    parts = [str(c.get("text") or "") for c in content if isinstance(c, dict)
+             and c.get("type") in ("input_text", "output_text", "text")]
+    return "\n".join(p for p in parts if p).strip()
+
+
+def read_codex(repo: Path | None = None, offsets: dict[str, int] | None = None) -> Iterator[Turn]:
+    """Every Codex turn about `repo`, from ~/.codex/sessions/**/rollout-*.jsonl. A rollout names its working
+    directory in `session_meta` (and again in each `turn_context`); only a rollout whose directory is this repo, or
+    inside it, is read. Offsets work as for Claude Code."""
+    root = codex_root()
+    if not root.is_dir():
+        return
+    want = str(Path(repo).resolve()).lower() if repo else None
+    for f in sorted(root.rglob("rollout-*.jsonl")):
+        key = str(f)
+        try:
+            with f.open("rb") as fh:
+                head = fh.readline(65536)  # session_meta is the first line
+            meta = json.loads(head).get("payload") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        cwd = str(meta.get("cwd") or "")
+        if want and not (cwd and _inside_repo(cwd.lower(), want)):
+            continue
+        session = str(meta.get("id") or meta.get("session_id") or f.stem)
+        start = int((offsets or {}).get(key, 0))
+        try:
+            if start > f.stat().st_size:
+                start = 0
+            with f.open("rb") as fh:
+                fh.seek(start)
+                data = fh.read()
+        except OSError:
+            continue
+        end = data.rfind(b"\n") + 1
+        if offsets is not None:
+            offsets[key] = start + end
+        for line in data[:end].decode("utf-8", errors="replace").splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            payload = rec.get("payload") if isinstance(rec, dict) else None
+            if rec.get("type") != "response_item" or not isinstance(payload, dict) or payload.get("type") != "message":
+                continue
+            role = payload.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            text = _codex_text(payload.get("content"))
+            if text.startswith("<") or not MIN_CHARS <= len(text) <= MAX_CHARS:
+                continue  # injected context (<environment_context>, <user_instructions>) is not something said
+            yield Turn(client="Codex", session=session, role="user" if role == "user" else "agent", text=text,
+                       when=str(rec.get("timestamp") or ""), cwd=cwd)
+
+
+# ---- all of them --------------------------------------------------------
+
+
+def read_all(repo: Path | None = None, offsets: dict[str, int] | None = None) -> list[Turn]:
+    """Every turn from every supported client. Read on demand only. `offsets` makes Claude Code and Codex
+    transcripts incremental; Cursor's database is read whole and de-duplicated by the store."""
+    turns = list(read_claude(repo, offsets)) + list(read_codex(repo, offsets)) + list(read_cursor(repo))
     turns.sort(key=lambda t: t.when)
     return turns
 
@@ -334,5 +467,6 @@ def read_all(repo: Path | None = None) -> list[Turn]:
 def clients_found() -> dict[str, bool]:
     return {
         "Claude Code": claude_root().exists(),
+        "Codex": codex_root().exists(),
         "Cursor": cursor_db().exists(),
     }

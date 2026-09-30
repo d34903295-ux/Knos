@@ -2,25 +2,39 @@
 
 Knos is otherwise local on purpose. But two things exist nowhere a teammate
 can reach — what somebody decided, and what somebody is working on now — and
-those are exactly what a second clone, or CI, needs.
+those are exactly what a second clone needs.
 
-So `knos export` writes one committed file, and this proves the whole loop:
-a maintainer exports, a *second clean clone* reads the same evidence with no
-import step, and the CI check fires on a pull request that touches claimed
-work. Three sides, one file, no server.
+So `knos export` writes one committed file, and this proves the loop: a
+maintainer exports, a *second clean clone* reads the same decisions with no
+import step, and the file parses back (share.read_decisions / read_claims) into
+exactly what was written, whatever a stranger commits to it.
+
+0.2.0: claims come from claims.db (description, who, since, globs). The GitHub Action / CI pull-request warning is gone
+from the product (no action/ folder). Dropped with it:
+  - test_ci_warns_only_when_the_pull_request_touches_claimed_work
+  - test_the_action_reports_decisions_as_well_as_claims
+  - test_a_wall_of_claims_is_capped_the_way_decisions_are
+  - test_the_action_never_returns_non_zero
+The hostile-input test used to run the Action as a subprocess; it now feeds the same inputs to the parsers
+(share.read_decisions, share.read_claims) and to share.restore, and the round-trip test checks share's own parsers.
 """
 
 from __future__ import annotations
 
-import pytest
-
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from knos import answer, paths, share
+from knos.claims import Claims
+from knos.cli import main
+from knos.identity import Agent
 from knos.memory import TOPIC, Fact, Memory
+
+CLAUDE = Agent(host="claude", session="aaaa1111bbbb")
+CURSOR = Agent(host="cursor", session="cccc2222dddd")
 
 
 def _git(where: Path, *args: str) -> None:
@@ -39,17 +53,48 @@ def _decide(repo: Path, note: str, about: str) -> None:
         mem.note_thing(TOPIC, about, {"note": note, "when": _now()[:10]})
 
 
+def _claim(repo: Path, agent: Agent, what: str, globs: list[str]) -> None:
+    with Claims(repo) as c:
+        took, _, _ = c.take(agent, what, globs)
+    assert took
+
+
 def test_export_writes_decisions_and_claims(knos_home, repo):
     _decide(repo, "we chose sqlite because a server is one more thing to run", "storage")
+    _claim(repo, CLAUDE, "the auth refactor", ["src/auth.py"])
     with Memory(repo) as mem:
-        mem.working_on("the auth refactor", "Claude Code", _now())
         target, decisions, claims = share.write(repo, mem)
 
     assert target == repo / ".knos" / "decisions.md"
     assert decisions == 1 and claims == 1
     text = target.read_text(encoding="utf-8")
     assert "we chose sqlite" in text
-    assert "the auth refactor" in text and "Claude Code" in text
+    line = next(x for x in text.splitlines() if x.startswith("- `the auth refactor`"))
+    assert "held by **claude/aaaa1111**" in line, line
+    assert "(src/auth.py)" in line, line
+    assert " since 20" in line and " UTC " in line, line
+
+
+def test_a_released_claim_is_not_exported(knos_home, repo):
+    _claim(repo, CLAUDE, "the auth refactor", ["src/auth.py"])
+    with Claims(repo) as c:
+        c.release(CLAUDE)
+    with Memory(repo) as mem:
+        text, _, claims = share.export(repo, mem)
+    assert claims == 0
+    assert "_Nothing claimed._" in text
+    assert "the auth refactor" not in text
+
+
+def test_knos_export_says_what_it_wrote(knos_home, repo, capsys):
+    _decide(repo, "we chose sqlite", "storage")
+    _claim(repo, CLAUDE, "the auth refactor", ["src/auth.py"])
+    capsys.readouterr()
+
+    assert main(["export"]) == 0
+    said = capsys.readouterr().out
+    assert "Wrote .knos/decisions.md: 1 decisions, 1 claimed." in said, said
+    assert (repo / ".knos" / "decisions.md").is_file()
 
 
 @pytest.mark.critical
@@ -133,113 +178,30 @@ def test_a_private_note_never_reaches_the_shared_file(knos_home, repo):
     assert decisions == 1
 
 
-def test_ci_warns_only_when_the_pull_request_touches_claimed_work(knos_home, repo):
-    """The CI half reads the same file, with no knos installed."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "action"))
-    import knos_pr_check as check
-
-    with Memory(repo) as mem:
-        mem.working_on("the auth refactor", "Cursor", _now())
-        text, _, _ = share.export(repo, mem)
-
-    claims = check.read_claims(text)
-    assert claims == [("the auth refactor", "Cursor")]
-
-    touching = check.words("Rewrite auth refactoring  src/auth.py")
-    assert [t for t, _ in claims if check.words(t) & touching] == ["the auth refactor"]
-
-    unrelated = check.words("Bump pytest in CI  .github/workflows/tests.yml")
-    assert [t for t, _ in claims if check.words(t) & unrelated] == []
-
-
 def test_the_exported_file_survives_a_round_trip(knos_home, repo):
-    """CI parses what export wrote. A format change on one side that the
-    other does not follow makes the check silently stop firing."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "action"))
-    import knos_pr_check as check
-
-    with Memory(repo) as mem:
-        mem.working_on("the parser", "Claude Code", _now())
-        mem.working_on("the risk guard", "you", _now())
-        text, _, claims = share.export(repo, mem)
-
-    assert claims == 2
-    assert sorted(check.read_claims(text)) == sorted(
-        [("the parser", "Claude Code"), ("the risk guard", "you")]
-    )
-    assert sorted(share.read_claims(text)) == sorted(check.read_claims(text))
-
-
-def test_nothing_claimed_means_nothing_to_say(knos_home, repo):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "action"))
-    import knos_pr_check as check
-
-    with Memory(repo) as mem:
-        text, _, claims = share.export(repo, mem)
-    assert claims == 0
-    assert check.read_claims(text) == []
-
-
-def test_the_action_reports_decisions_as_well_as_claims(knos_home, repo):
-    """The Action reads both halves of the exported file. A branch that
-    reopens a settled decision is worth a line, quieter than a collision."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "action"))
-    import knos_pr_check as check
-
+    """The parsers read what export wrote. A format change on one side that the
+    other does not follow makes restore silently recover nothing."""
     _decide(repo, "we chose sqlite because a server is one more thing to run", "storage")
+    _claim(repo, CLAUDE, "the parser", ["src/auth.py"])
+    _claim(repo, CURSOR, "the risk guard", ["README.md"])
     with Memory(repo) as mem:
-        text, _, _ = share.export(repo, mem)
+        text, decisions, claims = share.export(repo, mem)
 
-    found = check.read_decisions(text)
-    assert found == [("storage", "we chose sqlite because a server is one more thing to run")]
-
-    touching = check.words("rework the storage layer  src/storage.py")
-    assert [a for a, _ in found if check.words(a) & touching] == ["storage"]
-
-    unrelated = check.words("Bump pytest in CI  .github/workflows/tests.yml")
-    assert [a for a, _ in found if check.words(a) & unrelated] == []
-
-
-def test_a_wall_of_claims_is_capped_the_way_decisions_are(knos_home, repo):
-    """A repository mid-sprint can hold many claims at once.
-
-    Decisions were already capped, on the grounds that a comment nobody
-    reads is worse than no comment. Claims are the louder half and were
-    not, so a busy repository would get every one of them pasted into a
-    pull request.
-    """
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "action"))
-    import knos_pr_check as check
-
-    with Memory(repo) as mem:
-        for n in range(check.MAX_CLAIMS + 4):
-            mem.working_on(f"the parser stage {n}", "Claude Code", _now())
-        text, _, claims = share.export(repo, mem)
-
-    assert claims == check.MAX_CLAIMS + 4
-    found = check.read_claims(text)
-    assert len(found) == check.MAX_CLAIMS + 4
-
-    subject = check.words("rework the parser  src/parser.py")
-    matched = [(t, w) for t, w in found if check.words(t) & subject]
-    shown, spare = matched[:check.MAX_CLAIMS], len(matched) - check.MAX_CLAIMS
-
-    assert len(shown) == check.MAX_CLAIMS
-    assert spare == 4
-
-
-def test_the_action_never_returns_non_zero(knos_home, repo):
-    """It comments; it does not judge. Every path returns 0, so a memory
-    tool can never be the reason a build is red."""
-    import re
-
-    source = (Path(__file__).resolve().parents[1] / "action" / "knos_pr_check.py").read_text(
-        encoding="utf-8"
+    assert (decisions, claims) == (1, 2)
+    assert sorted(share.read_claims(text)) == sorted(
+        [("the parser", "claude/aaaa1111"), ("the risk guard", "cursor/cccc2222")]
     )
-    in_main = source.split("def main()", 1)[1].split("__main__", 1)[0]
-    returns = set(re.findall(r"^\s+return (\S+)$", in_main, re.M))
-    assert returns == {"0"}, returns
-    assert "sys.exit(main())" in source
+    assert share.read_decisions(text) == [
+        ("storage", "we chose sqlite because a server is one more thing to run", _now()[:10])
+    ]
+
+
+def test_nothing_claimed_and_nothing_decided_means_nothing_parsed(knos_home, repo):
+    with Memory(repo) as mem:
+        text, decisions, claims = share.export(repo, mem)
+    assert (decisions, claims) == (0, 0)
+    assert share.read_claims(text) == []
+    assert share.read_decisions(text) == []
 
 
 def test_export_can_write_where_the_repo_already_keeps_decisions(knos_home, repo):
@@ -250,9 +212,6 @@ def test_export_can_write_where_the_repo_already_keeps_decisions(knos_home, repo
     the one it has instead, and that path is still read back because
     `rules.DECISIONS` already matches it.
     """
-    from knos import share
-    from knos.memory import Memory
-
     with Memory(repo) as mem:
         mem.note_thing(TOPIC, "sqlite", {"note": "chosen over postgres", "when": "2026-08-20"})
         target, _, _ = share.write(repo, mem, "docs/decisions/0001-knos.md")
@@ -263,87 +222,85 @@ def test_export_can_write_where_the_repo_already_keeps_decisions(knos_home, repo
     assert not (repo / ".knos" / "decisions.md").exists()
 
 
-def test_export_says_so_when_it_will_not_read_the_file_back(knos_home, repo):
+def test_export_says_so_when_it_will_not_read_the_file_back(knos_home, repo, capsys):
     """A file knos cannot read back is still useful to people, and saying
     nothing is how somebody discovers weeks later that the loop never closed."""
-    from knos import share
-    from knos.memory import Memory
-
     with Memory(repo) as mem:
         target, _, _ = share.write(repo, mem, "NOTES-for-humans.md")
 
     assert target.is_file()
     assert not share.read_back(repo, target)
 
+    capsys.readouterr()
+    assert main(["export", "--to", "NOTES-for-humans.md"]) == 0
+    assert "knos will not read NOTES-for-humans.md back" in capsys.readouterr().out
+
 
 def test_export_refuses_to_write_outside_the_repo(knos_home, repo):
     """Almost certainly a typo, and git would never carry the result."""
-    import pytest
-
-    from knos import share
-    from knos.memory import Memory
-
     with Memory(repo) as mem:
         with pytest.raises(ValueError):
             share.write(repo, mem, "../escaped.md")
+    assert not (repo.parent / "escaped.md").exists()
 
 
 # Named, because pytest puts the parameter in the test id and also exports
 # that id in PYTEST_CURRENT_TEST - and a 200,000 character payload as a
 # parameter overruns the limit on a Windows environment variable, failing in
 # teardown after the test itself has passed.
+#
+# Each entry: (file body or None, the decisions the parser must find, the claims it must find).
 HOSTILE = {
-    "no file at all": None,
-    "empty": "",
-    "bytes, not markdown": "\x00\x01\x02 binary-ish",
-    "a very long single line": "# " + "x" * 200_000,
-    "a table that lies about its shape": "|||\n|---|\n|" + "a|" * 3000,
-    "control characters and emoji": "# \u202e decisions \U0001f600\n- \u0007claim\n",
-    "html that wants to be a comment": "<script>x</script>\n<!-- knos-pr-check -->\n",
-    "large": "# Decisions\n" + "- something claimed\n" * 20_000,
+    "no file at all": (None, [], []),
+    "empty": ("", [], []),
+    "bytes, not markdown": ("\x00\x01\x02 binary-ish", [], []),
+    "a very long single line": ("# " + "x" * 200_000, [], []),
+    "a table that lies about its shape": ("|||\n|---|\n|" + "a|" * 3000, [], []),
+    "control characters and emoji": ("# ‮ decisions \U0001f600\n- \u0007claim\n", [], []),
+    "html that wants to be a comment": ("<script>x</script>\n<!-- knos-pr-check -->\n", [], []),
+    "large, under no heading knos reads": ("# Decisions\n" + "- something claimed\n" * 20_000, [], []),
+    "half-written lines among good ones": (
+        "## Decisions\n"
+        "- **storage** — we chose sqlite  _(recorded 2026-09-01)_\n"
+        "- **broken line with no separator\n"
+        "- ** — \n"
+        "- **deploys** — on Tuesdays\n"
+        "## Being worked on right now\n"
+        "- `the parser` — held by **claude/aaaa1111** since 2026-09-06 10:00 UTC (src/parser/**)\n"
+        "- `no holder here`\n"
+        "- `` — held by **nobody**\n",
+        [("storage", "we chose sqlite", "2026-09-01"), ("deploys", "on Tuesdays", "")],
+        [("the parser", "claude/aaaa1111")],
+    ),
+    "a wall of claims": (
+        "## Being worked on right now\n"
+        + "".join(f"- `stage {n}` — held by **claude/aaaa1111** since 2026-09-06 10:00 UTC (src/{n}.py)\n"
+                  for n in range(2000)),
+        [],
+        [(f"stage {n}", "claude/aaaa1111") for n in range(2000)],
+    ),
 }
 
 
 @pytest.mark.parametrize("name", sorted(HOSTILE))
-def test_the_action_survives_whatever_is_committed_to_it(tmp_path, name):
-    """The exit code, actually run, not read out of the source.
+def test_the_parsers_survive_whatever_is_committed(knos_home, repo, name):
+    """`.knos/decisions.md` is a file a stranger contributes, so it is exactly the input nobody controls.
 
-    `test_the_action_never_returns_non_zero` reads the file and checks every
-    `return` in `main` is 0. That cannot see an exception raised on the way
-    into `main`, an import that throws, or a run that never finishes - and
-    `.knos/decisions.md` is a file a stranger contributes, so it is exactly
-    the input nobody controls.
-
-    A red X on an unrelated pull request is how a maintainer decides a memory
-    tool is not worth the trouble.
+    The parsers are tolerant by design: a line that does not parse is skipped, and what does parse comes back exactly.
+    Restore goes through the same parser and must not raise either.
     """
-    import os
-    import subprocess
-    import sys
-
-    action = Path(__file__).resolve().parents[1] / "action" / "knos_pr_check.py"
-    body = HOSTILE[name]
+    body, decisions, claims = HOSTILE[name]
     if body is not None:
-        (tmp_path / ".knos").mkdir(parents=True)
-        (tmp_path / ".knos" / "decisions.md").write_text(
-            body, encoding="utf-8", errors="replace"
-        )
+        (repo / ".knos").mkdir(parents=True, exist_ok=True)
+        (repo / ".knos" / "decisions.md").write_text(body, encoding="utf-8", errors="replace")
 
-    done = subprocess.run(
-        [sys.executable, str(action)],
-        cwd=tmp_path, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=120,
-        env={
-            **os.environ,
-            # No event file and no token: the API path has to degrade quietly.
-            "GITHUB_EVENT_PATH": str(tmp_path / "no-such-event.json"),
-            "GITHUB_REPOSITORY": "someone/somewhere",
-            "GITHUB_TOKEN": "",
-            "PYTHONIOENCODING": "utf-8",
-        },
-    )
+        assert share.read_decisions(body) == decisions
+        assert share.read_claims(body) == claims
 
-    assert done.returncode == 0, (
-        f"{name} made the action exit {done.returncode}, which is a red build "
-        f"on somebody's pull request:\n{done.stderr[-600:]}"
-    )
+    with Memory(repo) as mem:
+        kept, skipped = share.restore(repo, mem)
+        assert kept == len(decisions)
+        assert skipped == 0
+        for about, note, _ in decisions:
+            got = mem.thing(TOPIC, about)
+            assert got is not None and got["body"]["note"] == note, got

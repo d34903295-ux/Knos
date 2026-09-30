@@ -1,79 +1,54 @@
 """What knos has actually done here, so a person can decide to keep it.
 
-Every refusal in this product is invisible when it works. An agent asks about
-something another agent is holding, is told to go and ask them, and picks up
-something else - and the person never sees any of it. The collision that did
-not happen leaves no trace in the day, only in the store.
+A refusal that works leaves no trace in the day: the collision that did not happen is invisible. So this counts
+what happened, from records written at the time for their own reasons (claims.db's `events` and the store's withdrawn
+rules). There is no separate counter:
 
-That is a real problem rather than a philosophical one. A tool whose value is
-entirely in things that did not happen gets uninstalled by somebody who
-reasonably concludes it is doing nothing. So this counts the times it did
-something, out of records written for their own reasons at the time:
-
-    stood down    an agent asked about claimed work and went elsewhere
-    overrode      an agent forced past a claim, and said why
-    reversed      a decision was withdrawn and work under it was held
-    finished      claims closed rather than left to lapse
-    withdrawn     a rule its own file had stopped carrying, not served
-
-There is no separate counter and nothing is incremented anywhere. These are
-read back out of WARM and the journal, which means the numbers cannot drift
-from what happened, and deleting the store takes them with it - the same
-property everything else here has.
+    claimed      claims taken, and by how many agents
+    released     claims given back rather than left to lapse
+    blocked      edits the guard refused because another agent held the file
+    withdrawn    rules the instruction file itself stopped carrying, no longer served
 
     knos worth
 
-Deliberately not a score, a streak, or a graph. It is four counts and the
-dates they span, and if they are all zero it says that plainly: knos has not
-been needed here yet, which is a true and useful thing to be told.
+Not a score. If everything is zero it says so: knos has not been needed here yet.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 
-def _dates(rows: list[dict[str, Any]]) -> tuple[str, str]:
-    stamps = sorted(str((r.get("body") or {}).get("when", "")) for r in rows)
-    stamps = [s for s in stamps if s]
-    return (stamps[0][:10], stamps[-1][:10]) if stamps else ("", "")
+def tally(repo: Path, mem: Any | None = None) -> dict[str, Any]:
+    from .claims import Claims, claims_db
+    from .memory import WITHDRAWN
 
-
-def tally(mem: Any) -> dict[str, Any]:
-    """What has happened here, counted from what was written down."""
-    from . import decide, record
-    from .memory import OVERRODE, STOOD_DOWN, WITHDRAWN
-
-    stood = mem.things(STOOD_DOWN, limit=1000)
-    forced = mem.things(OVERRODE, limit=1000)
-    # A rule knos stopped repeating because CLAUDE.md stopped saying it. This
-    # is the only one of these counts that is about a wrong answer prevented
-    # rather than a collision, and it is the one that happens on a repo with
-    # a single agent on it.
-    dropped = mem.things(WITHDRAWN, limit=1000)
-
-    taken = finished = 0
-    people: set[str] = set()
-    for event in record.entries(mem):
-        people.add(event["who"])
-        if event["kind"] == record.TAKEN:
-            taken += 1
-        else:
-            finished += 1
-
-    first, last = _dates(stood + forced)
-
-    return {
-        "stood_down": len(stood),
-        "overrode": len(forced),
-        "held": len(decide.suspects(mem)),
-        "withdrawn": len(dropped),
-        "claims_taken": taken,
-        "claims_finished": finished,
-        "agents": len({p for p in people if p}),
-        "first": first,
-        "last": last,
-    }
+    got: dict[str, Any] = {"claimed": 0, "released": 0, "blocked": 0, "agents": 0, "withdrawn": 0,
+                           "first": "", "last": "", "live": 0}
+    if claims_db(repo).exists():
+        with Claims(repo) as c:
+            events = c.events(limit=100000)
+            got["live"] = len(c.live())
+        who: set[str] = set()
+        for e in events:
+            if e["kind"] == "claim":
+                got["claimed"] += 1
+                who.add(str(e.get("who", "")))
+            elif e["kind"] == "release":
+                got["released"] += 1
+            elif e["kind"] == "blocked":
+                got["blocked"] += 1
+        got["agents"] = len({w for w in who if w})
+        stamps = sorted(e["ts"] for e in events if e.get("ts"))
+        if stamps:
+            got["first"], got["last"] = stamps[0][:10], stamps[-1][:10]
+    if mem is not None:
+        try:
+            got["withdrawn"] = len(mem.things(WITHDRAWN, limit=1000))
+        except Exception:
+            pass
+    return got
 
 
 def _times(n: int) -> str:
@@ -81,11 +56,6 @@ def _times(n: int) -> str:
 
 
 def _span(first: str, last: str) -> str:
-    """A date range, or a single date when both ends are the same day.
-
-    "between 2026-09-08 and 2026-09-08" is the sort of thing that makes a
-    person stop trusting the rest of the line.
-    """
     if not first:
         return ""
     return f", on {first}" if first == last else f", between {first} and {last}"
@@ -93,35 +63,16 @@ def _span(first: str, last: str) -> str:
 
 def sentence(got: dict[str, Any]) -> str:
     """One line a person can act on, or an honest nothing."""
-    if not got["stood_down"] and not got["overrode"]:
-        if got.get("withdrawn"):
-            one = got["withdrawn"] == 1
-            rules_said = "One rule" if one else f"{got['withdrawn']} rules"
-            return (
-                f"{rules_said} in this repo's instruction files "
-                f"{'was' if one else 'were'} deleted after knos read "
-                f"{'it' if one else 'them'}, and knos stopped answering with "
-                f"{'it' if one else 'them'}. Nothing has collided here yet."
-            )
-        if got["claims_taken"]:
-            claims = "One claim" if got["claims_taken"] == 1 else (
-                f"{got['claims_taken']} claims")
-            return (
-                f"{claims} here, and no agent has yet asked about work another "
-                "one was holding. Nothing has collided, so nothing has been "
-                "refused."
-            )
-        return (
-            "Nothing has been claimed here yet, so there has been nothing to "
-            "refuse. knos is not earning its place on this repo."
-        )
-
-    parts = []
-    if got["stood_down"]:
-        parts.append(f"{_times(got['stood_down'])} an agent asked about work "
-                     "somebody else was holding and went elsewhere")
-    if got["overrode"]:
-        parts.append(f"{_times(got['overrode'])} one went ahead anyway, and "
-                     "said why")
-    said = "; ".join(parts) + _span(got["first"], got["last"]) + "."
-    return said[0].upper() + said[1:]
+    if got["blocked"]:
+        said = (f"The guard refused an edit to a file another agent held {_times(got['blocked'])}"
+                f"{_span(got['first'], got['last'])}.")
+        return said
+    if got["claimed"]:
+        n = got["claimed"]
+        return (f"{'One claim' if n == 1 else f'{n} claims'} here, and no agent has yet tried to edit a file another "
+                "one held. Nothing has collided, so nothing has been refused.")
+    if got["withdrawn"]:
+        n = got["withdrawn"]
+        return (f"{'One rule' if n == 1 else f'{n} rules'} this repo's instruction files stopped carrying "
+                f"{'is' if n == 1 else 'are'} no longer served. Nothing has been claimed here yet.")
+    return "Nothing has been claimed here yet, so there has been nothing to refuse."

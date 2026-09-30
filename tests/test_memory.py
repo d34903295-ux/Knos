@@ -297,3 +297,23 @@ def test_the_filing_name_is_the_subject_not_the_telling_off():
 
     assert topic_of("always use pnpm, never npm") == "pnpm npm"
     assert topic_of("never touch the vendor directory") == "touch vendor directory"
+
+
+def test_a_secret_in_a_sessions_words_never_reaches_an_agent(tmp_path):
+    from knos import private
+    records = [dict(text="we deploy with AKIAABCDEFGHIJKLMNOP from ci", path=""),
+               dict(text="the parser splits on commas", path="src/parse.py"),
+               dict(text="workflow", path=".github/workflows/ci.yml"),
+               dict(text="escape", path="docs/../secret/x.md")]
+    agent = private.visible(tmp_path, records, private.AGENT)
+    assert [r["text"] for r in agent] == ["the parser splits on commas", "workflow", "escape"]
+    assert private.visible(tmp_path, records, private.OWNER) == records          # the person still sees it
+    guest = private.visible(tmp_path, records, private.GUEST, allowed=["./.github", "docs/"])
+    assert [r["text"] for r in guest] == ["workflow"]                             # .github kept its dot; no climbing out
+
+
+def test_export_never_writes_a_secret_into_the_committed_record(tmp_path):
+    from knos import share
+    assert not share._safe(tmp_path, "deploy with AKIAABCDEFGHIJKLMNOP", "deploy")
+    assert not share._safe(tmp_path, "rotate it", "sk-ant-api03-" + "x" * 30)
+    assert share._safe(tmp_path, "we dropped redis because the cache was never the problem", "redis")

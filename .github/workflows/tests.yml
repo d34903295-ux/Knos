@@ -6,16 +6,35 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]"
-      # universal-ctags is optional: knos reads code structure itself without
-      # it, and one job that proves the fallback works is worth more than a
-      # matrix that hides it.
-      # -m "" clears the critical-path default in pyproject: a person gets
-      # the fast suite, CI gets all of it.
-      - run: pytest -q -m ""
+      - run: git config --global user.email ci@example.invalid && git config --global user.name ci
+      # The suite is offline: conftest.py refuses every non-loopback connection and gives each test its own home.
+      - run: pytest -q
+      # The 30-second story, on every OS: the wheel installs into a clean venv, and `knos init` wires a fresh home,
+      # starts the server, passes its self-test, and undoes cleanly.
+      - name: wheel installs and knos init works in a clean home
+        shell: bash
+        run: |
+          pip install build
+          python -m build --wheel
+          python -m venv "$RUNNER_TEMP/clean"
+          if [ -d "$RUNNER_TEMP/clean/bin" ]; then BIN="$RUNNER_TEMP/clean/bin"; else BIN="$RUNNER_TEMP/clean/Scripts"; fi
+          "$BIN/python" -m pip install -q dist/*.whl
+          export PATH="$BIN:$PATH" HOME="$RUNNER_TEMP/home" USERPROFILE="$RUNNER_TEMP/home"
+          mkdir -p "$HOME/.cursor"
+          start=$(date +%s)
+          knos init --hosts cursor --no-read
+          echo "init took $(( $(date +%s) - start ))s"
+          test $(( $(date +%s) - start )) -le 30
+          knos init --undo --hosts cursor

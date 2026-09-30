@@ -57,14 +57,14 @@ def repo(tmp_path: Path) -> Path:
 
 
 def test_commits_are_read_even_when_the_sessions_would_fill_the_store(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
+    knos_home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The reproduction, in miniature.
 
     Twelve commits and a transcript far larger than the store. Read in the old
     order the transcript took all of it and the commits were never reached.
     """
-    monkeypatch.setattr(sessions, "read_all", lambda _repo=None: [_Turn(n) for n in range(4000)])
+    monkeypatch.setattr(sessions, "read_all", lambda *_a, **_k: [_Turn(n) for n in range(4000)])
 
     with Memory(repo) as mem:
         counts = answer.point(repo, mem, index_code=False)
@@ -79,7 +79,7 @@ def test_commits_are_read_even_when_the_sessions_would_fill_the_store(
 
 
 def test_the_commits_do_not_take_the_whole_store_either(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
+    knos_home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The share cuts both ways, or it is just a different source starving.
 
@@ -87,7 +87,7 @@ def test_the_commits_do_not_take_the_whole_store_either(
     whole store on commits: the fix for one queue eating everything is not to
     let the other one do it.
     """
-    monkeypatch.setattr(sessions, "read_all", lambda _repo=None: [_Turn(n) for n in range(60)])
+    monkeypatch.setattr(sessions, "read_all", lambda *_a, **_k: [_Turn(n) for n in range(60)])
 
     with Memory(repo) as mem:
         counts = answer.point(repo, mem, index_code=False)
@@ -98,15 +98,63 @@ def test_the_commits_do_not_take_the_whole_store_either(
     )
 
 
-def test_a_repo_with_no_transcript_still_reads_its_commits(repo: Path,
+def test_a_repo_with_no_transcript_still_reads_its_commits(knos_home: Path, repo: Path,
                                                            monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sessions, "read_all", lambda _repo=None: [])
+    monkeypatch.setattr(sessions, "read_all", lambda *_a, **_k: [])
 
     with Memory(repo) as mem:
         counts = answer.point(repo, mem, index_code=False)
 
     assert counts["commits"] == 12
     assert not counts["full"]
+
+
+def _many_commits(n: int) -> list:
+    from knos.git import Commit
+
+    return [Commit(sha=f"{i:040x}", author="t", when="2026-08-20T10:00:00+00:00",
+                   subject=f"decide: the settlement path, part {i}", files=(f"f{i}.py",)) for i in range(n)]
+
+
+def _a_store_that_grows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The store is empty when commits start and past any share by the first check."""
+    sizes = iter([0.0])
+    monkeypatch.setattr(Memory, "size_mb", lambda self: next(sizes, 999.0))
+
+
+def test_the_commit_share_holds_when_the_store_is_capped(
+    knos_home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from knos import git
+
+    monkeypatch.setattr(git, "read_commits", lambda *_a, **_k: _many_commits(60))
+    monkeypatch.setattr(sessions, "read_all", lambda *_a, **_k: [])
+    monkeypatch.setattr(Memory, "capped", property(lambda self: True))
+    _a_store_that_grows(monkeypatch)
+
+    with Memory(repo) as mem:
+        counts = answer.point(repo, mem, index_code=False)
+
+    assert counts["commits_capped"] == 1
+    assert counts["commits"] < 60
+
+
+def test_an_uncapped_store_reads_every_commit(
+    knos_home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The share exists to protect Sibyl's free 5 MB. With no cap there is nothing to share out."""
+    from knos import git
+
+    monkeypatch.setattr(git, "read_commits", lambda *_a, **_k: _many_commits(60))
+    monkeypatch.setattr(sessions, "read_all", lambda *_a, **_k: [])
+    monkeypatch.setattr(Memory, "capped", property(lambda self: False))
+    _a_store_that_grows(monkeypatch)
+
+    with Memory(repo) as mem:
+        counts = answer.point(repo, mem, index_code=False)
+
+    assert counts["commits_capped"] == 0
+    assert counts["commits"] == 60
 
 
 def test_the_share_is_a_named_constant_rather_than_a_number_in_the_loop() -> None:

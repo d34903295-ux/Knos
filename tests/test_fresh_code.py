@@ -42,6 +42,22 @@ def repo(tmp_path: Path) -> Path:
     return repo
 
 
+def test_reading_the_repo_writes_only_to_the_test_home(repo: Path) -> None:
+    """The fixture reads a repo; its store and code index must land in the per-test KNOS_HOME, never ~/.knos."""
+    import os
+
+    from knos import paths
+
+    home = Path(os.environ["KNOS_HOME"]).resolve()
+    assert paths.home().resolve() == home
+    store = paths.store_for(repo).resolve()
+    assert store.exists() and home in store.parents
+    assert home in paths.work_dir(repo).resolve().parents
+    from conftest import _REAL_HOME
+
+    assert (_REAL_HOME / ".knos").resolve() not in store.parents
+
+
 def _ask(repo: Path, question: str = "where is settle_trade"):
     with Memory(repo) as mem:
         return [p for p in answer.ask(repo, mem, question) if p.source == "code"]

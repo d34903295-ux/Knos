@@ -32,7 +32,8 @@ def two_sources(tmp_path, repo, monkeypatch, knos_home):
                 "cwd": str(repo),
                 "message": {"role": "user", "content": DECISION},
             }
-        ),
+        )
+        + "\n",  # only complete lines are read
         encoding="utf-8",
     )
     monkeypatch.setenv("KNOS_CLAUDE_HOME", str(tmp_path / "claude" / "projects"))

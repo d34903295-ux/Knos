@@ -1,269 +1,169 @@
 """The MCP server. Local stdio, launched by the client. Nothing hosted.
 
-Every tool here answers a request an agent made on a person's behalf. The
-server holds no timer and starts no work of its own.
+Four tools: search, about, remember (optionally claiming files), done. Every answer that touches claimed files says
+who holds them; nothing an agent asks is ever hidden. Claims are enforced where edits happen, by the edit guard
+(`guard.py`), not by withholding memory.
 
-Callers reach knos as an agent, never as the owner, so private paths are
-invisible: not redacted, not counted, simply absent.
+The server answers only for the repo it was started in. It never falls back to another repo.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
 from pathlib import Path
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
 from . import version
-from . import answer, code, git, paths, private
-from .memory import (INTENT_HOLDS, TOPIC, Fact, Memory, StoreFull,
-                     _minutes_since)
-
-
-
-
+from . import answer, code, private
+from . import paths as knos_paths
+from .memory import TOPIC, Fact, Memory, StoreFull
 
 server = MCPServer("knos", version=version(), instructions=(
-    "One local memory every coding agent on this machine shares - and it "
-    "knows which of them is in your code right now.\n\n"
-    "What past sessions decided, what commits changed, what this repo's "
-    "CLAUDE.md and AGENTS.md actually say, and how the code is structured. "
-    "Search it before asking the person to repeat themselves.\n\n"
-    "Other agents share this memory right now. One rule: before you change "
-    "anything, call remember(fact, about, claiming=true). One call, and no "
-    "other agent will rewrite it underneath you.\n\n"
-    "When you finish it, call done(about). That is not bookkeeping: until "
-    "you do, every other agent waits out the whole hold on work that is "
-    "already finished, and this memory never learns that you finish what "
-    "you start - which is what decides how long your next claim is worth "
-    "and whether you are trusted to spend.\n\n"
-    "Work another agent has claimed is withheld from you: you are told who "
-    "holds it, not what knos knows about it. Ask them, or pick up something "
-    "else. If you genuinely must have it, call again with override set to "
-    "your reason — you will get the answer, and the reason is written into "
-    "the journal under your name where the person can read it."
+    "One local memory every coding agent on this machine shares, and the list of which files each of them is "
+    "working on right now.\n\n"
+    "Search it before asking the person to repeat themselves: what past sessions decided (in any agent), what "
+    "commits changed and why, what this repo's CLAUDE.md and AGENTS.md say, and how the code is structured. Every "
+    "result names its source.\n\n"
+    "Before you change files, claim them: remember(fact, about, claiming=true, paths=[...]). Another agent's edit "
+    "to a claimed file is refused by the knos edit guard; yours never is. Call done() when you finish, so others "
+    "stop waiting. If a file you need is claimed, you are told who holds it and since when."
 ))
 
-
-NOT_POINTED = (
-    "knos is not in a git repo here, so there is nothing to read."
-    "  Ask the person to run knos in their project."
+NOT_A_REPO = (
+    "knos: this session is not inside a git repository, so there is no repo memory here. "
+    "Start the agent inside your project folder."
 )
-NOTHING_SHARED = "Nothing shared with you."
 FULL = (
-    "The store is full: 5 MB, Sibyl's free tier, and nothing was written."
-    " `knos forget` frees room; `knos status` shows what is using it."
+    "knos: the memory store is full (Sibyl's free 5 MB), and nothing was written. "
+    "Fix: knos compact, or Sibyl Pro (uncapped): sibyl upgrade."
 )
 
-
-# An MCP client gives a server about thirty seconds to come up, and the first
-# question on an unread repo does the whole read inline. On a repository of any
-# size that read is longer than the timeout, so the server never starts and the
-# product does not exist for that person - which is a far worse first minute
-# than an answer that says it has only read part of the repo so far.
-#
-# Twelve seconds leaves room for the rest of the handshake on a slow machine.
-# `knos point` passes no budget at all and reads everything.
 FIRST_READ_BUDGET = 12.0
-
-# Set when that budget ran out, cleared by `knos point`. Every answer says so
-# while it is set.
-PARTIAL = "knos:internal:partial-read"
-
-
-def _held_note(mem, subject: str) -> str:
-    """A line for an answer that rests on a decision somebody withdrew.
-
-    The guard and the gate both refuse on this. Asking is the third path and
-    it said nothing, so the agent least likely to notice - the one that only
-    reads - was the one told nothing.
-    """
-    from . import decide
-
-    try:
-        found = decide.is_suspect(mem, subject)
-    except Exception:
-        return ""
-    if found is None:
-        return ""
-    return decide.refusal(found) + "\n\n"
-
-
-def _unfinished_for(repo) -> str:
-    """The same line, for callers that have already closed the store."""
-    try:
-        with Memory(repo) as mem:
-            return _unfinished(mem)
-    except Exception:
-        return ""
+from .refresh import PARTIAL  # noqa: E402  (the marker refresh.ensure writes after a cut-off read)
 
 
 def _unfinished(mem) -> str:
-    """One line for an answer built on a repo knos has not finished reading."""
     try:
         got = mem.reference(PARTIAL)
     except Exception:
         return ""
     if not got:
         return ""
-    # A reference round-trips as {"body": "<json>"}, so the counts are a
-    # string until they are decoded. Read as a dict it said "0 things", a
-    # number nobody wrote, in the one sentence meant to say how much was read.
     body = got.get("body") if isinstance(got, dict) else None
     if isinstance(body, str):
         try:
             body = json.loads(body)
         except ValueError:
             body = {}
-    if not isinstance(body, dict):
-        body = {}
-    read = body.get("sessions", 0)
-    return (
-        "\n\n[knos has not finished reading this repo. The first question has"
-        f" to answer quickly, so it read {read} things and stopped. Run `knos"
-        " point` for the rest - until then an empty answer may mean not-yet-read"
-        " rather than not-there.]"
-    )
+    if not isinstance(body, dict) or not body.get("partial"):
+        return ""
+    read = int(body.get("sessions", 0)) + int(body.get("commits", 0))
+    return (f"\n\n[knos has not finished reading this repo: the first question has to answer quickly, so it read "
+            f"{read} things and stopped. The next question, or `knos point`, reads the rest.]")
 
 
 def _repo() -> Path | None:
-    """The repo to answer from, read on the spot if it never has been.
+    """The repo this session is in, read on the spot the first time and refreshed when it changed. None when the
+    session is not in a git repo: never another repo, never the last one somebody pointed at."""
+    here = knos_paths.repo_here()
+    if here is None:
+        return None
+    from . import refresh
+    try:
+        refresh.ensure(here, budget=FIRST_READ_BUDGET)
+    except Exception:
+        # an unreadable repo is still this repo: answer from what is stored
+        pass
+    return here
 
-    Telling an agent to go and ask its person to run a command is the end of
-    that conversation: the agent says it, the person does not see it, and
-    knos looks broken on the one call that was supposed to show what it is
-    for. The read is the same work `knos point` does, it happens once, and
-    the agent simply waits for it.
 
-    A tool that cannot answer says so in words. It never raises, because a
-    stack trace in an agent's transcript is not something a person can act
-    on.
-    """
-    here = paths.repo_here()
-    if here is not None and not paths.has_store(here):
+def _agent(repo: Path, ctx: Context | None):
+    from . import identity
+    from .claims import lookup_session
+
+    name = ""
+    if ctx is not None:
         try:
-            with Memory(here) as mem:
-                # The code reader gets a few seconds and no more: it takes
-                # two minutes on a repo the size of the kernel, and an
-                # agent's first question cannot wait that long. Most projects
-                # finish well inside it. When one does not, every structural
-                # reply says so, and `knos point` reads it properly.
-                counts = answer.point(here, mem, code_budget=code.CODE_BUDGET,
-                                      budget=FIRST_READ_BUDGET)
-                # A partial read that does not say it is partial is worse
-                # than a slow one: the agent cannot tell a repo with nothing
-                # in it from a repo knos has not finished looking at.
-                if counts.get("ran_out"):
-                    mem.set_reference(PARTIAL, {
-                        "sessions": counts.get("sessions", 0),
-                        "commits": counts.get("commits", 0),
-                        "code": counts.get("code", 0),
-                    })
-            paths.remember_pointed(here)
+            name = (ctx.request_context.session.client_params.client_info.name or "").strip()
         except Exception:
-            # A repo knos cannot read is not a reason to fail the tool call.
-            # Fall through: the pointer may still have something to answer.
-            pass
-        else:
-            return here
-    return paths.current_repo()
+            name = ""
+    return identity.for_mcp(name or "agent", lookup_session(repo))
 
 
-@server.tool(
-    annotations=ToolAnnotations(
-        title="Search memory",
-        read_only_hint=True,
-        destructive_hint=False,
-        idempotent_hint=True,
-        open_world_hint=False,
-    )
-)
-def search(
-    query: str,
-    limit: int = 8,
-    on_behalf_of: str = "",
-    override: str = "",
-    ctx: Context | None = None,
-) -> str:
-    """Search this machine's memory of the repo across all of it: past agent
-    sessions, commits and code structure. Reads only; writes nothing except
-    an override reason. Every result names where it came from.
+def _claim_notes(repo: Path, text: str, agent) -> str:
+    """Who holds files this question or answer mentions. Annotation only."""
+    from .claims import Claims, claims_db
 
-    Work another agent has claimed is withheld: you get who holds it, not
-    the answer. Ask them, or pick up something else. If you genuinely must
-    have it, call again with `override` set to your reason, which is
-    recorded in the journal against your name.
+    if not claims_db(repo).exists():
+        return ""
+    try:
+        with Claims(repo) as c:
+            held = [x for x in c.about(text) if not x.held_by(agent)]
+    except Exception:
+        return ""
+    lines = []
+    for x in held:
+        from .guard import _since
+        where = ", ".join(x.globs[:3]) if x.globs else "(no files)"
+        lines.append(f"[claimed] {where} is claimed by {x.label} since {_since(x.taken_at)} ({x.description}).")
+    return "\n".join(lines)
 
-    `on_behalf_of` names a teammate when the agent is working for one. They
-    see only the folders they were actually shared, and nothing else."""
+
+@server.tool(annotations=ToolAnnotations(title="Search memory", read_only_hint=True, destructive_hint=False,
+                                         idempotent_hint=True, open_world_hint=False))
+def search(query: str, limit: int = 8, ctx: Context | None = None) -> str:
+    """Search this repo's shared memory: past agent sessions from every host, commits, instruction files and code
+    structure. Reads only. Every result names where it came from. Results that touch files another agent has
+    claimed say who holds them."""
     repo = _repo()
     if repo is None:
-        return NOT_POINTED
-
-    identity, allowed = private.AGENT, None
-    if on_behalf_of:
-        identity, allowed = private.GUEST, _shared_with(repo, on_behalf_of)
-        if not allowed:
-            return NOTHING_SHARED
-
-    who = _who(ctx)
+        return NOT_A_REPO
     with Memory(repo) as mem:
-        # Read first, then test the claim against what would have been handed
-        # over. Comparing only the wording of the question let a paraphrase
-        # walk straight through: "the risk guard" was claimed, "why do we cap
-        # trades?" shared no word with it, and the answer went out anyway. A
-        # claim has to cover its subject however the question is phrased, so
-        # the passages are read and the claim is tested against those too.
-        found = answer.ask(
-            repo, mem, query, identity=identity, limit=limit, allowed=allowed
-        )
-        held = _held(mem, [query, *(p.text for p in found)], who, override)
-        if held:
-            return held
-        if override:
-            _took_it_anyway(mem, query, who, override)
-        # Search is the tool an agent reaches for constantly, so this is
-        # where knowing somebody else is mid-change actually changes what it
-        # does. Read from the store already open, not a second one.
-        busy = _being_worked_on(mem, query, asker=who)
-
+        found = answer.ask(repo, mem, query, identity=private.AGENT, limit=limit)
+        tail = _unfinished(mem)
     if found:
         answered = "\n\n".join(f"{p.text.strip()}\n    source: {p.where}" for p in found)
     else:
         answered = "Nothing known about that."
-    answered = f"{busy}\n\n{answered}" if busy else answered
-    # Said on the empty answer too, and especially there: a structural
-    # question that finds nothing on a large repo is the moment the person
-    # most needs to know which source has not been read.
     if answer.looks_structural(query) and not code.indexed(repo):
-        answered += (
-            "\n\n(Knos has not read this repo's code structure - it is large"
-            " enough to need `knos point .` once. Sessions, commits and"
-            " instruction files are all that answered this.)"
-        )
-    with Memory(repo) as mem:
-        held = _held_note(mem, query)
-    return held + answered + _unfinished_for(repo)
+        answered += ("\n\n(knos has not read this repo's code structure yet: `knos point` reads it. Sessions, commits "
+                     "and instruction files answered this.)")
+    notes = _claim_notes(repo, query + "\n" + "\n".join(p.text + " " + p.where for p in found), _agent(repo, ctx))
+    team = _team_notes(query, repo)
+    return (notes + "\n\n" if notes else "") + answered + team + tail
 
 
-@server.tool(
-    annotations=ToolAnnotations(
-        title="Look up one thing",
-        read_only_hint=True,
-        destructive_hint=False,
-        idempotent_hint=True,
-        open_world_hint=False,
-    )
-)
+def _share_with_team(fact: str, about: str, who: str, repo: Path) -> None:
+    try:
+        from .pro import team
+
+        team.share_note(fact, about, who, repo)
+    except Exception:
+        pass
+
+
+def _team_notes(query: str, repo: Path) -> str:
+    """Notes teammates wrote on other machines (Knos Team), after the local answers."""
+    try:
+        from .pro import team
+
+        got = team.team_notes(query, repo)
+    except Exception:
+        return ""
+    if not got:
+        return ""
+    return "\n\n" + "\n\n".join(f"{n['fact']}\n    source: {n['who']}, team note, {str(n['ts'])[:10]}" for n in got)
+
+
+@server.tool(annotations=ToolAnnotations(title="Look up one thing", read_only_hint=True, destructive_hint=False,
+                                         idempotent_hint=True, open_world_hint=False))
 def about(thing: str, ctx: Context | None = None) -> str:
-    """Look up everything known about one named thing: a file, a person, a
-    topic. Reads only, writes nothing, and touches no network. Use `search`
-    instead when the question spans more than one thing."""
+    """Everything known about one named thing: a file, a person, a topic. Reads only."""
     repo = _repo()
     if repo is None:
-        return NOT_POINTED
+        return NOT_A_REPO
     with Memory(repo) as mem:
         known = []
         for category in ("file", "person", "topic", "symbol"):
@@ -272,297 +172,126 @@ def about(thing: str, ctx: Context | None = None) -> str:
                 continue
             body = record.get("body") or {}
             said = body.get("note") or body.get("last_commit") or ""
+            if said and private._quotes_a_secret({"text": said}):
+                continue
             when = body.get("when") or body.get("last_seen") or ""
-            known.append(
-                f"{said}\n    source: written down, {when}"
-                if said
-                else f"{category}: {thing}"
-            )
+            known.append(f"{said}\n    source: written down, {when}" if said else f"{category}: {thing}")
         found = answer.ask(repo, mem, thing, identity=private.AGENT, limit=5)
-        busy = _being_worked_on(mem, thing, asker=_who(ctx))
-    # The canonical record and the journal line say the same thing about a
-    # written-down fact, by design. Say it once, and prefer the journal's
-    # version because it names which agent said it.
+        tail = _unfinished(mem)
     said = {p.text.strip() for p in found}
     lines = [k for k in known if k.split("\n")[0] not in said]
     lines += [f"{p.text.strip()}\n    source: {p.where}" for p in found]
-    if busy:
-        lines.insert(0, busy)
-    said = "\n\n".join(lines) if lines else f"Nothing known about {thing}."
-    with Memory(repo) as mem:
-        held = _held_note(mem, thing)
-    return held + said + _unfinished_for(repo)
+    notes = _claim_notes(repo, thing, _agent(repo, ctx))
+    if notes:
+        lines.insert(0, notes)
+    return ("\n\n".join(lines) if lines else f"Nothing known about {thing}.") + tail
 
 
-def _held(
-    mem: Memory, thing: str | Iterable[str], asker: str, override: str
-) -> str:
-    """What knos refuses to answer, and what would unlock it.
-
-    This is the one thing knos actually controls. It cannot stop an agent
-    editing a file — it has no authority over an editor. It does own what it
-    knows, so on work somebody else has claimed it declines to be the source
-    and says who to ask.
-
-    Yielding is the quiet path and costs nothing. Taking the work anyway
-    needs a reason, and the reason goes in the journal under the agent's own
-    name, which is what makes the rule real rather than polite.
-    """
-    subjects = [thing] if isinstance(thing, str) else [t for t in thing if t]
-    blocked = []
-    for work in mem.claims():
-        topic = str(work.get("topic", ""))
-        holder = str(work.get("who", "")) or "another agent"
-        covered = any(_same_subject(topic, subject) for subject in subjects)
-        if not covered or _is_holder(work, asker):
-            continue
-        if override or mem.overridden(topic, asker):
-            continue
-        blocked.append((topic, holder, work))
-
-    if not blocked:
-        return ""
-    for topic, holder, _ in blocked:
-        mem.stood_down(topic, asker, holder, _stamp())
-
-    # A person can claim work at the terminal, and then the agent being told
-    # to hold off is talking to the very person who holds it. "Ask them" is
-    # the wrong thing to say to somebody's only agent.
-    by_the_person = all(h == "you" for _, h, _w in blocked)
-    if by_the_person:
-        held = "; ".join(t for t, _, _w in blocked)
-    else:
-        held = "; ".join(f"{t} (held by {h})" for t, h, _w in blocked)
-    # The soonest any of them frees up: an agent deciding whether to wait
-    # cares about the first thing it can have, not the last.
-    soonest = None
-    for _t, _h, work in blocked:
-        try:
-            holds = int(work.get("holds", INTENT_HOLDS))
-        except (TypeError, ValueError):
-            holds = INTENT_HOLDS
-        left = holds - _minutes_since(str(work.get("when", "")))
-        if left == left and (soonest is None or left < soonest):
-            soonest = left
-    return answer.withheld(held, by_the_person, soonest)
-
-
-def _is_holder(work: dict, asker: str) -> bool:
-    """Whether the caller is the agent that made this claim.
-
-    Both the name it gave and the connection it made it on. A claim written
-    before sessions were recorded has none, so it falls back to the name and
-    is no weaker than it was.
-    """
-    held_by = str(work.get("who", ""))
-    session = str(work.get("session", ""))
-    if session:
-        return held_by == asker and session == _session()
-    return held_by == asker
-
-
-def _took_it_anyway(mem: Memory, thing: str, who: str, why: str) -> None:
-    """Write down that an agent forced its way past every claim it hit."""
-    for work in mem.claims():
-        topic = str(work.get("topic", ""))
-        holder = str(work.get("who", "")) or "another agent"
-        if _same_subject(topic, thing) and not _is_holder(work, who):
-            mem.overrode(topic, who, holder, why, _stamp())
-
-
-def _being_worked_on(mem: Memory, thing: str, asker: str = "") -> str:
-    """Read the live claim, and write down that this agent yielded to it.
-
-    Two writers, one store, and neither agent ever calls the other. The
-    first puts what it is doing into hot state; the second reads it, is told
-    to hold off, and records that it stood down. Afterwards the journal
-    shows who yielded to whom, which is the part a notice board alone does
-    not give you.
-
-    Takes the caller's open store rather than opening its own: this runs on
-    every search, and opening a second connection per question was a cost
-    nobody asked for.
-    """
-    said = []
-    for work in mem.claims():
-        topic = str(work.get("topic", ""))
-        if not _same_subject(topic, thing):
-            continue
-        claimed_by = str(work.get("who", "")) or "Another agent"
-        if asker and not _is_holder(work, asker):
-            mem.stood_down(topic, asker, claimed_by, _stamp())
-        ago = _minutes_since(str(work.get("when", "")))
-        when = "just now" if ago < 2 else f"{int(ago)} minutes ago"
-        said.append(
-            f"{claimed_by} started working on {topic} {when}."
-            " Ask them before you change it, or work on something else."
-        )
-    return "\n".join(said)
-
-
-_same_subject = answer.same_subject
-_stem = answer.stem
-
-
-def _stamp() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _session() -> str:
-    """This server process, which is one client's connection and no other.
-
-    A client tells knos its own name and can tell it anything, so the name
-    alone cannot decide who holds a claim: an agent that calls itself
-    "Claude Code" would walk straight past the block. Every client spawns
-    its own knos over its own pipe, so the process is something the claimer
-    holds and a different client cannot borrow.
-    """
-    import os
-
-    return str(os.getpid())
-
-
-def _who(ctx: Context | None) -> str:
-    """Which agent is asking, if it said.
-
-    Clients name themselves when they connect. Using that means a fact
-    written by one agent and read by another carries the same kind of
-    source as a commit does, instead of an anonymous note.
-    """
-    if ctx is None:
-        return "an agent"
-    try:
-        info = ctx.request_context.session.client_params.client_info
-        return (info.name or "").strip() or "an agent"
-    except Exception:
-        return "an agent"
-
-
-@server.tool(
-    annotations=ToolAnnotations(
-        title="Say you have finished",
-        read_only_hint=False,
-        destructive_hint=False,
-        idempotent_hint=True,
-        open_world_hint=False,
-    )
-)
+@server.tool(annotations=ToolAnnotations(title="Say you have finished", read_only_hint=False, destructive_hint=False,
+                                         idempotent_hint=True, open_world_hint=False))
 def done(about: str = "", ctx: Context | None = None) -> str:
-    """Say you have finished work you claimed, so other agents stop waiting.
+    """Release the files you claimed, so other agents can edit them. Only ever your own claims: give `about` (the
+    claim's description or id) to release one, or leave it empty to release all of yours."""
+    from . import record
+    from .claims import Claims
 
-    Call this when you finish something you called `remember(claiming=true)`
-    on. Without it the claim sits until it lapses, every other agent waits out
-    a hold on work that is already done, and this memory never learns that you
-    finish what you start - which is what decides how long your next claim is
-    worth and whether you are trusted to spend.
-
-    Closes only your own claims. Other agents keep theirs. Give `about` to
-    close one thing, or leave it empty to close everything you hold."""
     repo = _repo()
     if repo is None:
-        return NOT_POINTED
-
-    who = _who(ctx)
-    with Memory(repo) as mem:
-        closed = mem.finished_by(who, about.strip())
-
-    if not closed:
-        if about:
-            return (
-                f"You are not holding {about}, so there was nothing to close."
-                " Claims are per agent: this only ever closes your own."
-            )
-        return "You are not holding anything here."
-    return "Finished: " + "; ".join(closed) + "." + (
-        " Other agents can take it now, and this memory has one more closed"
-        " claim against your name."
-    )
+        return NOT_A_REPO
+    agent = _agent(repo, ctx)
+    with Claims(repo) as c:
+        gone = c.release(agent, about.strip())
+    if gone:
+        try:
+            with Memory(repo) as mem:
+                for x in gone:
+                    record.note_finished(mem, x.description, agent.host)
+        except Exception:
+            pass
+    if not gone:
+        return (f"You hold no claim on {about} here." if about else "You hold no claims here.") + \
+            " Claims are per agent: this only ever releases your own."
+    return "Released: " + "; ".join(f"{x.description} ({', '.join(x.globs) or 'advisory'})" for x in gone) + "."
 
 
-@server.tool(
-    annotations=ToolAnnotations(
-        title="Write to memory",
-        read_only_hint=False,
-        destructive_hint=False,
-        idempotent_hint=False,
-        open_world_hint=False,
-    )
-)
-def remember(
-    fact: str, about: str, claiming: bool = False, ctx: Context | None = None
-) -> str:
-    """Write something back, so the next session in any agent knows it too.
-    Appends; it never edits or deletes an existing memory, and there is no
-    tool that does.
+@server.tool(annotations=ToolAnnotations(title="Write to memory", read_only_hint=False, destructive_hint=False,
+                                         idempotent_hint=False, open_world_hint=False))
+def remember(fact: str, about: str, claiming: bool = False, paths: list[str] | None = None,
+             ctx: Context | None = None) -> str:
+    """Write something down so the next session in any agent knows it too. Appends; never edits or deletes.
 
-    Set `claiming` when you are about to start work on this, rather than
-    just noting something. Other agents are then told you have it and knos
-    withholds it from them until you finish or the claim lapses. Writing
-    a plain fact claims nothing: a note everybody can read is the point."""
-    repo = _repo()
-    if repo is None:
-        return NOT_POINTED
+    Set `claiming` when you are about to change files, and list them in `paths` (files, folders or globs like
+    `src/parser/**`). Another agent's edit to them is then refused until you call done() or the claim lapses
+    (30 min, refreshed by claiming again). Without `paths`, knos resolves exact file and symbol names in `about`;
+    if none resolve, the claim is advisory (shown to others, never blocking)."""
     from datetime import datetime, timezone
 
+    from . import record
+    from .claims import Claims
+
+    repo = _repo()
+    if repo is None:
+        return NOT_A_REPO
     now = datetime.now(timezone.utc).isoformat()
-    who = _who(ctx)
-    where = f"{who} said so, {now[:10]}"
+    agent = _agent(repo, ctx)
     with Memory(repo) as mem:
-        # `record` and `note_thing` return None rather than raising when the
-        # store is full. Saying "Remembered" when nothing was written is the
-        # one lie this tool must not tell.
-        written = mem.record(
-            Fact(text=fact, source="note", where=where, when=now, about=about)
-        )
-        mem.note_thing(TOPIC, about, {"note": fact, "when": now[:10]})
+        written = mem.record(Fact(text=fact, source="note", where=f"{agent.label} said so, {now[:10]}", when=now, about=about))
         if written is None:
             return FULL
-        # Only when the agent says it is starting work. A note is for
-        # everybody to read; claiming it would withhold the very thing that
-        # was just written down.
+        mem.note_thing(TOPIC, about, {"note": fact, "when": now[:10]})
+    _share_with_team(fact, about, agent.label, repo)
+    with Memory(repo) as mem:
+        holds = 30
         if claiming:
-            # Compare-and-swap, not a blind write: two agents reaching for
-            # the same work in the same second must not both believe they
-            # hold it. The loser is told who does.
             try:
-                took, holder = mem.claim_if_free(about, who, now, session=_session())
-            except StoreFull:
-                return f"Remembered, about {about}. The claim did not: {FULL}"
-            if not took:
-                held_by = str((holder or {}).get("who", "another agent"))
-                return (
-                    f"Remembered, about {about}."
-                    f" You did not get the claim: {held_by} is already on it."
-                    " Ask them, or pick up something else."
-                )
-    return f"Remembered, about {about}."
-
-
-def _shared_with(repo: Path, reader: str) -> list[str]:
-    """Which of this repo's folders that person may read, right now.
-
-    Asked fresh every time, so revoking takes effect on the next question
-    rather than whenever something happens to expire.
-    """
-    from . import team
-
+                holds = record.holds_for(mem, agent.host)
+            except Exception:
+                holds = 30
+    if not claiming:
+        return f"Remembered, about {about}."
+    wanted = list(paths or [])
     try:
-        me = team.identity().address
-        who = team.resolve(reader)
-        return [f for f in _shared_folders(repo) if team.may_read(me, f, who)]
+        with Claims(repo) as c:
+            took, conflict, mine = c.take(agent, about, wanted or None, holds_min=holds)
+    except Exception as why:  # e.g. the team server is down: say so, never crash the tool call
+        return f"Remembered, about {about}. Not claimed: {why}. Nothing is blocked for anyone until it is."
+    if not took and conflict is not None:
+        from .guard import _since
+        return (f"Remembered, about {about}. Not claimed: {', '.join(conflict.globs)} is held by {conflict.label} "
+                f"since {_since(conflict.taken_at)} ({conflict.description}). Ask them, or take other work.")
+    try:
+        with Memory(repo) as mem:
+            record.note_taken(mem, about, agent.host, now)
     except Exception:
-        return []
+        pass
+    if mine is not None and mine.advisory:
+        return (f"Remembered, about {about}. Claimed as advisory: no file or symbol named in it resolved, so other "
+                "agents are told but nothing is blocked. Pass paths=[...] to guard files.")
+    return f"Remembered, about {about}. Claimed {', '.join(mine.globs) if mine else ''} for {holds} min."
 
 
-def _shared_folders(repo: Path) -> list[str]:
-    """Top-level folders in this repo, which are what people share."""
-    return [
-        d.name
-        for d in sorted(repo.iterdir())
-        if d.is_dir() and not d.name.startswith(".") and not private.is_private(repo, d.name)
-    ]
+@server.tool(annotations=ToolAnnotations(title="Pay for an API", read_only_hint=False, destructive_hint=False,
+                                         idempotent_hint=False, open_world_hint=True))
+def pay(url: str, method: str = "GET", body: str = "", agent: str = "", ctx: Context | None = None) -> str:
+    """Fetch an API that may answer HTTP 402 Payment Required, paying it (MPP on Tempo, or x402 on Solana) from this
+    agent's own Knos budget wallet, inside the cap a person set with `knos budget fund`. Refused, with the reason,
+    when there is no wallet or the payment would pass the cap. `agent` defaults to this host's name."""
+    try:
+        from .pro import agentpay
+    except ImportError:
+        return "knos: agent payments are part of Knos Pro, which is not installed here."
+    who = agent.strip()
+    if not who:
+        repo = knos_paths.repo_here()
+        who = _agent(repo, ctx).host if repo else "agent"
+    try:
+        got = agentpay.pay(who, url, method.upper() or "GET", body.encode() if body else None)
+    except agentpay.Refused as why:
+        return str(why)
+    except Exception as why:  # a tool call never crashes the server
+        return f"knos: the request failed ({type(why).__name__}: {why})"
+    head = f"[paid {got.paid:g} on {got.chain} from {who}'s wallet]\n" if got.paid else ""
+    return f"{head}HTTP {got.status}\n{got.body}"
 
 
 def main() -> None:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knos"
-version = "0.1.8"
+version = "0.2.0"
 description = "One local memory every coding agent on the machine shares — and it knows which of them is in your code right now."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -31,18 +31,30 @@ dependencies = [
   # renamed. A 1.x resolution installs cleanly and then fails on import, so
   # the floor has to say 2.
   "mcp>=2.0",
-  "sibyl-memory-client>=0.7.0",
+  # The memory engine: every answer knos gives comes out of a Sibyl store.
+  "sibyl-memory-client>=0.8.1",
 ]
 
 [project.optional-dependencies]
-# The suite drives the paid-answer path against a real x402 middleware
-# rather than a mock, so those are test dependencies, not runtime ones.
-# Without them `pytest` silently skipped six tests and CI looked green on a
-# path nobody had run.
-dev = ["pytest>=7", "flask>=3", "x402[evm]>=2.21", "httpx>=0.27"]
+# Knos Pro: licence signatures are Ed25519; a terminal QR for `knos pro buy`.
+pro = ["cryptography>=42", "qrcode>=7"]
+# Agent budget wallets paying APIs over HTTP 402, through the protocols' reference SDKs:
+# MPP on Tempo (pympp, Python 3.11+) and x402 on Solana.
+agentpay = [
+  "cryptography>=42",
+  "httpx>=0.27",
+  "pympp[tempo]>=0.11,<0.12; python_version >= '3.11'",
+  "x402[svm]>=2.24,<3",
+  # x402 2.24 imports solana.rpc.api, which solana 0.40 removed
+  "solana>=0.36,<0.40",
+]
+dev = [
+  "pytest>=7",
+  "knos[pro,agentpay]",
+]
 
 [project.scripts]
-knos = "knos.cli:app"
+knos = "knos.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/drexthealpha/Knos"
@@ -57,9 +69,9 @@ include = ["src/knos", "tests", "README.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# `pytest` runs the critical path only, in seconds, because a suite nobody
-# waits for is a suite nobody runs. Everything with `pytest -m ""`.
-addopts = '-m critical'
+# `pytest` runs everything: a default that quietly deselects most tests reads
+# as green while they never ran. The critical path, in seconds, is an explicit
+# choice: `pytest -m critical`.
 markers = [
-  "critical: claim, withhold, concurrency, no-network, the four tools, private files, a rule its file dropped",
+  "critical: claims, the edit guard, concurrency, no-network, the four tools, private files",
 ]

@@ -1,551 +1,446 @@
-"""Short-lived intent: the one thing knos stores that goes out of date.
+"""Claims: the one thing knos stores that goes out of date.
 
-Everything else in the store is about what happened, and stays true. This is
-about what is happening, so it stops being true on its own.
+Everything else in the store is about what happened, and stays true. A claim is about what is happening, so it
+stops being true on its own: it lapses after its hold unless refreshed, and a released or lapsed claim never blocks.
+
+Rewritten for 0.2.0, where a claim is a set of path globs held by one agent (host, session, anchor) in claims.db, and
+knos never withholds an answer: it annotates answers with who holds the files they touch, and the edit guard refuses
+edits to another agent's files.
+
+Dropped, because their purpose no longer exists in 0.2.0:
+  - the stand-down tests (a second agent records it stood down, yields once, not to itself, finishing clears the
+    locks, a third agent stands down to both): nobody stands down any more; answers are always given.
+  - the withholding tests (withholds the answer, paraphrased question withheld, withholding dies with the store,
+    one agent is enough to feel the withhold as a withhold): nothing is withheld. Their surviving purposes are
+    rewritten below as "the answer is given and annotated" and "a person's claim refuses their agent's edit".
+  - the override tests (override unlocks and is written down, holds for that claim only, release clears overrides):
+    there are no overrides.
+  - the stemming / topic-word tests (a claim covers the word in all its shapes, stemming is not greedy,
+    answer.same_subject): claims are path globs now; prose never matches. Replaced by "prose never blocks" and
+    "`*` does not cross directories".
+  - "the whole pattern dies with the store": coordination lives in claims.db, not in the Sibyl memory store.
+  - "the time is the soonest of several holds" and "no time is promised when it cannot be worked out": a file is
+    covered by at most one blocking claim, and the refusal's time comes from guard.refusal (tested below), not the
+    0.1 answer._lapses_in helper.
 """
 
 from __future__ import annotations
 
-import pytest
-
+import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import knos
-from knos import mcp
-from knos import paths as knos_paths
-from knos.memory import INTENT_HOLDS, Memory
+from knos import guard, identity, mcp
+from knos.claims import HOLDS_MIN, Claims, claims_db, lookup_session, resolve
+from knos.identity import Agent
+from knos.memory import Fact, Memory
+
+CLAUDE = Agent(host="claude", session="sess-claude-1", anchor=4101)
+CURSOR = Agent(host="cursor", session="sess-cursor-1", anchor=4202)
+WINDSURF = Agent(host="windsurf", session="sess-windsurf", anchor=4303)
 
 
-def _worked(repo, thing, asker=""):
-    """The coordination read, given its own store the way a tool gives it one."""
-    with Memory(repo) as mem:
-        return mcp._being_worked_on(mem, thing, asker=asker)
+def _age(repo, minutes: float, description: str | None = None, stamp: str | None = None) -> None:
+    """Move claims back in time (all, or one by description), the way a clock would."""
+    when = stamp or (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    conn = sqlite3.connect(str(claims_db(repo)))
+    try:
+        if description is None:
+            conn.execute("UPDATE claims SET taken_at=?, refreshed_at=?", (when, when))
+        else:
+            conn.execute("UPDATE claims SET taken_at=?, refreshed_at=? WHERE description=?", (when, when, description))
+        conn.commit()
+    finally:
+        conn.close()
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _take(repo, agent, description, globs=None, holds_min=HOLDS_MIN):
+    with Claims(repo) as c:
+        return c.take(agent, description, globs, holds_min=holds_min)
 
 
-def test_intent_expires_so_a_stale_warning_is_never_shown(knos_home, repo):
-    """An agent that said it was mid-change an hour ago is not a reason to
-    hesitate now."""
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("parser", "Claude Code", _now())
-        assert mem.current_work() is not None
-        assert "started working on parser" in _worked(repo, "parser")
-
-        stale = datetime.now(timezone.utc) - timedelta(minutes=INTENT_HOLDS + 1)
-        mem.working_on("parser", "Claude Code", stale.isoformat())
-        assert mem.current_work() is None
-        assert _worked(repo, "parser") == ""
+def _live(repo):
+    with Claims(repo) as c:
+        return c.live()
 
 
-def test_an_agent_can_say_it_has_finished(knos_home, repo):
-    with Memory(repo) as mem:
-        mem.working_on("parser", "Cursor", _now())
-        assert mem.current_work() is not None
-        mem.done_working()
-        assert mem.current_work() is None
+def _about(repo, text):
+    with Claims(repo) as c:
+        return c.about(text)
+
+
+# ---- lapsing ------------------------------------------------------------------------------
+
+
+def test_a_claim_lapses_so_a_stale_claim_is_never_shown(knos_home, repo):
+    """An agent that said it was mid-change an hour ago is not a reason to hesitate now."""
+    took, _, mine = _take(repo, CLAUDE, "fixing login", ["src/auth.py"])
+    assert took and mine is not None
+    assert [c.id for c in _live(repo)] == [mine.id]
+    assert _about(repo, "how does src/auth.py work")
+
+    _age(repo, HOLDS_MIN + 1)
+    assert _live(repo) == []
+    assert _about(repo, "how does src/auth.py work") == []
+    with Claims(repo) as c:
+        assert c.holder("src/auth.py", CURSOR) is None
+
+
+@pytest.mark.critical
+def test_a_claim_lapses_so_a_crashed_agent_cannot_hold_work_forever(knos_home, repo):
+    """An agent that dies mid-change never calls done. The work frees up on its own, and the next agent can take it."""
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    assert _take(repo, CURSOR, "also login", ["src/auth.py"])[0] is False
+
+    _age(repo, HOLDS_MIN + 1)
+
+    took, conflict, mine = _take(repo, CURSOR, "also login", ["src/auth.py"])
+    assert took is True and conflict is None
+    assert mine is not None and mine.host == "cursor"
+    assert guard.check(repo, str(repo / "src" / "auth.py"), CURSOR).allow
 
 
 def test_a_timestamp_that_cannot_be_read_counts_as_over(knos_home, repo):
-    """Never leave a warning standing because a date would not parse."""
-    with Memory(repo) as mem:
-        mem.working_on("parser", "Cursor", "not a date at all")
-        assert mem.current_work() is None
-
-
-def test_the_warning_says_how_long_ago_not_a_date(knos_home, repo):
-    """"Two minutes ago" is actionable. A date is not."""
-    knos_paths.remember_pointed(repo)
-    older = datetime.now(timezone.utc) - timedelta(minutes=5)
-    with Memory(repo) as mem:
-        mem.working_on("parser", "Cursor", older.isoformat())
-    said = _worked(repo, "parser")
-    assert "5 minutes ago" in said
-    assert "20" not in said  # no year, no ISO date
-
-
-def test_intent_only_fires_for_the_thing_it_is_about(knos_home, repo):
-    """A warning on every question is a warning nobody reads."""
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("parser", "Cursor", _now())
-    assert _worked(repo, "the parser rewrite") != ""
-    assert _worked(repo, "the deploy window") == ""
-
-
-# ---- the coordination pattern: claim, yield, release -------------------
-
-
-def test_a_second_agent_records_that_it_stood_down(knos_home, repo):
-    """Two writers, one store, and neither agent ever calls the other.
-
-    The first puts what it is doing into HOT. The second reads it, is told
-    to hold off, and writes down that it yielded. Afterwards you can see who
-    stood down for whom, which a notice board alone does not give you.
-    """
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("risk guard", "Claude Code", _now())
-
-    assert _worked(repo, "risk guard", asker="Cursor")
-
-    with Memory(repo) as mem:
-        yielded = mem.stand_downs()
-    assert len(yielded) == 1
-    assert yielded[0]["who"] == "Cursor"
-    assert yielded[0]["claimed_by"] == "Claude Code"
-    assert yielded[0]["topic"] == "risk guard"
-
-
-def test_a_chatty_agent_yields_once_not_every_time_it_asks(knos_home, repo):
-    """The warm record is the lock that keeps the journal readable."""
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("risk guard", "Claude Code", _now())
-
-    for _ in range(5):
-        _worked(repo, "risk guard", asker="Cursor")
-
-    with Memory(repo) as mem:
-        assert len(mem.stand_downs()) == 1
-        lines = [
-            e for e in mem.journal(limit=1000)
-            if "stood down" in str(e.get("evaluated", ""))
-        ]
-    assert len(lines) == 1
-
-
-def test_the_agent_holding_the_claim_does_not_stand_down_to_itself(knos_home, repo):
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("risk guard", "Claude Code", _now())
-
-    _worked(repo, "risk guard", asker="Claude Code")
-
-    with Memory(repo) as mem:
-        assert mem.stand_downs() == []
-
-
-def test_finishing_releases_the_claim_and_the_locks(knos_home, repo):
-    """The pattern has an end: the next claim warns everybody again."""
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("risk guard", "Claude Code", _now())
-    _worked(repo, "risk guard", asker="Cursor")
-
-    with Memory(repo) as mem:
-        assert mem.stand_downs()
-        mem.done_working()
-        assert mem.current_work() is None
-        assert mem.stand_downs() == []
-        # the journal keeps the trace; only the locks go
-        assert any(
-            "stood down" in str(e.get("evaluated", ""))
-            for e in mem.journal(limit=1000)
-        )
-
-
-def test_the_whole_pattern_dies_with_the_store(knos_home, repo):
-    """Coordination is Sibyl. Delete it and there is nothing left."""
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("risk guard", "Claude Code", _now())
-        db = mem.db_path
-    _worked(repo, "risk guard", asker="Cursor")
-
-    db.unlink()
-
-    with Memory(repo) as fresh:
-        assert fresh.current_work() is None
-        assert fresh.stand_downs() == []
-    assert _worked(repo, "risk guard", asker="Cursor") == ""
-
-
-def test_a_claim_covers_the_word_in_all_its_shapes(knos_home, repo):
-    """parser, parsers, parsing and parsed are one word to a person."""
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("parser", "Claude Code", _now())
-
-    for asked in ("the parsing logic", "who wrote the parsers", "it parsed wrong"):
-        assert _worked(repo, asked) != "", asked
-
-
-def test_stemming_does_not_make_the_claim_greedy(knos_home, repo):
-    """Sharing letters is not sharing a subject."""
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("guard", "Claude Code", _now())
-
-    assert _worked(repo, "safeguarding the vanguard") == ""
-    assert _worked(repo, "the deploy window") == ""
-    assert _worked(repo, "the guards on that route") != ""
-
-
-def test_every_agent_tool_says_when_someone_is_mid_change(knos_home, repo):
-    """Which tool an agent happens to reach for must not decide whether it
-    finds out that somebody else is already on this."""
-    from knos.memory import Fact
-
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.record(
-            Fact(
-                text="the risk guard refuses unknown assets",
-                source="session",
-                where="Claude Code session aaaa1111 2026-08-20",
-                when="2026-08-20",
-            )
-        )
-        mem.working_on("risk guard", "Claude Code", _now())
-
-    # search withholds outright; about says who holds it.
-    assert mcp.search("risk guard").startswith("Withheld.")
-    said = mcp.about("risk guard")
-    assert "started working on risk guard" in said, said
-
-
-def test_two_agents_can_hold_separate_work_at_once(knos_home, repo):
-    """One claim per piece of work, not one per repo.
-
-    Two agents on genuinely different things can both say so, and a third
-    asking about either is told about that one only.
-    """
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("parser", "Claude Code", _now())
-        mem.working_on("deploy window", "Cursor", _now())
-        assert len(mem.claims()) == 2
-
-    parser = _worked(repo, "the parsing logic")
-    deploys = _worked(repo, "when do we deploy")
-
-    assert "Claude Code started working on parser" in parser
-    assert "Cursor" not in parser
-    assert "Cursor started working on deploy window" in deploys
-    assert "Claude Code" not in deploys
-    assert _worked(repo, "the risk guard") == ""
+    """Never leave a claim standing because a date would not parse."""
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    _age(repo, 0, stamp="not a date at all")
+    assert _live(repo) == []
+    assert guard.check(repo, str(repo / "src" / "auth.py"), CURSOR).allow
 
 
 def test_one_claim_expiring_does_not_take_the_others_with_it(knos_home, repo):
-    knos_paths.remember_pointed(repo)
-    stale = datetime.now(timezone.utc) - timedelta(minutes=INTENT_HOLDS + 1)
-    with Memory(repo) as mem:
-        mem.working_on("parser", "Claude Code", stale.isoformat())
-        mem.working_on("deploy window", "Cursor", _now())
-        live = mem.claims()
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    assert _take(repo, CURSOR, "the readme", ["README.md"])[0]
+    _age(repo, HOLDS_MIN + 1, description="fixing login")
 
-    assert [c["topic"] for c in live] == ["deploy window"]
-    assert _worked(repo, "parsing") == ""
-    assert _worked(repo, "deploy") != ""
+    assert [c.description for c in _live(repo)] == ["the readme"]
+    assert _about(repo, "src/auth.py") == []
+    assert [c.host for c in _about(repo, "README.md")] == ["cursor"]
+
+
+def test_retaking_your_own_claim_refreshes_it_rather_than_duplicating(knos_home, repo):
+    """Claiming again is how an agent keeps a long job; it must not pile up rows or reset who got there first."""
+    _, _, first = _take(repo, CLAUDE, "fixing login", ["src/auth.py"])
+    _age(repo, 20)
+    took, conflict, again = _take(repo, CLAUDE, "fixing login", ["src/auth.py"])
+
+    assert took and conflict is None
+    assert again.id == first.id
+    assert len(_live(repo)) == 1
+    assert again.minutes_left > HOLDS_MIN - 1, "refreshing did not restart the hold"
+
+
+def test_an_agent_can_say_it_has_finished(knos_home, repo):
+    assert _take(repo, CURSOR, "fixing login", ["src/auth.py"])[0]
+    with Claims(repo) as c:
+        gone = c.release(CURSOR)
+    assert [g.description for g in gone] == ["fixing login"]
+    assert _live(repo) == []
+    assert guard.check(repo, str(repo / "src" / "auth.py"), CLAUDE).allow
+
+
+# ---- what other agents are told ------------------------------------------------------------
+
+
+def test_the_annotation_says_who_and_since_not_a_date(knos_home, repo):
+    """"cursor since 14:05" is actionable. An ISO date is not."""
+    assert _take(repo, CURSOR, "fixing login", ["src/auth.py"])[0]
+    _age(repo, 5)
+
+    said = mcp._claim_notes(repo, "how does src/auth.py log people in", CLAUDE)
+
+    assert said.startswith("[claimed] src/auth.py is claimed by cursor/sess-cur since "), said
+    assert re.search(r"since \d\d:\d\d \(fixing login\)", said), said
+    assert not re.search(r"20\d\d-\d\d-\d\d", said), "no ISO date in what an agent reads"
+
+
+def test_a_claim_only_annotates_the_thing_it_is_about(knos_home, repo):
+    """A note on every question is a note nobody reads."""
+    assert _take(repo, CURSOR, "fixing login", ["src/auth.py"])[0]
+    assert [c.host for c in _about(repo, "what does src/auth.py return")] == ["cursor"]
+    assert [c.host for c in _about(repo, "is auth.py tested")] == ["cursor"]
+    assert _about(repo, "the deploy window") == []
+    assert mcp._claim_notes(repo, "the deploy window", CLAUDE) == ""
+
+
+def test_every_agent_tool_answers_and_says_who_holds_it(knos_home, repo):
+    """Which tool an agent reaches for must not decide whether it finds out somebody is already on this, and neither
+    tool hides what it knows."""
+    with Memory(repo) as mem:
+        mem.record(Fact(text="login in src/auth.py always returns true until the SSO work lands",
+                        source="session", where="Claude Code session aaaa1111 2026-08-20", when="2026-08-20",
+                        path="src/auth.py"))
+    assert _take(repo, CURSOR, "fixing login", ["src/auth.py"])[0]
+
+    searched = mcp.search("why does login in src/auth.py always return true")
+    assert searched.startswith("[claimed] src/auth.py is claimed by cursor/"), searched
+    assert "until the SSO work lands" in searched, "the answer was withheld"
+    assert not searched.startswith("Withheld")
+
+    about = mcp.about("src/auth.py")
+    assert "[claimed] src/auth.py is claimed by cursor/" in about, about
+
+
+def test_two_agents_can_hold_separate_work_at_once(knos_home, repo):
+    """One claim per piece of work, not one per repo. A third agent asking about either is told about that one only."""
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    assert _take(repo, CURSOR, "the readme", ["README.md"])[0]
+    assert len(_live(repo)) == 2
+
+    login = mcp._claim_notes(repo, "how does src/auth.py work", WINDSURF)
+    readme = mcp._claim_notes(repo, "what does README.md say", WINDSURF)
+
+    assert "claude/sess-cla" in login and "cursor" not in login
+    assert "cursor/sess-cur" in readme and "claude" not in readme
+    assert mcp._claim_notes(repo, "the deploy window", WINDSURF) == ""
+
+    assert not guard.check(repo, str(repo / "src" / "auth.py"), CURSOR).allow
+    assert not guard.check(repo, str(repo / "README.md"), CLAUDE).allow
 
 
 def test_a_third_agent_asking_about_both_is_told_about_both(knos_home, repo):
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("parser", "Claude Code", _now())
-        mem.working_on("deploys", "Cursor", _now())
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    assert _take(repo, CURSOR, "the readme", ["README.md"])[0]
 
-    said = _worked(repo, "the parser and the deploys", asker="Windsurf")
-    assert "Claude Code started working on parser" in said
-    assert "Cursor started working on deploys" in said
+    said = mcp._claim_notes(repo, "src/auth.py and README.md", WINDSURF)
+    lines = said.splitlines()
+    assert len(lines) == 2, said
+    assert any("claude/" in line and "fixing login" in line for line in lines)
+    assert any("cursor/" in line and "the readme" in line for line in lines)
 
-    with Memory(repo) as mem:
-        assert {y["claimed_by"] for y in mem.stand_downs()} == {"Claude Code", "Cursor"}
+
+def test_the_agent_holding_the_claim_is_never_blocked_or_told_about_itself(knos_home, repo):
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    assert guard.check(repo, str(repo / "src" / "auth.py"), CLAUDE).allow
+    assert mcp._claim_notes(repo, "src/auth.py", CLAUDE) == ""
+    # and everybody else is
+    assert not guard.check(repo, str(repo / "src" / "auth.py"), CURSOR).allow
+
+
+@pytest.mark.critical
+def test_a_refused_agent_is_told_when_the_work_frees_up(knos_home, repo):
+    """"Come back later" is not usable advice without a later."""
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    _age(repo, 8)
+
+    verdict = guard.check(repo, str(repo / "src" / "auth.py"), CURSOR)
+    assert not verdict.allow
+    assert "claimed by claude/sess-cla" in verdict.reason
+    assert "lapses in 22 min" in verdict.reason, verdict.reason
+    assert "knos done --all" in verdict.reason, "a person has to be told how to end it early"
+
+
+# ---- what a claim covers -------------------------------------------------------------------
+
+
+def test_a_claim_reaches_the_file_it_names(knos_home, repo):
+    """A description that names a file claims that file, by path or by name; prose names nothing."""
+    assert resolve(repo, "tidy src/auth.py before the release") == ["src/auth.py"]
+    assert resolve(repo, "the bug in auth.py") == ["src/auth.py"]
+    assert resolve(repo, "the authentication rewrite") == []
+
+    took, _, mine = _take(repo, CLAUDE, "tidy src/auth.py before the release")
+    assert took and not mine.advisory and mine.globs == ("src/auth.py",)
+    assert not guard.check(repo, str(repo / "src" / "auth.py"), CURSOR).allow
+
+
+def test_prose_alone_never_blocks_anything(knos_home, repo):
+    """Sharing words is not sharing files. A claim nothing resolves for is advisory: shown, never enforced."""
+    took, _, mine = _take(repo, CLAUDE, "the parser rewrite")
+    assert took and mine.advisory and mine.globs == ()
+
+    assert guard.check(repo, str(repo / "src" / "auth.py"), CURSOR).allow
+    took, conflict, _ = _take(repo, CURSOR, "fixing login", ["src/auth.py"])
+    assert took and conflict is None
+    # and a second advisory claim on the same words is not refused either
+    assert _take(repo, WINDSURF, "the parser rewrite")[0]
+    # but it is still shown to the others
+    assert [c.host for c in _about(repo, "how is the parser rewrite going")] == ["claude", "windsurf"]
+
+
+def test_a_single_star_does_not_cross_directories(knos_home, repo):
+    """`src/*` is the files in src; `src/**` is everything under it."""
+    assert _take(repo, CLAUDE, "top of src", ["src/*"])[0]
+    assert _take(repo, CURSOR, "deep module", ["src/deep/mod.py"])[0], "`*` claimed a subdirectory"
+    assert _take(repo, WINDSURF, "src itself", ["src/auth.py"])[0] is False
+
+    with Claims(repo) as c:
+        c.release(CLAUDE)
+    assert _take(repo, CLAUDE, "all of src", ["src/**"])[0] is False, "`**` did not reach the claimed subdirectory"
+
+
+# ---- identity: who holds a claim -------------------------------------------------------------
+
+
+def test_naming_yourself_the_holder_does_not_get_you_past_the_guard(knos_home, repo):
+    """A client can call itself anything. Same host, different session and process is a different agent."""
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    impostor = Agent(host="claude", session="sess-other", anchor=9999)
+
+    assert not impostor.owns(CLAUDE.host, CLAUDE.session, CLAUDE.anchor)
+    assert not guard.check(repo, str(repo / "src" / "auth.py"), impostor).allow
+
+
+@pytest.mark.critical
+def test_naming_yourself_the_holder_does_not_let_you_take_the_claim_either(knos_home, repo):
+    """The write side binds to the session as well as the read side: an impostor cannot re-take the holder's claim
+    and walk out of its own refusal."""
+    _, _, first = _take(repo, CLAUDE, "fixing login", ["src/auth.py"])
+    impostor = Agent(host="claude", session="sess-other", anchor=9999)
+
+    took, conflict, mine = _take(repo, impostor, "fixing login", ["src/auth.py"])
+    assert took is False and mine is None
+    assert conflict is not None and conflict.session == CLAUDE.session
+
+    # The session that made it can still restate it.
+    took, _, again = _take(repo, CLAUDE, "fixing login", ["src/auth.py"])
+    assert took and again.id == first.id
+
+
+def test_a_reconnect_keeps_the_claim(knos_home, repo):
+    """The same host process (anchor) with a new session id is the same agent: a reconnected MCP server is not
+    refused by its own claim."""
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    reconnected = Agent(host="claude", session="sess-claude-2", anchor=CLAUDE.anchor)
+    assert guard.check(repo, str(repo / "src" / "auth.py"), reconnected).allow
+    assert _take(repo, reconnected, "fixing login again", ["src/auth.py"])[0]
+
+
+def test_two_sessions_of_one_host_are_two_agents(knos_home, repo):
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0]
+    other_chat = Agent(host="claude", session="sess-claude-9", anchor=5555)
+    assert not guard.check(repo, str(repo / "src" / "auth.py"), other_chat).allow
+
+
+def test_a_claim_written_without_a_session_is_still_its_hosts(knos_home, repo):
+    """Older claims are no weaker than they were, and no stronger."""
+    bare = Agent(host="cursor")
+    assert bare.owns("cursor", "", None)
+    assert not bare.owns("claude", "", None)
+
+    assert _take(repo, bare, "fixing login", ["src/auth.py"])[0]
+    assert _take(repo, Agent(host="cursor"), "fixing login", ["src/auth.py"])[0] is True
+    assert _take(repo, CLAUDE, "fixing login", ["src/auth.py"])[0] is False
+
+
+def test_the_mcp_server_and_the_hooks_of_one_session_are_one_agent(knos_home, repo, monkeypatch):
+    """The MCP server is never told the session id; SessionStart records it against the host process, and the
+    server finds it there. So a claim taken over MCP is never refused by the same session's edit hook."""
+    monkeypatch.setattr(identity, "ancestors", lambda pid=None: [(3001, "node"), (4242, "claude")])
+    with Claims(repo) as c:
+        c.record_session("claude", "sess-abc", 4242)
+
+    served = identity.for_mcp("claude-code", lookup_session(repo))
+    hooked = identity.for_hook("claude", {"session_id": "sess-abc"})
+    assert served == Agent(host="claude", session="sess-abc", anchor=4242)
+    assert hooked == served
+
+    assert _take(repo, served, "fixing login", ["src/auth.py"])[0]
+    assert guard.check(repo, str(repo / "src" / "auth.py"), hooked).allow
+
+
+# ---- people ---------------------------------------------------------------------------------
+
+
+def _as_a_person(monkeypatch):
+    """The CLI decides person or agent from the process tree; the test is a person at a terminal."""
+    monkeypatch.setattr(identity, "ancestors", lambda pid=None: [])
+
+
+def test_a_person_can_claim_work_without_going_through_an_agent(knos_home, repo, monkeypatch):
+    """The person is the one who can resolve a collision, so they can fence work off before starting it."""
+    from typer.testing import CliRunner
+
+    from knos.cli import app
+
+    _as_a_person(monkeypatch)
+    runner = CliRunner()
+
+    got = runner.invoke(app, ["claim", "fixing login", "-p", "src/auth.py"])
+    assert got.exit_code == 0, got.output
+    assert "Claimed src/auth.py" in got.output
+    live = _live(repo)
+    assert [(c.host, c.globs) for c in live] == [("terminal", ("src/auth.py",))]
+
+    # Asking about it says so, in front of the person.
+    said = runner.invoke(app, ["ask", "what does src/auth.py do"]).output
+    assert "You hold src/auth.py (fixing login)" in said, said
+
+    got = runner.invoke(app, ["done"])
+    assert got.exit_code == 0, got.output
+    assert "Released src/auth.py" in got.output
+    assert _live(repo) == []
+
+
+def test_one_agent_is_enough_to_feel_a_claim(knos_home, repo, monkeypatch):
+    """A person claims work at the terminal; their only agent's edit is refused, and told whose it is."""
+    from typer.testing import CliRunner
+
+    from knos.cli import app
+
+    _as_a_person(monkeypatch)
+    assert CliRunner().invoke(app, ["claim", "fixing login", "-p", "src/auth.py"]).exit_code == 0
+
+    verdict = guard.check(repo, str(repo / "src" / "auth.py"), CLAUDE)
+    assert not verdict.allow
+    assert "claimed by terminal/" in verdict.reason
+    assert "fixing login" in verdict.reason
+
+    assert CliRunner().invoke(app, ["done"]).exit_code == 0
+    assert guard.check(repo, str(repo / "src" / "auth.py"), CLAUDE).allow
+
+
+def test_a_person_is_told_who_has_it_when_the_claim_is_refused(knos_home, repo, monkeypatch):
+    from typer.testing import CliRunner
+
+    from knos.cli import Stop, app
+
+    assert _take(repo, CURSOR, "fixing login", ["src/auth.py"])[0]
+    _as_a_person(monkeypatch)
+    got = CliRunner().invoke(app, ["claim", "my login work", "-p", "src/**"])
+    assert got.exit_code != 0
+    # `knos` prints a Stop as one line (cli.main); under the runner it surfaces as the exception.
+    assert isinstance(got.exception, Stop), got.output
+    assert "held by cursor/sess-cur" in got.exception.said, got.exception.said
+    assert "fixing login" in got.exception.said
+    assert [c.host for c in _live(repo)] == ["cursor"]
+
+
+# ---- the server ---------------------------------------------------------------------------
 
 
 @pytest.mark.critical
 def test_the_server_tells_agents_what_to_do_about_a_claim(knos_home, repo):
-    """An agent has to be told the rule before it is held to it, so the
-    instructions and the tool descriptions carry it."""
+    """An agent has to be told the rule before it is held to it, so the instructions and tool descriptions carry it."""
     said = mcp.server.instructions or ""
-    assert "withheld from you" in said
-    assert "override" in said
-    assert "under your name" in said
-    assert "is withheld" in (mcp.search.__doc__ or "")
-    assert "about to start work" in (mcp.remember.__doc__ or "")
+    assert "claim them" in said
+    assert "refused by the knos edit guard" in said
+    assert "done()" in said
+    assert "withheld" not in said.lower() and "override" not in said.lower()
+    assert "say who holds them" in (mcp.search.__doc__ or "")
+    assert "claiming" in (mcp.remember.__doc__ or "") and "paths" in (mcp.remember.__doc__ or "")
+    assert "Only ever your own" in (mcp.done.__doc__ or "")
 
 
 def test_the_server_names_its_own_version(knos_home, repo):
-    """A client is told the version in the handshake, and directories score
-    on it. An empty string is what you get by not passing one at all."""
-    import re
-
+    """A client is told the version in the handshake. An empty string is what you get by not passing one."""
     said = knos.version()
     assert said, "the server would introduce itself with no version"
     assert re.fullmatch(r"\d+\.\d+\.\d+.*|0\+unknown", said), said
     assert mcp.server.version == said
 
 
-# ---- enforcement: knos withholds what it knows -------------------------
+# ---- concurrency: two processes, one file ------------------------------------------------------
 
 
 @pytest.mark.critical
-def test_a_claim_withholds_the_answer_not_just_a_warning(knos_home, repo):
-    """The signal is not advice. knos declines to be the source.
-
-    It cannot stop an agent editing a file — it has no authority over an
-    editor. It does own what it knows, and on claimed work it refuses to
-    hand it over.
-    """
-    from knos.memory import Fact
-
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.record(
-            Fact(
-                text="the risk guard refuses unknown assets on liquidity",
-                source="session",
-                where="Claude Code session aaaa1111 2026-08-20",
-                when="2026-08-20",
-            )
-        )
-        mem.working_on("risk guard", "Claude Code", _now())
-
-    held = mcp.search("risk guard")
-    assert held.startswith("Withheld.")
-    assert "held by Claude Code" in held
-    # the thing it knows is not in the reply at all
-    assert "refuses unknown assets" not in held
-    assert "liquidity" not in held
-
-
-def test_the_agent_holding_the_claim_is_never_blocked(knos_home, repo):
-    from knos.memory import Fact
-
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.record(
-            Fact("the risk guard refuses unknown assets", "session", "s 2026-08-20", "2026-08-20")
-        )
-        mem.working_on("risk guard", "Claude Code", _now())
-
-    import knos.mcp as m
-
-    original = m._who
-    try:
-        m._who = lambda ctx: "Claude Code"
-        said = m.search("risk guard")
-    finally:
-        m._who = original
-    assert not said.startswith("Withheld.")
-    assert "refuses unknown assets" in said
-
-
-def test_an_override_unlocks_it_and_is_written_down(knos_home, repo):
-    from knos.memory import Fact
-
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.record(
-            Fact("the risk guard refuses unknown assets", "session", "s 2026-08-20", "2026-08-20")
-        )
-        mem.working_on("risk guard", "Claude Code", _now())
-
-    said = mcp.search("risk guard", override="the build is broken and I need it now")
-    assert not said.startswith("Withheld.")
-    assert "refuses unknown assets" in said
-
-    with Memory(repo) as mem:
-        taken = mem.overrides()
-        assert len(taken) == 1
-        assert taken[0]["topic"] == "risk guard"
-        assert "build is broken" in taken[0]["why"]
-        # and it is in the journal, permanently, with a reason
-        assert any(
-            "took risk guard anyway" in str(e.get("evaluated", ""))
-            for e in mem.journal(limit=1000)
-        )
-
-
-def test_an_override_holds_for_that_agent_and_that_claim_only(knos_home, repo):
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("risk guard", "Claude Code", _now())
-        mem.working_on("parser", "Cursor", _now())
-        mem.overrode("risk guard", "an agent", "Claude Code", "needed it", _now())
-
-        assert mem.overridden("risk guard", "an agent")
-        assert not mem.overridden("parser", "an agent")
-        assert not mem.overridden("risk guard", "Windsurf")
-
-    # the one it overrode is open; the other is still shut
-    assert not mcp.search("risk guard").startswith("Withheld.")
-    assert mcp.search("the parser").startswith("Withheld.")
-
-
-def test_releasing_the_work_clears_the_overrides_too(knos_home, repo):
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("risk guard", "Claude Code", _now())
-        mem.overrode("risk guard", "Cursor", "Claude Code", "needed it", _now())
-        assert mem.overrides()
-        mem.done_working()
-        assert mem.overrides() == []
-        # the journal still says it happened
-        assert any(
-            "took risk guard anyway" in str(e.get("evaluated", ""))
-            for e in mem.journal(limit=1000)
-        )
-
-
-def test_withholding_dies_with_the_store(knos_home, repo):
-    """Enforcement is Sibyl. Delete it and nothing is held back."""
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("risk guard", "Claude Code", _now())
-        db = mem.db_path
-    assert mcp.search("risk guard").startswith("Withheld.")
-
-    db.unlink()
-
-    assert not mcp.search("risk guard").startswith("Withheld.")
-
-
-def test_naming_yourself_the_holder_does_not_get_you_past_the_block(knos_home, repo):
-    """A client tells knos its own name and can tell it anything.
-
-    If the name alone decided who holds a claim, an agent that called
-    itself "Claude Code" would walk straight past enforcement in one line.
-    The claim is bound to the connection it was made on as well.
-    """
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        # claimed on some other connection, not this one
-        mem.working_on("risk guard", "Claude Code", _now(), session="99999")
-
-    # An impostor using the holder's exact name is still not the holder.
-    assert mcp.search("risk guard").startswith("Withheld.")
-    assert not mcp._is_holder(
-        {"who": "Claude Code", "session": "99999"}, "Claude Code"
-    )
-
-
-@pytest.mark.critical
-def test_naming_yourself_the_holder_does_not_let_you_take_the_claim_either(
-    knos_home, repo
-):
-    """The write side has to bind to the connection as well as the read side.
-
-    Withholding from an impostor is worth nothing if the same impostor can
-    simply claim the work under the holder's name: the row is overwritten,
-    it is now the holder for real, and it has walked out of its own
-    withhold in one call. The compare-and-swap matches the session too.
-    """
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("the risk guard", "Claude Code", _now(), session="99999")
-
-        took, holder = mem.claim_if_free(
-            "the risk guard", "Claude Code", _now(), session="not-99999"
-        )
-        assert took is False
-        assert holder is not None and holder["session"] == "99999"
-
-        # The connection that actually made it can still restate it.
-        again, _ = mem.claim_if_free(
-            "the risk guard", "Claude Code", _now(), session="99999"
-        )
-        assert again is True
-
-
-def test_a_claim_written_without_a_session_is_still_restateable_by_name(
-    knos_home, repo
-):
-    """Older claims are no weaker than they were, and no stronger."""
-    with Memory(repo) as mem:
-        mem.working_on("the parser", "Cursor", _now())
-        assert mem.claim_if_free("the parser", "Cursor", _now())[0] is True
-        assert mem.claim_if_free("the parser", "Claude Code", _now())[0] is False
-
-
-def test_the_real_holder_on_its_own_connection_is_let_through(knos_home, repo):
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("risk guard", "Claude Code", _now(), session=mcp._session())
-
-    assert mcp._is_holder(
-        {"who": "Claude Code", "session": mcp._session()}, "Claude Code"
-    )
-
-
-def test_a_claim_with_no_session_falls_back_to_the_name(knos_home, repo):
-    """Older claims are no weaker than they were, and no stronger."""
-    assert mcp._is_holder({"who": "Claude Code"}, "Claude Code")
-    assert not mcp._is_holder({"who": "Claude Code"}, "Cursor")
-
-
-def test_a_person_can_claim_work_without_going_through_an_agent(
-    knos_home, repo, monkeypatch
-):
-    """The person is the one who can resolve a collision.
-
-    Claiming used to be an agent-only move, which left the human with no way
-    to fence off work before starting it.
-    """
-    from typer.testing import CliRunner
-
-    from knos.cli import app
-    from knos.memory import Memory
-
-    knos_paths.remember_pointed(repo)
-    runner = CliRunner()
-
-    assert runner.invoke(app, ["claim", "the risk guard"]).exit_code == 0
-    with Memory(repo) as mem:
-        assert [w["topic"] for w in mem.claims()] == ["the risk guard"]
-
-    # And asking about it says so, in front of the person, not afterwards in
-    # a status screen they never opened.
-    said = runner.invoke(app, ["ask", "how does the risk guard work"]).output
-    assert "working on the risk guard right now" in said
-
-    assert runner.invoke(app, ["done"]).exit_code == 0
-    with Memory(repo) as mem:
-        assert mem.claims() == []
-
-
-def test_one_agent_is_enough_to_feel_the_withhold(knos_home, repo):
-    """A person claims work at the terminal; their only agent is refused.
-
-    Needing two agents open to see the one thing knos does that a worktree
-    cannot is a setup cost most people will not pay before deciding.
-    """
-    from datetime import datetime, timezone
-
-    from knos import mcp
-
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.working_on("the parser", "you", datetime.now(timezone.utc).isoformat())
-        said = mcp._held(mem, "how does parsing work", "Claude Code", "")
-
-    assert said.startswith("Withheld.")
-    # Talking to the person who holds it, so not "go and ask them".
-    assert "The person you are working with" in said
-    assert "the parser" in said
-
-    with Memory(repo) as mem:
-        mem.done_working()
-        assert mcp._held(mem, "how does parsing work", "Claude Code", "") == ""
-
-
-# ---- concurrency: two processes, one topic -----------------------------
-
-
-@pytest.mark.critical
-def test_two_processes_claiming_the_same_topic_only_one_wins(knos_home, repo, tmp_path):
-    """The claim is a compare-and-swap, not a blind write.
-
-    Two agents reaching for the same work in the same second is the case
-    the whole product exists for. A last-writer-wins store would tell both
-    of them they had it, and the second would quietly own work the first
-    was already changing. Real processes, not threads, because the lock
-    that has to hold is SQLite's, across process boundaries.
-    """
+def test_two_processes_claiming_the_same_file_only_one_wins(knos_home, repo, tmp_path):
+    """The claim is one transaction, not a blind write. Real processes, because the lock that has to hold is
+    SQLite's, across process boundaries. The claim is given as a description naming the file, so resolving it is
+    inside the race too."""
     import json
     import subprocess
     import sys
@@ -554,151 +449,30 @@ def test_two_processes_claiming_the_same_topic_only_one_wins(knos_home, repo, tm
     script = tmp_path / "grab.py"
     script.write_text(
         "import json, sys\n"
-        "from datetime import datetime, timezone\n"
-        "from knos.memory import Memory\n"
+        "from knos.claims import Claims\n"
+        "from knos.identity import Agent\n"
         "repo, who = sys.argv[1], sys.argv[2]\n"
-        "with Memory(repo) as mem:\n"
-        "    took, holder = mem.claim_if_free(\n"
-        "        'the parser', who, datetime.now(timezone.utc).isoformat()\n"
-        "    )\n"
-        "print(json.dumps({'who': who, 'took': took,\n"
-        "                  'holder': (holder or {}).get('who')}))\n",
+        "with Claims(repo) as c:\n"
+        "    took, conflict, mine = c.take(Agent(host=who, session='s-' + who), 'rework src/auth.py')\n"
+        "print(json.dumps({'who': who, 'took': took, 'holder': conflict.host if conflict else None,\n"
+        "                  'globs': list(mine.globs) if mine else None}))\n",
         encoding="utf-8",
     )
 
     def grab(who: str) -> dict:
-        done = subprocess.run(
-            [sys.executable, str(script), str(repo), who],
-            capture_output=True,
-            text=True,
-        )
+        done = subprocess.run([sys.executable, str(script), str(repo), who], capture_output=True, text=True)
         assert done.returncode == 0, done.stderr
         return json.loads(done.stdout.strip().splitlines()[-1])
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first, second = (f.result() for f in [
-            pool.submit(grab, "Claude Code"),
-            pool.submit(grab, "Cursor"),
-        ])
+        first, second = (f.result() for f in [pool.submit(grab, "claude"), pool.submit(grab, "cursor")])
 
     winners = [r for r in (first, second) if r["took"]]
     losers = [r for r in (first, second) if not r["took"]]
-    assert len(winners) == 1, (first, second)
-    assert len(losers) == 1, (first, second)
+    assert len(winners) == 1 and len(losers) == 1, (first, second)
+    assert winners[0]["globs"] == ["src/auth.py"], "the description did not resolve to the file, so nothing raced"
     # The loser is told who actually has it, not a bare refusal.
     assert losers[0]["holder"] == winners[0]["who"], (first, second)
 
-    # And the store agrees with whoever won.
-    with Memory(repo) as mem:
-        held = [c for c in mem.claims() if c["topic"] == "the parser"]
-    assert len(held) == 1, held
-    assert held[0]["who"] == winners[0]["who"]
-
-
-@pytest.mark.critical
-def test_a_claim_lapses_so_a_crashed_agent_cannot_hold_work_forever(knos_home, repo):
-    """An agent that dies mid-change never calls `knos done`. If the claim
-    outlived the process, that work would be unaskable until a person
-    noticed. It expires on its own instead."""
-    dead = datetime.now(timezone.utc) - timedelta(minutes=INTENT_HOLDS + 1)
-    with Memory(repo) as mem:
-        mem.working_on("the parser", "a crashed agent", dead.isoformat())
-        assert mem.claims() == []
-        took, holder = mem.claim_if_free("the parser", "Cursor", _now())
-    assert took is True and holder is None
-
-
-def test_a_paraphrased_question_is_withheld_too(knos_home, repo):
-    """The leak this closes: a claim covered its own wording and nothing else.
-
-    "the risk guard" was claimed, an agent asked "why do we cap trades?",
-    and the answer went out in full — the question shared no word with the
-    claim, so nothing matched and the protected passage was handed over. A
-    claim has to cover its subject however the question is phrased.
-    """
-    from knos.memory import Fact
-
-    knos_paths.remember_pointed(repo)
-    with Memory(repo) as mem:
-        mem.record(
-            Fact(
-                text=(
-                    "we cap every trade at 10000 notional in risk_guard.py"
-                    " because the august incident came from an uncapped order"
-                ),
-                source="session",
-                where="Claude Code session aaaa1111 2026-08-20",
-                when="2026-08-20",
-            )
-        )
-        mem.working_on("risk guard", "Claude Code", _now())
-
-    # Not one word of the claim appears in the question.
-    held = mcp.search("why do we cap trades?")
-    assert held.startswith("Withheld."), held
-    # and the thing it protects is not in the reply at all
-    assert "10000" not in held
-    assert "uncapped order" not in held
-
-
-def test_a_claim_reaches_the_file_it_names(knos_home, repo):
-    """risk_guard.py is one token. A claim on "the risk guard" has to match
-    it anyway, or the claim misses the code it was made about."""
-    from knos import answer
-
-    assert answer.same_subject("the risk guard", "risk_guard.py holds the cap")
-    assert answer.same_subject("the parser", "src/parser/tokens.py")
-    # and splitting identifiers must not make it greedy
-    assert not answer.same_subject("guard", "safeguarding the vanguard")
-    assert not answer.same_subject("the risk guard", "the deploy window")
-
-
-@pytest.mark.critical
-def test_a_refused_agent_is_told_when_the_work_frees_up(knos_home, repo) -> None:
-    """"Come back later" is not usable advice without a later.
-
-    It used to be half an hour for everybody and the documents said so. The
-    hold is earned per agent now, so the refusal is the only honest place for
-    the number - an agent deciding between waiting and moving on cannot judge
-    that without it.
-    """
-    from datetime import datetime, timedelta, timezone
-
-    from knos import mcp
-
-    taken = (datetime.now(timezone.utc) - timedelta(minutes=8)).isoformat()
-    with Memory(repo) as mem:
-        mem.claim_if_free("the parser", "Claude Code", taken)
-        said = mcp._held(mem, "the parser", "Cursor", "")
-
-    assert "lapses in about 22 minutes" in said, said
-    assert "if they do not finish sooner" in said, (
-        "the number has to be a ceiling, not a promise: `knos done` ends it early"
-    )
-
-
-def test_the_time_is_the_soonest_of_several_holds(knos_home, repo) -> None:
-    """An agent waiting cares about the first thing it can have."""
-    from datetime import datetime, timedelta, timezone
-
-    from knos import mcp
-
-    now = datetime.now(timezone.utc)
-    with Memory(repo) as mem:
-        mem.claim_if_free("the parser", "Claude Code",
-                          (now - timedelta(minutes=2)).isoformat())
-        mem.claim_if_free("the parser tests", "Cursor",
-                          (now - timedelta(minutes=25)).isoformat())
-        said = mcp._held(mem, "the parser", "OpenCode", "")
-
-    assert "lapses in about 5 minutes" in said, said
-
-
-def test_no_time_is_promised_when_it_cannot_be_worked_out(knos_home, repo) -> None:
-    """A stored claim with an unreadable timestamp must not invent a number."""
-    from knos import answer
-
-    assert answer._lapses_in(None) == ""
-    assert answer._lapses_in(float("nan")) == ""
-    assert answer._lapses_in(-3) == ""
-    assert "within the minute" in answer._lapses_in(0.4)
+    live = _live(repo)
+    assert [c.host for c in live] == [winners[0]["who"]]

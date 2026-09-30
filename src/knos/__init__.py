@@ -1,4 +1,4 @@
-"""knos — One local memory every coding agent on the machine shares — and it knows which of them is in your code right now."""
+"""knos - one local memory every coding agent on the machine shares, and it knows which of them is in your code right now."""
 
 from importlib.metadata import PackageNotFoundError, version as _installed
 

@@ -1,7 +1,10 @@
-"""Durable memory. Sibyl owns the store; this is a thin wrapper.
+"""Durable memory, one Sibyl store per repo, on this machine only.
 
-Sibyl is local-first: a SQLite file on this machine, no account, no network.
-The five tiers are used plainly.
+Every answer knos gives comes out of Sibyl's memory engine (sibyl-memory-client). Sibyl's free tier caps the stores
+an agent on this machine writes to at 5 MB together; knos does not patch or route around that cap. It keeps what can
+be rebuilt out of the store (the code-structure index is a tags file beside it), warns at 80%, and names the two ways
+on: `knos compact`, or Sibyl Pro (`sibyl upgrade`). A Sibyl account already on this machine
+(~/.sibyl-memory/credentials.json) is passed to Sibyl's own cap gate, so paying Sibyl users are not capped.
 
     WARM entities    one canonical record per thing (schema-unique)
     COLD journal     what was learned, when, from which source
@@ -9,8 +12,7 @@ The five tiers are used plainly.
     REFERENCE        facts that do not change
     ARCHIVE          superseded
 
-No extraction model, no scoring, no pressure. Facts come from sessions, git
-and code structure, stated as they were found.
+No extraction model, no scoring, no pressure. Facts come from sessions, git and code structure, stated as found.
 """
 
 from __future__ import annotations
@@ -22,15 +24,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sibyl_memory_client import (
-    DEFAULT_TENANT,
-    FREE_TIER_CAP_BYTES,
-    CapExceededError,
-    MemoryClient,
-    Storage,
-)
-
 from . import paths
+
+from sibyl_memory_client import DEFAULT_TENANT, FREE_TIER_CAP_BYTES, CapExceededError, Storage
+
+# Warn when a capped store is this full, with the exact choices (WP5).
+WARN_AT = 0.8
 
 # knos keeps its own bookkeeping in the same store as the facts. Internal
 # keys carry this prefix so an answer never quotes knos's plumbing back at
@@ -57,6 +56,36 @@ class StoreFull(Exception):
     """
 
 
+class StoreGone(Exception):
+    """This repo had a memory here and its store file is gone.
+
+    Refused rather than replaced. An empty store opened in its place would
+    answer every question with "nothing is known", which an agent reads as a
+    fact about the repo, not about a missing file. The marker next to the
+    store holds no data; it only records that a store was born here. `knos
+    point` starts over on purpose and removes both.
+    """
+
+
+def sibyl_account() -> dict[str, str]:
+    """The Sibyl account on this machine, if its owner activated one (`sibyl init`): account_id and session_token,
+    handed only to Sibyl's own cap gate. Empty when there is none."""
+    import os
+
+    path = Path(os.environ.get("SIBYL_CREDENTIALS") or Path.home() / ".sibyl-memory" / "credentials.json")
+    try:
+        got = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(got, dict) or not got.get("account_id") or not got.get("session_token"):
+        return {}
+    return {"account_id": str(got["account_id"]), "session_token": str(got["session_token"])}
+
+
+def born_marker(db_path: Path) -> Path:
+    return Path(db_path).with_name(Path(db_path).name + ".born")
+
+
 def _minutes_since(when: str) -> float:
     """Age of a timestamp in minutes, or forever if it cannot be read."""
     from datetime import datetime, timezone
@@ -74,14 +103,6 @@ FILE = "file"
 TOPIC = "topic"
 PERSON = "person"
 SYMBOL = "symbol"
-
-# One record per agent that yielded on one claim: the lock that keeps a
-# chatty agent from writing the same stand-down ten times.
-STOOD_DOWN = "stood_down"
-
-# One record per agent that forced its way past a claim, so an override is
-# something you can look up rather than something that happened once.
-OVERRODE = "overrode"
 
 # One record per rule its own file stopped carrying. Written when a read finds
 # the citation no longer holds, not when the file changes: knos does not watch
@@ -123,6 +144,8 @@ def _open(db_path: Path) -> Storage:
     Waiting is right here: the store is about to exist, the other process is
     the reason it does not yet, and the whole delay is milliseconds.
     """
+    from sibyl_memory_client import Storage
+
     for attempt in range(_OPEN_TRIES):
         try:
             return Storage(str(db_path))
@@ -139,12 +162,23 @@ class Memory:
     def __init__(self, repo: Path) -> None:
         self.repo = Path(repo).resolve()
         self.db_path = paths.store_for(self.repo)
+        born = born_marker(self.db_path)
+        if not self.db_path.exists() and born.exists():
+            raise StoreGone(
+                f"knos's memory of {self.repo.name} is gone ({self.db_path} was "
+                "deleted). knos will not answer from an empty store as if "
+                "nothing were known. To start over on purpose: knos reset --yes"
+            )
+        from sibyl_memory_client import MemoryClient
+
         self.storage = _open(self.db_path)
         self.client = MemoryClient(self.storage, cap_gate=self._cap_gate())
-        # The last chain link each writer wrote, so sealing a fact costs one
-        # journal read per writer per session rather than one per write.
-        self._chain: dict[str, tuple[str, int]] = {}
-        self._chain_read = False
+        if not born.exists():
+            born.write_text(
+                "a knos store was created here; if it goes missing, knos "
+                "refuses rather than start an empty one\n",
+                encoding="utf-8",
+            )
 
     def _cap_gate(self) -> Any:
         """The store's own cap check, asked to measure less often.
@@ -163,18 +197,29 @@ class Memory:
         from sibyl_memory_client._capcheck import aggregate_db_size
 
         measure = lambda: aggregate_db_size(self.storage.db_path)  # noqa: E731
-        state = {"size": measure(), "written": 0}
+        state = {"size": measure(), "written": 0, "writes": 0}
         # Below this, an estimate cannot be wrong enough to matter.
         relaxed = int(FREE_TIER_CAP_BYTES * 0.8)
 
         def size() -> int:
-            if state["size"] + state["written"] >= relaxed:
+            # The per-fact estimate can undercount what a write really costs (the row plus its full-text index
+            # entries). So the real size is also measured every 64 writes or 256 KB of estimated growth: an
+            # estimate never drifts far enough from the truth to carry the store past the cap unmeasured.
+            if (state["size"] + state["written"] >= relaxed or state["writes"] >= 64
+                    or state["written"] >= 256 * 1024):
                 state["size"] = measure()
                 state["written"] = 0
+                state["writes"] = 0
             return state["size"] + state["written"]
 
-        self._grew = lambda n: state.__setitem__("written", state["written"] + n)
-        return CapGate(account_id=None, session_token=None, db_size_fn=size)
+        def grew(n: int) -> None:
+            state["written"] += n
+            state["writes"] += 1
+
+        self._grew = grew
+        account = sibyl_account()
+        return CapGate(account_id=account.get("account_id"), session_token=account.get("session_token"),
+                       db_size_fn=size)
 
     def close(self) -> None:
         self.storage.close()
@@ -195,29 +240,7 @@ class Memory:
         full store is a normal thing that happens, not an error. The caller
         stops reading and says so.
         """
-        from . import seal
-
         body = fact.as_dict()
-        # Chain it to the last thing this writer wrote, so an entry cannot be
-        # altered or dropped later without the rest of that writer's chain
-        # failing. Per writer rather than global: two processes appending at
-        # the same instant would fork one global chain, and a fork is
-        # indistinguishable from tampering.
-        try:
-            if not self._chain_read:
-                # One pass for every writer, rather than one pass per writer.
-                self._chain.update(seal.heads(self))
-                self._chain_read = True
-            prev, seq = self._chain.get(fact.where, (seal.GENESIS, 0))
-            body["prev"] = prev
-            body["seq"] = seq + 1
-            body["link"] = seal.link(prev, body)
-        except Exception:
-            # A seal that cannot be computed must not stop the fact being
-            # written. An unsealed entry is visible to `knos verify`.
-            body.pop("prev", None)
-            body.pop("seq", None)
-            body.pop("link", None)
 
         try:
             written = self.client.write_event(
@@ -227,8 +250,6 @@ class Memory:
             )
         except CapExceededError:
             return None
-        if body.get("link"):
-            self._chain[fact.where] = (body["link"], int(body["seq"]))
         # Roughly what that fact just cost on disk, so the cap gate can tell
         # how close it is getting without re-measuring the whole store.
         self._grew(len(fact.text) * 3 + 512)
@@ -238,9 +259,27 @@ class Memory:
         with self.storage.connection() as conn:
             return int(self.storage.logical_size_bytes(conn))
 
+    @property
+    def capped(self) -> bool:
+        """Whether Sibyl's free-tier cap applies: no Sibyl account on this machine."""
+        return not sibyl_account()
+
+    def footprint(self) -> int:
+        """What Sibyl's cap counts: this store plus the other Sibyl stores on the machine."""
+        from sibyl_memory_client._capcheck import aggregate_db_size
+
+        try:
+            return int(aggregate_db_size(self.storage.db_path))
+        except Exception:
+            return self._size_bytes()
+
     def full(self) -> bool:
         """True when the store has no room for more."""
-        return self._size_bytes() >= FREE_TIER_CAP_BYTES
+        return self.capped and self.footprint() >= FREE_TIER_CAP_BYTES
+
+    def near_full(self) -> bool:
+        """At or past 80% of the free tier: the moment to show the choices, before anything is refused."""
+        return self.capped and self.footprint() >= WARN_AT * FREE_TIER_CAP_BYTES
 
     def size_mb(self) -> float:
         return self._size_bytes() / (1024 * 1024)
@@ -263,7 +302,7 @@ class Memory:
         # the README points at this number as the thing not to take on
         # trust.
         told = sum(1 for e in self.journal(limit=5000) if e.get("acted") == "note")
-        return told + len(self.claims())
+        return told
 
     def written_rules(self, limit: int = 400) -> list[dict[str, Any]]:
         """The instruction files, in the order they were read.
@@ -344,312 +383,7 @@ class Memory:
     def focus(self) -> dict[str, Any] | None:
         return self.client.get_state(INTERNAL + "focus")
 
-    def claims(self) -> list[dict[str, Any]]:
-        """Every piece of work an agent says it is in the middle of.
-
-        One record per topic, not one for the whole repo. Two agents on
-        genuinely separate things can both say so; a third asking about
-        either is told about that one only. Each expires on its own.
-        """
-        live = []
-        for key in self._claim_keys():
-            state = self.client.get_state(key)
-            body = (state or {}).get("body") if state else None
-            if not body or not body.get("topic"):
-                continue
-            # The hold is the one this agent earned when it claimed, kept
-            # on the claim itself so a record that changes later cannot
-            # retroactively expire work already in progress.
-            holds = body.get("holds")
-            try:
-                holds = int(holds)
-            except (TypeError, ValueError):
-                holds = INTENT_HOLDS
-            if _minutes_since(str(body.get("when", ""))) <= holds:
-                live.append(body)
-        return live
-
-    def _claim_keys(self) -> list[str]:
-        """The hot keys holding claims, read straight from the store."""
-        prefix = INTERNAL + "working_on"
-        try:
-            with self.storage.connection() as conn:
-                rows = conn.execute(
-                    "SELECT document_key FROM state_documents WHERE document_key LIKE ?",
-                    (prefix + "%",),
-                ).fetchall()
-            return [r[0] for r in rows]
-        except Exception:
-            return []
-
-    def working_on(self, topic: str, who: str, when: str, session: str = "") -> None:
-        """Record what is being worked on now, and by which agent.
-
-        This is the HOT tier doing its actual job. It holds one thing, it is
-        overwritten rather than appended, and it is the only part of the
-        store that is about *now* rather than about what happened. An agent
-        that writes something down here is telling every other agent on this
-        machine what it is in the middle of.
-        """
-        try:
-            self.client.set_state(
-                self._claim_key(topic),
-                {"topic": topic, "who": who, "when": when, "session": session},
-            )
-        except CapExceededError as full:
-            raise StoreFull(topic) from full
-
-    def _claim_key(self, topic: str) -> str:
-        return f"{INTERNAL}working_on:{topic.strip().lower()}"
-
-    def claim_if_free(
-        self, topic: str, who: str, when: str, session: str = ""
-    ) -> tuple[bool, dict[str, Any] | None]:
-        """Take the claim on `topic`, but only if nobody else holds it.
-
-        `working_on` overwrites whatever is there, which is right for a
-        caller re-stating its own claim and wrong for two agents reaching
-        for the same work in the same second: both would succeed and the
-        second would silently own it. This is the same write done as a
-        compare-and-swap, so exactly one of them wins.
-
-        The swap is one `INSERT ... ON CONFLICT DO UPDATE ... WHERE`, run
-        inside `BEGIN IMMEDIATE`, so the losing process is holding SQLite's
-        write lock or waiting on it — never interleaving with the winner.
-        The row is written only when the existing claim is absent, already
-        this caller's, unreadable, or older than INTENT_HOLDS. `julianday`
-        returns NULL on a timestamp it cannot parse, which is the same
-        "treat it as over" that `_minutes_since` gives by returning inf.
-
-        Returns (True, None) when the claim is now yours, or (False, holder)
-        when somebody else has it.
-        """
-        from datetime import datetime, timezone
-
-        from . import record as record_mod
-
-        key = self._claim_key(topic)
-        # What this agent has earned, from what it has finished before.
-        try:
-            holds = record_mod.holds_for(self, who)
-        except Exception:
-            holds = INTENT_HOLDS
-        body = json.dumps({"topic": topic, "who": who, "when": when,
-                           "session": session, "holds": holds})
-        now = datetime.now(timezone.utc).isoformat()
-
-        # The swap writes the row itself, so Sibyl's cap gate is not in the
-        # path. Check it here instead: a claim that quietly did not land is
-        # the one failure this whole feature exists to prevent.
-        if self._size_bytes() >= FREE_TIER_CAP_BYTES:
-            raise StoreFull(topic)
-
-        for attempt in range(_CLAIM_TRIES):
-            try:
-                with self.storage.transaction() as conn:
-                    before = conn.total_changes
-                    conn.execute(
-                        "INSERT INTO state_documents (tenant_id, document_key, body)"
-                        " VALUES (?, ?, ?)"
-                        " ON CONFLICT(tenant_id, document_key) DO UPDATE SET"
-                        "   body = excluded.body,"
-                        "   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
-                        " WHERE json_extract(state_documents.body, '$.topic') IS NULL"
-                        # The name alone cannot re-take a claim: a client
-                        # tells knos what it is called, so an agent that
-                        # calls itself the holder would otherwise overwrite
-                        # the row and walk out of its own withhold. The
-                        # connection has to match too, exactly as the read
-                        # side already requires. A claim written before
-                        # sessions existed has none and still falls back to
-                        # the name, which is no weaker than it was.
-                        "    OR (json_extract(state_documents.body, '$.who') = ?"
-                        "        AND COALESCE(json_extract(state_documents.body,"
-                        "                     '$.session'), '') IN ('', ?))"
-                        "    OR julianday(json_extract(state_documents.body, '$.when'))"
-                        "       IS NULL"
-                        # The row expires on the hold it was written with, so
-                        # a reliable agent's claim outlives an abandoner's.
-                        "    OR (julianday(json_extract(state_documents.body, '$.when'))"
-                        "        + COALESCE("
-                        "            json_extract(state_documents.body, '$.holds'), 30"
-                        "          ) / 1440.0)"
-                        "       < julianday(?)",
-                        (self._tenant, key, body, who, session, now),
-                    )
-                    if conn.total_changes > before:
-                        took = True
-                    else:
-                        took = False
-                if took:
-                    record_mod.note_taken(self, topic, who, when)
-                    return True, None
-                with self.storage.transaction() as conn:
-                    row = conn.execute(
-                        "SELECT body FROM state_documents"
-                        " WHERE tenant_id = ? AND document_key = ?",
-                        (self._tenant, key),
-                    ).fetchone()
-                return False, (json.loads(row[0]) if row else None)
-            except Exception:
-                # SQLITE_BUSY past busy_timeout, or a transient write error.
-                # Sibyl opens every connection with WAL and busy_timeout=5000,
-                # so this is already the second line of defence.
-                if attempt == _CLAIM_TRIES - 1:
-                    raise
-                time.sleep(_CLAIM_BACKOFF * (attempt + 1))
-        return False, None
-
-    @property
-    def _tenant(self) -> str:
-        """The tenant Sibyl writes knos rows under."""
-        return getattr(self.client, "_tenant_id", DEFAULT_TENANT)
-
-    def current_work(self) -> dict[str, Any] | None:
-        """The most recent live claim, or None.
-
-        Intent goes stale. An agent that said it was rewriting the parser an
-        hour ago is not a reason to hesitate now, and a warning that is
-        always on is a warning nobody reads. Anything older than
-        INTENT_HOLDS is treated as over.
-        """
-        live = self.claims()
-        return max(live, key=lambda c: str(c.get("when", ""))) if live else None
-
-    def done_working(self) -> None:
-        """Say the current piece of work is finished.
-
-        The stand-down locks go with it, so the next claim on the same thing
-        warns everybody again rather than being silently pre-acknowledged.
-        The journal keeps the trace of who yielded; only the locks go.
-        """
-        from . import record as record_mod
-
-        # Read who held what before it goes, so the journal can say a claim
-        # was closed rather than merely stopping.
-        for held in self.claims():
-            record_mod.note_finished(
-                self, str(held.get("topic", "")), str(held.get("who", ""))
-            )
-        for key in self._claim_keys():
-            try:
-                self.client.set_state(key, {})
-            except CapExceededError:
-                pass
-        for category in (STOOD_DOWN, OVERRODE):
-            for e in self.things(category, limit=1000):
-                try:
-                    self.client.delete_entity(category, e.get("name", ""))
-                except Exception:
-                    pass
-
-    def finished_by(self, who: str, topic: str = "") -> list[str]:
-        """Close the claims `who` holds, and say which ones those were.
-
-        `done_working` clears every claim in the store, which is right for a
-        person at a terminal saying they have stopped and wrong for one agent
-        among several: it would hand away work its colleagues are still in the
-        middle of. This closes only the caller's own.
-        """
-        from . import record as record_mod
-
-        closed: list[str] = []
-        for held in self.claims():
-            mine = str(held.get("who", "")) == who
-            wanted = (not topic) or str(held.get("topic", "")) == topic
-            if not (mine and wanted):
-                continue
-            name = str(held.get("topic", ""))
-            record_mod.note_finished(self, name, who)
-            try:
-                self.client.set_state(self._claim_key(name), {})
-            except CapExceededError:
-                pass
-            closed.append(name)
-        return closed
-
-    def stood_down(self, topic: str, who: str, claimed_by: str, when: str) -> bool:
-        """Record that one agent backed off because another had the work.
-
-        The second half of the pattern. The first agent writes intent into
-        HOT; every other agent that asks about the same thing reads it and
-        writes down that it stood down, which is what turns a notice board
-        into coordination: afterwards you can see who yielded to whom.
-
-        Written once per agent per claim. A warm record is the lock that
-        makes that true, so a chatty agent asking ten times leaves one line
-        in the journal rather than ten.
-        """
-        seen = f"{topic} :: {who} :: {claimed_by}"
-        if self.thing(STOOD_DOWN, seen) is not None:
-            return False
-        if self.note_thing(STOOD_DOWN, seen, {"when": when}) is None:
-            return False
-        self.record(
-            Fact(
-                text=f"{who} stood down on {topic}; {claimed_by} had it.",
-                source="note",
-                where=f"{who} yielded to {claimed_by}, {when[:10]}",
-                when=when,
-                about=topic,
-            )
-        )
-        return True
-
-    def overrode(self, topic: str, who: str, claimed_by: str, why: str, when: str) -> None:
-        """Record that an agent took contested work anyway, and why.
-
-        Standing down is the quiet path. This is the loud one: knos withheld
-        what it knew, the agent said it needed it regardless, and that is
-        now a permanent line in the journal with a reason attached. An
-        override nobody can see would be the same as no rule at all.
-        """
-        self.note_thing(OVERRODE, f"{topic} :: {who}", {"why": why, "when": when})
-        self.record(
-            Fact(
-                text=f"{who} took {topic} anyway, over {claimed_by}: {why}",
-                source="note",
-                where=f"{who} overrode {claimed_by}, {when[:10]}",
-                when=when,
-                about=topic,
-            )
-        )
-
-    def overridden(self, topic: str, who: str) -> bool:
-        """Whether this agent already forced its way past this claim."""
-        return self.thing(OVERRODE, f"{topic} :: {who}") is not None
-
-    def overrides(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Who took contested work anyway, and why."""
-        rows = []
-        for e in self.things(OVERRODE, limit=limit):
-            topic, _, who = e.get("name", "").partition(" :: ")
-            body = e.get("body") or {}
-            rows.append(
-                {
-                    "topic": topic,
-                    "who": who,
-                    "why": body.get("why", ""),
-                    "when": body.get("when", ""),
-                }
-            )
-        return sorted(rows, key=lambda r: r["when"], reverse=True)
-
-    def stand_downs(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Who has yielded to whom, most recent first."""
-        rows = []
-        for e in self.things(STOOD_DOWN, limit=limit):
-            topic, _, rest = e.get("name", "").partition(" :: ")
-            who, _, claimed_by = rest.partition(" :: ")
-            rows.append(
-                {
-                    "topic": topic,
-                    "who": who,
-                    "claimed_by": claimed_by,
-                    "when": (e.get("body") or {}).get("when", ""),
-                }
-            )
-        return sorted(rows, key=lambda r: r["when"], reverse=True)
+    # Claims live in claims.db (claims.py): path globs held by one agent identity, taken in one transaction.
 
     # ---- REFERENCE: facts that do not change ---------------------------
 
@@ -679,66 +413,20 @@ class Memory:
         ]
 
     def tiers(self) -> list[tuple[str, str, str]]:
-        """What is in each of Sibyl's five tiers right now.
+        """What is in each tier right now, so a person can see the store working rather than take it on trust."""
+        from .claims import Claims, claims_db
 
-        Each holds a different shape of thing and behaves differently:
-        the journal only ever grows, warm records are replaced in place,
-        hot state holds exactly one thing and is overwritten, reference is
-        written once when a repo is read, and archive is where forgetting
-        puts things. Shown so a person can see the store working rather
-        than take it on trust.
-        """
-        live = self.claims()
+        live = 0
+        if claims_db(self.repo).exists():
+            with Claims(self.repo) as c:
+                live = len(c.live())
         return [
-            (
-                "journal",
-                f"{len(self.journal(limit=1000000))} things learned",
-                "appended, never rewritten",
-            ),
-            (
-                "warm",
-                f"{len(self.things(limit=1000000))} things named",
-                "replaced in place",
-            ),
-            (
-                "hot",
-                (
-                    f"{len(live)} claimed" if live else "nothing in progress"
-                ),
-                # Each claim carries the hold its agent earned, so there is no
-                # single number to print here any more. Show the live ones.
-                (
-                    "one each, expiring in "
-                    + ", ".join(
-                        f"{c.get('holds', INTENT_HOLDS)} min" for c in live[:3]
-                    )
-                    if live
-                    else f"one each, {INTENT_HOLDS} min for an agent knos has "
-                    "not seen finish anything"
-                ),
-            ),
+            ("journal", f"{len(self.journal(limit=1000000))} things learned", "appended, never rewritten"),
+            ("warm", f"{len(self.things(limit=1000000))} things named", "replaced in place"),
+            ("claims", f"{live} claimed" if live else "nothing claimed", "file claims, each lapsing on its own"),
             ("reference", f"{self.repo.name}", "written once, when read"),
             ("archive", f"{self.forgotten_count()} forgotten", "on knos forget"),
         ]
-
-    def claimed_now(self) -> list[str]:
-        """What each agent says it is in the middle of, one per line."""
-        return [
-            f"{c.get('who')} on {c.get('topic')}"
-            for c in sorted(self.claims(), key=lambda c: str(c.get("when", "")))
-        ]
-
-    def coordination(self) -> list[str]:
-        """Who yielded to whom, and who took contested work anyway."""
-        lines = [
-            f"{r['who']} stood down for {r['claimed_by']} on {r['topic']}"
-            for r in self.stand_downs(limit=5)
-        ]
-        lines += [
-            f"{r['who']} took {r['topic']} anyway: {r['why']}"
-            for r in self.overrides(limit=5)
-        ]
-        return lines
 
     def forgotten_count(self) -> int:
         """How many notes have been dropped."""
@@ -754,6 +442,28 @@ class Memory:
             "entities": len(self.things(limit=1000000)),
             "journal": len(self.journal(limit=100000)),
         }
+
+    def compact(self, older_than_days: int = 30) -> dict[str, int]:
+        """Make room without losing anything an answer uses.
+
+        Drops notes superseded (`knos forget`) more than `older_than_days` ago: they sit in the archive tier, which no
+        search reads. Counts journal entries recorded twice but does not delete them: Sibyl's journal is append-only
+        and its search index has no delete path, so removing rows would leave the index pointing at nothing. Then
+        vacuums, which is what returns freed pages to the disk and to the cap."""
+        from datetime import datetime, timedelta, timezone
+
+        before = self.footprint()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).strftime("%Y-%m-%dT%H:%M:%S")
+        with self.storage.transaction() as conn:
+            dropped = conn.execute("DELETE FROM archived_entities WHERE archived_at < ?", (cutoff,)).rowcount
+        with self.storage.connection() as conn:
+            twice = conn.execute(
+                "SELECT COALESCE(SUM(n - 1), 0) FROM (SELECT COUNT(*) AS n FROM journal_events "
+                "GROUP BY evaluated, acted, extra HAVING n > 1)").fetchone()[0]
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("VACUUM")
+        return {"dropped": int(dropped or 0), "duplicates": int(twice or 0), "before": before,
+                "after": self.footprint()}
 
 
 def _flatten(hit: dict[str, Any]) -> dict[str, Any]:

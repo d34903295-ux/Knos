@@ -4,17 +4,22 @@ Worktrees are how people stop two agents overwriting each other's files, and
 they are right to. But git gave each tree its own knos store, so a decision
 made in one was invisible in the next and a claim in one held nothing in the
 other — which is the half worktrees were never meant to solve.
+
+Rewritten for 0.2.0: claims live in claims.db beside the shared memory store, and a claim is enforced by the edit
+guard rather than by withholding answers, so the cross-worktree claim test now checks the guard and the annotation.
+Nothing was dropped.
 """
 
 from __future__ import annotations
 
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from knos import answer, mcp, paths
+from knos import answer, guard, mcp, paths
+from knos.claims import Claims, claims_db
+from knos.identity import Agent
 from knos.memory import Memory
 
 
@@ -50,19 +55,28 @@ def test_worktrees_of_one_repo_share_one_memory(knos_home, repo, worktree):
 
 
 def test_a_claim_in_one_worktree_holds_in_another(knos_home, repo, worktree):
-    with Memory(repo) as mem:
-        answer.point(repo, mem, index_code=False)
-        mem.working_on("the parser", "Claude Code", datetime.now(timezone.utc).isoformat())
+    """Worktrees keep files apart on disk; they do not stop two agents changing the same file on two branches. A
+    claim taken in the main tree refuses the other tree's agent, and is shown to it, until it is released."""
+    claude = Agent(host="claude", session="sess-main", anchor=4101)
+    cursor = Agent(host="cursor", session="sess-feature", anchor=4202)
 
-    with Memory(worktree) as mem:
-        said = mcp._held(mem, "how does parsing work", "Cursor", "")
-    assert said.startswith("Withheld."), said
-    assert "Claude Code" in said
+    assert claims_db(worktree) == claims_db(repo)
+    with Claims(repo) as c:
+        assert c.take(claude, "fixing login", ["src/auth.py"])[0]
 
-    with Memory(repo) as mem:
-        mem.done_working()
-    with Memory(worktree) as mem:
-        assert mcp._held(mem, "how does parsing work", "Cursor", "") == ""
+    in_other_tree = worktree / "src" / "auth.py"
+    verdict = guard.check(worktree, str(in_other_tree), cursor)
+    assert not verdict.allow
+    assert "claimed by claude/sess-mai" in verdict.reason, verdict.reason
+    assert "claude/sess-mai" in mcp._claim_notes(worktree, "how does src/auth.py work", cursor)
+    with Claims(worktree) as c:
+        took, conflict, _ = c.take(cursor, "my login work", ["src/auth.py"])
+    assert took is False and conflict is not None and conflict.host == "claude"
+
+    with Claims(repo) as c:
+        c.release(claude)
+    assert guard.check(worktree, str(in_other_tree), cursor).allow
+    assert mcp._claim_notes(worktree, "how does src/auth.py work", cursor) == ""
 
 
 def test_each_worktree_keeps_its_own_code_structure(knos_home, repo, worktree):
