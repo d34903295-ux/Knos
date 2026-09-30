@@ -84,7 +84,7 @@ def valid(body: dict | None) -> bool:
     if not body:
         return False
     ends = _parse(str(body.get("expires", "")))
-    if ends is None or ends < _now():
+    if ends is None or ends <= _now():  # "ends now" is over (Windows' clock can return the same instant twice)
         return False
     if str(body.get("via", "")).startswith(("solana:", "tempo:")):
         # re-checked against the chain at most daily (reverify); offline, it counts for 7 days after the last check

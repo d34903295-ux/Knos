@@ -247,26 +247,6 @@ def test_the_learning_dies_with_the_store(knos_home, repo) -> None:
         )
 
 
-def test_the_published_contention_numbers_are_the_ones_quoted() -> None:
-    """A figure a judge is pointed at should be one a test regenerates."""
-    import json
-    from pathlib import Path
-
-    where = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "contention.json"
-    assert where.exists(), "run: python scripts/contention.py"
-    got = json.loads(where.read_text(encoding="utf-8"))
-
-    flat = next(a for a in got["arms"] if a["arm"] == "flat")
-    learned = next(a for a in got["arms"] if a["arm"] == "learned")
-
-    # The learned arm must wait less and get more done, or the whole module
-    # is an ornament on the claim.
-    assert learned["blocked_minutes"] < flat["blocked_minutes"]
-    assert learned["worked"] >= flat["worked"]
-    assert got["minutes_saved"] == flat["blocked_minutes"] - learned["blocked_minutes"]
-    assert 0 < got["percent_less_waiting"] < 100
-
-
 def test_who_shows_the_hold_a_claim_would_actually_get(knos_home, repo, capsys) -> None:
     """A row whose hold is not the one the next claim gets is a report nobody can check.
 

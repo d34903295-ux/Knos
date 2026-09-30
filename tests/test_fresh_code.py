@@ -206,3 +206,27 @@ def test_the_reader_knos_carries_finds_a_module_level_constant(tmp_path) -> None
     assert found.get("read") == "function"
     assert "local_thing" not in found, "lowercase is a variable, not a setting"
     assert "INDENTED" not in found, "indented is not module level"
+
+
+def test_a_ctags_that_is_not_universal_ctags_is_not_used(tmp_path, monkeypatch) -> None:
+    """macOS ships BSD ctags at /usr/bin/ctags; it does not speak Universal Ctags' flags. knos reads the code itself."""
+    import os
+    import stat
+    import sys
+
+    from knos import code
+
+    fake = tmp_path / ("ctags.bat" if os.name == "nt" else "ctags")
+    if os.name == "nt":
+        fake.write_text("@echo Exuberant Ctags 5.8\n", encoding="utf-8")
+    else:
+        fake.write_text("#!/bin/sh\necho 'BSD ctags'\n", encoding="utf-8")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    assert not code._is_universal(str(fake))
+    monkeypatch.setattr(code.shutil, "which", lambda name, *a, **k: str(fake) if name == "ctags" else None)
+    monkeypatch.setattr(code, "Path", code.Path)
+    code._find_binary.cache_clear()
+    got = code._find_binary()
+    assert got is None or code._is_universal(got), f"{got} is not Universal Ctags and must not be used"
+    code._find_binary.cache_clear()
+    assert sys.platform  # the built-in reader then does the work (tests above cover it)

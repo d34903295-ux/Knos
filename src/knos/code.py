@@ -92,18 +92,22 @@ class Symbol:
 def _find_binary() -> str | None:
     """Looked up once per process: a PATH scan stats every PATH folder, and under WSL the Windows folders on PATH
     make each scan cost ~100 ms, which was most of a search's time."""
-    found = shutil.which(BINARY)
-    if found:
-        return found
-    guesses = [
-        Path.home() / ".ctags" / ("ctags.exe" if os.name == "nt" else "ctags"),
-        Path("/usr/local/bin") / BINARY,
-        Path("/usr/bin") / BINARY,
-    ]
-    for g in guesses:
-        if g.exists():
-            return str(g)
+    candidates = [shutil.which(BINARY), Path.home() / ".ctags" / ("ctags.exe" if os.name == "nt" else "ctags"),
+                  Path("/usr/local/bin") / BINARY, Path("/usr/bin") / BINARY]
+    for c in candidates:
+        if c and Path(c).exists() and _is_universal(str(c)):
+            return str(c)
     return None
+
+
+def _is_universal(path: str) -> bool:
+    """Only Universal Ctags speaks the flags and output format knos reads. macOS ships BSD ctags at /usr/bin/ctags and
+    some Windows toolchains ship Exuberant Ctags; with either, knos reads the code itself instead."""
+    try:
+        got = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "universal ctags" in (got.stdout + got.stderr).lower()
 
 
 def binary() -> str:
