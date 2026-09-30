@@ -1,7 +1,7 @@
 {
   "name": "knos",
-  "description": "Shared Sibyl memory, file claims and an edit guard across every coding agent on this machine. Requires knos>=0.2.0 (pipx install knos).",
-  "version": "0.2.0",
+  "description": "Shared Sibyl memory, file claims and an edit guard across every coding agent on this machine. Requires knos>=0.2.1 (pipx install knos).",
+  "version": "0.2.1",
   "author": { "name": "drexthealpha" },
   "mcpServers": {
     "knos": {

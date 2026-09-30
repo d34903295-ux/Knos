@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.2.0 (October 2026)
+## 0.2.1 (30 Sep 2026)
+
+- macOS: a `ctags` that is not Universal Ctags (macOS ships BSD ctags) is no longer used; knos reads the code
+  itself, so code-structure answers work on a stock Mac.
+- Windows: a licence that expires "now" counts as expired (the clock can return the same instant twice).
+
+## 0.2.0 (30 Sep 2026)
 
 One product: shared memory, file claims and an edit guard for every coding agent on the machine, with Knos Pro for
 spend and payments. Built 29 Sep - Oct 2026 on top of 0.1.8.
