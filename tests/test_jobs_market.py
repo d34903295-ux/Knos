@@ -106,6 +106,42 @@ def test_paid_on_proof_through_the_market(net):
     assert got.state == "released" and got.proof == root
     assert env.balance(worker_tok) == 1_900_000 and env.balance(env.fee_token) == 100_000
     assert env.balance(buyer_tok) == 8 * USDC and env.balance(env.vault) == 0
+    assert market.is_closed(ledger, jid)                                                 # settled: closed
+
+
+def test_verify_reject_and_the_deadline_crank_through_the_market(net):
+    """0.3.5: the verifier fails work (buyer refunded; the buyer itself cannot reject a verified job), and anyone
+    settles at the deadline: delivered work pays the worker, undelivered work refunds the buyer. Each closes the job;
+    market.job() then reports the outcome this process recorded from the transaction."""
+    import hashlib
+    env, ledger, relay = net
+    buyer, buyer_tok = env.party(10 * USDC)
+    worker, worker_tok = env.party()
+    verifier, _ = env.party()
+    cranker, _ = env.party()
+    a = market.post(ledger, relay, buyer, market.Brief("Fail", "x"), 2 * USDC, verifier=verifier.pubkey())
+    assert not market.claim(ledger, buyer, a)                                            # a buyer cannot claim
+    assert market.claim(ledger, worker, a)
+    market.deliver(ledger, relay, worker, a, buyer.pubkey(), b"wrong")
+    with pytest.raises(LookupError):
+        market.reject(ledger, buyer, a)                                                  # only the verifier
+    with pytest.raises(LookupError):
+        market.verify_reject(ledger, buyer, a, bytes(32))
+    sig = market.verify_reject(ledger, verifier, a, hashlib.sha256(b"failed").digest())
+    assert sig and market.is_closed(ledger, a) and market.job(ledger, a).state == "refunded"
+    assert env.balance(buyer_tok) == 10 * USDC
+    b = market.post(ledger, relay, buyer, market.Brief("Late", "x"), 2 * USDC, review_s=60, verifier=verifier.pubkey())
+    c = market.post(ledger, relay, buyer, market.Brief("Never", "x"), 2 * USDC, work_s=30)
+    assert market.claim(ledger, worker, b) and market.claim(ledger, worker, c)
+    market.deliver(ledger, relay, worker, b, buyer.pubkey(), b"ok")
+    with pytest.raises(LookupError):
+        market.settle(ledger, cranker, b)                                                # still in review
+    env.warp(61)
+    assert market.settle(ledger, cranker, b) and market.job(ledger, b).state == "released"
+    assert market.settle(ledger, cranker, c) and market.job(ledger, c).state == "refunded"
+    assert env.balance(worker_tok) == 1_900_000 and env.balance(env.vault) == 0
+    assert env.balance(buyer_tok) == 8 * USDC + 200_000                                  # c's price + the lost stake
+    assert market.is_closed(ledger, b) and market.is_closed(ledger, c)
 
 
 def test_buyer_preferences_are_checked_before_delivery():

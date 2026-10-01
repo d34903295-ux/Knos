@@ -68,6 +68,16 @@ def token_account_for(ledger, owner: Pubkey, mint: Pubkey) -> Pubkey:
     return sb.ata(owner, mint)
 
 
+def stake_account_for(ledger, owner: Pubkey, mint: Pubkey) -> Pubkey:
+    """Where a worker's claim stake comes from and goes back to: its ATA on a cluster; in the in-process runtime a
+    separate faucet-funded account (localsvm.Escrow.stake_account)."""
+    env = getattr(ledger, "env", None)
+    if env is not None:
+        return env.stake_account(owner)
+    from ..pro import sol_budget as sb
+    return sb.ata(owner, mint)
+
+
 def _ensure_ata(ledger, payer: Keypair, owner: Pubkey, mint: Pubkey) -> list:
     if getattr(ledger, "env", None) is not None:
         return []
@@ -99,10 +109,31 @@ def post(ledger, relay, buyer: Keypair, brief: Brief, price_units: int, work_s: 
     return job_id
 
 
+# Every settlement closes the job account (its rent goes back to the buyer), so the chain no longer holds a settled
+# job. The outcome is recorded here from the settling transaction this process sent: job address -> the job as it
+# settled (state "released" or "refunded", `closed=True` is implied by the account being gone).
+_SETTLED: dict[Pubkey, sol.Job] = {}
+
+
+def _record(ledger, j: sol.Job, state: str, **changes) -> None:
+    from dataclasses import replace
+    _SETTLED[j.address] = replace(j, state=state, stake=0, **changes)
+
+
 def job(ledger, job_id: bytes) -> sol.Job | None:
+    """The job as the chain holds it; a job this process settled (the account is closed) as it settled; otherwise
+    None (never posted, or settled elsewhere: closed)."""
+    addr = sol.job_pda(ledger.program, job_id)
+    raw = ledger.account(addr)
+    if raw and len(raw) in sol.JOB_LENS:
+        return sol.parse_job(addr, raw)
+    return _SETTLED.get(addr)
+
+
+def is_closed(ledger, job_id: bytes) -> bool:
+    """True when the job's account is gone: it settled (or never existed)."""
     raw = ledger.account(sol.job_pda(ledger.program, job_id))
-    ok = raw and len(raw) in (sol.JOB_LEN, sol.LEGACY_JOB_LEN)
-    return sol.parse_job(sol.job_pda(ledger.program, job_id), raw) if ok else None
+    return not (raw and len(raw) in sol.JOB_LENS)
 
 
 def open_jobs(ledger, relay) -> list[tuple[sol.Job, Brief]]:
@@ -134,9 +165,13 @@ def job_id_for(ledger, job_account: Pubkey, brief: Brief | None = None, relay=No
 
 
 def claim(ledger, worker: Keypair, job_id: bytes) -> bool:
-    """Exactly one worker: the escrow's state change from open to claimed is the mutex."""
+    """Exactly one worker: the escrow's state change from open to claimed is the mutex. The worker stakes
+    sol.stake_for(price) (10%, at least 0.1 USDC) from its token account; it comes back on delivery, and goes to the
+    buyer if the claim times out undelivered. A buyer cannot claim its own job."""
     try:
-        ledger.send([sol.claim(ledger.program, worker.pubkey(), job_id)], worker)
+        mint = ledger.config()["mint"]
+        ledger.send([sol.claim(ledger.program, worker.pubkey(), job_id,
+                               stake_account_for(ledger, worker.pubkey(), mint), vault_for(ledger, mint))], worker)
         return True
     except Exception:  # noqa: BLE001 - someone else got it, or it closed
         return False
@@ -159,7 +194,9 @@ def deliver(ledger, relay, worker: Keypair, job_id: bytes, buyer: Pubkey, conten
             seal_to: str | None = None) -> str:
     sealed = seal_for(buyer, content, seal_to)
     h = relay.put_delivery(sealed)
-    ledger.send([sol.deliver(ledger.program, worker.pubkey(), job_id, bytes.fromhex(h))], worker)
+    mint = ledger.config()["mint"]
+    ledger.send([sol.deliver(ledger.program, worker.pubkey(), job_id, bytes.fromhex(h),
+                             stake_account_for(ledger, worker.pubkey(), mint), vault_for(ledger, mint))], worker)
     return h
 
 
@@ -183,40 +220,86 @@ def _need(ledger, job_id: bytes, *states: str) -> sol.Job:
     return j
 
 
-def accept(ledger, buyer: Keypair, job_id: bytes) -> None:
+def accept(ledger, buyer: Keypair, job_id: bytes) -> str:
+    """The buyer pays delivered work. The job closes (its rent back to the buyer). Returns the signature."""
     j = _need(ledger, job_id, "delivered")
     cfg = ledger.config()
     pre = _ensure_ata(ledger, buyer, j.worker, cfg["mint"])
-    ledger.send(pre + [sol.accept(ledger.program, buyer.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
-                                  token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"])], buyer)
+    sig = ledger.send(pre + [sol.accept(ledger.program, buyer.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
+                                        token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"])], buyer)
+    _record(ledger, j, "released")
     _sibyl_pro(ledger, j)
+    return sig
 
 
-def release(ledger, anyone: Keypair, job_id: bytes) -> None:
+def release(ledger, anyone: Keypair, job_id: bytes) -> str:
     j = _need(ledger, job_id, "delivered")
     cfg = ledger.config()
     pre = _ensure_ata(ledger, anyone, j.worker, cfg["mint"])
-    ledger.send(pre + [sol.release(ledger.program, anyone.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
-                                   token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"])], anyone)
+    sig = ledger.send(pre + [sol.release(ledger.program, anyone.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
+                                         token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"],
+                                         j.buyer)], anyone)
+    _record(ledger, j, "released")
     _sibyl_pro(ledger, j)
+    return sig
 
 
 def verify_release(ledger, verifier: Keypair, job_id: bytes, proof_root: bytes,
-                   result_hash: bytes | None = None) -> None:
-    """Paid on proof: the job's verifier releases the delivered work and records `proof_root` on chain. Pass the
-    `result_hash` the proof actually covers; the escrow refuses it unless it is exactly the hash the worker committed
-    ("verifier releases unproven work"). Without one, the job's committed hash is used (the verifier checked the
-    delivery fetched under that hash)."""
+                   result_hash: bytes | None = None) -> str:
+    """Paid on proof: the job's verifier releases the delivered work and records `proof_root` (in the transaction;
+    the job account closes). Pass the `result_hash` the proof actually covers; the escrow refuses it unless it is
+    exactly the hash the worker committed ("verifier releases unproven work"). Without one, the job's committed hash
+    is used (the verifier checked the delivery fetched under that hash). Returns the signature."""
     j = _need(ledger, job_id, "delivered")
     if j.verifier is None or j.verifier != verifier.pubkey():
         raise LookupError("This job does not name you as its verifier.")
     cfg = ledger.config()
     pre = _ensure_ata(ledger, verifier, j.worker, cfg["mint"])
-    ledger.send(pre + [sol.verify_release(ledger.program, verifier.pubkey(), job_id, result_hash or j.result,
-                                          proof_root, vault_for(ledger, cfg["mint"]),
-                                          token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"])],
-                verifier)
+    sig = ledger.send(pre + [sol.verify_release(ledger.program, verifier.pubkey(), job_id, result_hash or j.result,
+                                                proof_root, vault_for(ledger, cfg["mint"]),
+                                                token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"],
+                                                j.buyer)], verifier)
+    _record(ledger, j, "released", proof=proof_root)
     _sibyl_pro(ledger, j)
+    return sig
+
+
+def verify_reject(ledger, verifier: Keypair, job_id: bytes, proof_root: bytes) -> str:
+    """The job's verifier fails the delivered work (inside the review window): the buyer is refunded and the job
+    closes. `proof_root` (32 bytes) is the verifier's evidence, carried in the transaction. Returns the signature."""
+    j = _need(ledger, job_id, "delivered")
+    if j.verifier is None or j.verifier != verifier.pubkey():
+        raise LookupError("This job does not name you as its verifier.")
+    cfg = ledger.config()
+    sig = ledger.send([sol.verify_reject(ledger.program, verifier.pubkey(), job_id, proof_root,
+                                         vault_for(ledger, cfg["mint"]),
+                                         token_account_for(ledger, j.buyer, cfg["mint"]), j.buyer)], verifier)
+    _record(ledger, j, "refunded", proof=proof_root)
+    return sig
+
+
+def settle(ledger, payer: Keypair, job_id: bytes) -> str:
+    """The deadline crank, by anyone (`payer` signs and pays the fee): delivered work past its review deadline with
+    no verdict pays the worker; open or claimed work past its work deadline refunds the buyer (a timed-out claim's
+    stake too). The job closes; its rent goes to the buyer. Returns the signature."""
+    j = _need(ledger, job_id, "open", "claimed", "delivered")
+    if ledger.now() <= j.deadline:
+        raise LookupError("The job is not past its deadline yet.")
+    cfg = ledger.config()
+    mint = cfg["mint"]
+    buyer_tok = token_account_for(ledger, j.buyer, mint)
+    pre = []
+    if j.state == "delivered":
+        pre = _ensure_ata(ledger, payer, j.worker, mint)
+        worker_tok = token_account_for(ledger, j.worker, mint)
+    else:
+        worker_tok = buyer_tok       # unused on a refund
+    sig = ledger.send(pre + [sol.crank(ledger.program, payer.pubkey(), job_id, vault_for(ledger, mint), worker_tok,
+                                       cfg["fee_token"], buyer_tok, j.buyer)], payer)
+    _record(ledger, j, "released" if j.state == "delivered" else "refunded")
+    if j.state == "delivered":
+        _sibyl_pro(ledger, j)
+    return sig
 
 
 def _sibyl_pro(ledger, j: sol.Job) -> None:
@@ -229,15 +312,23 @@ def _sibyl_pro(ledger, j: sol.Job) -> None:
         pass
 
 
-def reject(ledger, buyer: Keypair, job_id: bytes) -> None:
-    _need(ledger, job_id, "delivered")
+def reject(ledger, buyer: Keypair, job_id: bytes) -> str:
+    """The buyer rejects delivered work inside the review window: refunded, the job closes. Refused by the escrow
+    for a job that names a verifier (only the verifier or the deadline settles that one)."""
+    j = _need(ledger, job_id, "delivered")
+    if j.verifier is not None:
+        raise LookupError("This job names a verifier: only the verifier or the review deadline can settle it.")
     cfg = ledger.config()
-    ledger.send([sol.reject(ledger.program, buyer.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
-                            token_account_for(ledger, buyer.pubkey(), cfg["mint"]))], buyer)
+    sig = ledger.send([sol.reject(ledger.program, buyer.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
+                                  token_account_for(ledger, buyer.pubkey(), cfg["mint"]))], buyer)
+    _record(ledger, j, "refunded")
+    return sig
 
 
-def refund(ledger, buyer: Keypair, job_id: bytes) -> None:
-    _need(ledger, job_id, "open", "claimed")
+def refund(ledger, buyer: Keypair, job_id: bytes) -> str:
+    j = _need(ledger, job_id, "open", "claimed")
     cfg = ledger.config()
-    ledger.send([sol.refund(ledger.program, buyer.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
-                            token_account_for(ledger, buyer.pubkey(), cfg["mint"]))], buyer)
+    sig = ledger.send([sol.refund(ledger.program, buyer.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
+                                  token_account_for(ledger, buyer.pubkey(), cfg["mint"]))], buyer)
+    _record(ledger, j, "refunded")
+    return sig

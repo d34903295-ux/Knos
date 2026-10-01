@@ -36,15 +36,18 @@ class Ledger:
         return rpc.account_data(self.url, address, commitment=self.commitment)[1]
 
     def jobs(self, state: str | None = None) -> list[sol.Job]:
-        """Every job account of the program (optionally only one state), straight from the chain."""
+        """Every live job account of the program (optionally only one state), straight from the chain: 0.3.5 jobs and
+        the 0.3.4 ones still open. Settled jobs are closed (their accounts are gone), so they are not listed."""
         from ..team import rpc
-        filters: list[dict] = [{"dataSize": sol.JOB_LEN}]
-        if state:
-            code = {v: k for k, v in sol.STATES.items()}[state]
-            filters.append({"memcmp": {"offset": 0, "bytes": _b58(bytes([code]))}})
-        got = rpc.call(self.url, "getProgramAccounts",
-                       [str(self.program), {"encoding": "base64", "commitment": self.commitment, "filters": filters}],
-                       timeout=30) or []
+        got: list = []
+        for size in (sol.JOB_LEN, sol.V034_JOB_LEN):
+            filters: list[dict] = [{"dataSize": size}]
+            if state:
+                code = {v: k for k, v in sol.STATES.items()}[state]
+                filters.append({"memcmp": {"offset": 0, "bytes": _b58(bytes([code]))}})
+            got += rpc.call(self.url, "getProgramAccounts",
+                            [str(self.program), {"encoding": "base64", "commitment": self.commitment,
+                                                 "filters": filters}], timeout=30) or []
         out = []
         for item in got:
             try:

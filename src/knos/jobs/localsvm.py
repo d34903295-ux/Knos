@@ -101,9 +101,31 @@ class Escrow:
     # -- jobs ----------------------------------------------------------------------------------------------------------
     def job(self, job_id: bytes) -> sol.Job | None:
         acc = self.svm.get_account(sol.job_pda(self.pid, job_id))
-        if acc is None or len(bytes(acc.data)) not in (sol.JOB_LEN, sol.LEGACY_JOB_LEN):
-            return None
+        if acc is None or len(bytes(acc.data)) not in sol.JOB_LENS:
+            return None                       # never posted, or settled: a settlement closes the job account
         return sol.parse_job(sol.job_pda(self.pid, job_id), bytes(acc.data))
+
+    STAKE_FLOAT = 10 ** 12   # what the in-process faucet gives each worker's stake account (test runtime only)
+
+    def stake_account(self, owner: Pubkey) -> Pubkey:
+        """The token account a worker stakes from and gets its stake back to. In this runtime it is a separate,
+        faucet-funded account per worker, so a party's own account shows only what jobs paid it; on a cluster it is
+        the worker's ATA (market.stake_account_for)."""
+        got = self.stake_accounts.get(bytes(owner)) if hasattr(self, "stake_accounts") else None
+        if got is None:
+            if not hasattr(self, "stake_accounts"):
+                self.stake_accounts = {}
+            got = self.token_account(owner)
+            self.mint_to(got, self.STAKE_FLOAT)
+            self.stake_accounts[bytes(owner)] = got
+        return got
+
+    def lamports(self, address: Pubkey) -> int:
+        acc = self.svm.get_account(address)
+        return acc.lamports if acc else 0
+
+    def _tok(self, owner: Pubkey) -> Pubkey:
+        return self.accounts[bytes(owner)]
 
     def post(self, buyer: Keypair, buyer_token: Pubkey, job_id: bytes, amount: int, work: int = 600,
              review: int = 40, brief: bytes = b"", vault: Pubkey | None = None, verifier: Pubkey | None = None) -> bool:
@@ -111,28 +133,56 @@ class Escrow:
                                    hashlib.sha256(b"brief" + brief + job_id).digest(), buyer_token,
                                    vault or self.vault, verifier)], buyer, [buyer])
 
-    def claim(self, worker: Keypair, job_id: bytes) -> bool:
-        return self.send([sol.claim(self.pid, worker.pubkey(), job_id)], worker, [worker])
+    def claim(self, worker: Keypair, job_id: bytes, worker_token: Pubkey | None = None) -> bool:
+        """Claim, staking from `worker_token` (default: the worker's faucet-funded stake account)."""
+        wt = worker_token or self.stake_account(worker.pubkey())
+        return self.send([sol.claim(self.pid, worker.pubkey(), job_id, wt, self.vault)], worker, [worker])
 
     @staticmethod
     def result_hash(job_id: bytes, result: bytes = b"result") -> bytes:
         return hashlib.sha256(result + job_id).digest()
 
-    def deliver(self, worker: Keypair, job_id: bytes, result: bytes = b"result") -> bool:
-        return self.send([sol.deliver(self.pid, worker.pubkey(), job_id, self.result_hash(job_id, result))],
-                         worker, [worker])
+    def deliver(self, worker: Keypair, job_id: bytes, result: bytes = b"result",
+                worker_token: Pubkey | None = None) -> bool:
+        wt = worker_token or self.stake_account(worker.pubkey())
+        return self.send([sol.deliver(self.pid, worker.pubkey(), job_id, self.result_hash(job_id, result), wt,
+                                      self.vault)], worker, [worker])
+
+    def _buyer_of(self, job_id: bytes, buyer: Pubkey | None) -> Pubkey:
+        if buyer is not None:
+            return buyer
+        j = self.job(job_id)
+        return j.buyer if j else Pubkey.default()
 
     def accept(self, who: Keypair, job_id: bytes, worker_token: Pubkey, fee_token: Pubkey | None = None,
-               release: bool = False) -> bool:
+               release: bool = False, buyer: Pubkey | None = None) -> bool:
+        b = self._buyer_of(job_id, buyer) if release else (buyer or who.pubkey())
         return self.send([sol.settle(self.pid, who.pubkey(), job_id, self.vault, worker_token,
-                                     fee_token or self.fee_token, release)], who, [who])
+                                     fee_token or self.fee_token, release, b)], who, [who])
+
+    def verify_reject(self, verifier: Keypair, job_id: bytes, buyer_token: Pubkey, proof_root: bytes = bytes(32),
+                      buyer: Pubkey | None = None) -> bool:
+        return self.send([sol.verify_reject(self.pid, verifier.pubkey(), job_id, proof_root, self.vault, buyer_token,
+                                            self._buyer_of(job_id, buyer))], verifier, [verifier])
+
+    def settle(self, who: Keypair, job_id: bytes, worker_token: Pubkey | None = None,
+               buyer_token: Pubkey | None = None, fee_token: Pubkey | None = None,
+               buyer: Pubkey | None = None) -> bool:
+        """The deadline crank (anyone). Token accounts default to the job's own parties'."""
+        j = self.job(job_id)
+        b = self._buyer_of(job_id, buyer)
+        bt = buyer_token or self.accounts.get(bytes(b)) or self.fee_token
+        wt = worker_token or (self.accounts.get(bytes(j.worker)) if j and j.worker else None) or bt
+        return self.send([sol.crank(self.pid, who.pubkey(), job_id, self.vault, wt, fee_token or self.fee_token, bt,
+                                    b)], who, [who])
 
     def verify_release(self, verifier: Keypair, job_id: bytes, worker_token: Pubkey, result_hash: bytes | None = None,
                        proof_root: bytes = b"" * 32, fee_token: Pubkey | None = None) -> bool:
         """Paid on proof. `result_hash` defaults to the hash `deliver()` commits for the default result."""
         return self.send([sol.verify_release(self.pid, verifier.pubkey(), job_id,
                                              result_hash or self.result_hash(job_id), proof_root, self.vault,
-                                             worker_token, fee_token or self.fee_token)], verifier, [verifier])
+                                             worker_token, fee_token or self.fee_token,
+                                             self._buyer_of(job_id, None))], verifier, [verifier])
 
     def set_pause(self, paused: bool, admin: Keypair | None = None) -> bool:
         a = admin or self.admin

@@ -6,16 +6,23 @@ Layouts are the program's own (programs/knos_escrow/src/lib.rs):
                             max_amount(u64, 0 = no cap) paused(u8) bump(u8)
     vault authority PDA ["vault"]: owns the one vault token account per mint
     job PDA ["job", id(32)]: state(u8) buyer(32) worker(32) amount(u64) deadline(i64) review(i64) brief(32) result(32)
-                             verifier(32, zero = none) proof(32)     (jobs posted before 0.3.4: 153 bytes, no last two)
+                             verifier(32, zero = none) proof(32) stake(u64)
+                             (0.3.4 jobs: 217 bytes, no stake; jobs before 0.3.4: 153 bytes, no verifier/proof)
 
     1  Post          buyer(s,w) job(w) buyer_token(w) vault_token(w) config token system
                      data: id[32] amount u64 work i64 review i64 brief[32] verifier[32]
-    2  Claim         worker(s) job(w)
-    3  Deliver       worker(s) job(w)                                          data: result[32]
-    4  Accept        buyer(s) job(w) vault_token(w) vault_auth worker_token(w) fee_token(w) config token
+    2  Claim         worker(s) job(w) worker_token(w) vault_token(w) config token   (stakes stake_for(price); not the buyer)
+    3  Deliver       worker(s) job(w) worker_token(w) vault_token(w) vault_auth token   data: result[32] (stake back)
+    4  Accept        buyer(s) job(w) vault_token(w) vault_auth worker_token(w) fee_token(w) config token buyer(w)
     5  Release       anyone(s), same accounts as Accept, after the review window
-    6  Reject        buyer(s) job(w) vault_token(w) vault_auth buyer_token(w) token   (inside the review window)
-    7  Refund        same accounts as Reject                                    (open or claimed, past the work deadline)
+    6  Reject        buyer(s,w) job(w) vault_token(w) vault_auth buyer_token(w) token  (inside the review window; not
+                     on a job that names a verifier)
+    7  Refund        same accounts as Reject       (open or claimed, past the work deadline; a claim's stake included)
+    12 VerifyReject  verifier(s) job(w) vault_token(w) vault_auth buyer_token(w) token buyer(w)  data: proof_root[32]
+    13 Settle        anyone(s) job(w) vault_token(w) vault_auth worker_token(w) fee_token(w) buyer_token(w) buyer(w)
+                     config token   (the deadline crank: delivered -> worker paid; open/claimed -> buyer refunded)
+
+Every settlement (4 5 6 7 11 12 13) closes the job account; its rent lamports go back to the buyer.
     8  Init2         admin(s,w) config(w) fee_token system legacy_config
                      data: fee_bps u16 min_fee u64 min_amount u64 max_amount u64 paused u8
     9  SetPause      admin(s) config(w)                                        data: paused u8 (new posts only)
@@ -40,8 +47,17 @@ SYSTEM = Pubkey.from_string("11111111111111111111111111111111")
 DEVNET_PROGRAM = os.environ.get("KNOS_ESCROW_PROGRAM", "GwmbMFvyHHwHug5em9dv26oXz2zTgXKGsNdrBxPayRPq")
 
 STATES = {0: "none", 1: "open", 2: "claimed", 3: "delivered", 4: "released", 5: "refunded"}
-JOB_LEN = 217
+JOB_LEN = 225
+V034_JOB_LEN = 217            # jobs posted by 0.3.4 (no stake): still parsed, still settle
 LEGACY_JOB_LEN = 153          # jobs posted before 0.3.4 (no verifier, no proof): still parsed, still settle
+JOB_LENS = (JOB_LEN, V034_JOB_LEN, LEGACY_JOB_LEN)
+STAKE_BPS = 1_000             # the worker's claim stake: 10% of the price ...
+MIN_STAKE_UNITS = 100_000     # ... at least 0.1 USDC
+
+
+def stake_for(amount: int) -> int:
+    """The program's claim stake: max(10% of the price, 0.1 USDC), in the job's mint."""
+    return max(amount * STAKE_BPS // 10_000, MIN_STAKE_UNITS)
 CONFIG_LEN = 124
 FEE_BPS = 500
 MIN_FEE_UNITS = 50_000        # 0.05 USDC
@@ -120,60 +136,95 @@ def post(pid: Pubkey, buyer: Pubkey, job_id: bytes, amount: int, work_s: int, re
                                    _m(SYSTEM, False, False)])
 
 
-def claim(pid: Pubkey, worker: Pubkey, job_id: bytes) -> Instruction:
-    return Instruction(pid, bytes([2]), [_m(worker, True, False), _m(job_pda(pid, job_id), False, True)])
+def claim(pid: Pubkey, worker: Pubkey, job_id: bytes, worker_token: Pubkey, vault_token: Pubkey) -> Instruction:
+    """Claim an open job, staking stake_for(price) from `worker_token` into the vault. Never the job's buyer."""
+    return Instruction(pid, bytes([2]), [_m(worker, True, False), _m(job_pda(pid, job_id), False, True),
+                                         _m(worker_token, False, True), _m(vault_token, False, True),
+                                         _m(config_pda(pid), False, False), _m(TOKEN, False, False)])
 
 
-def deliver(pid: Pubkey, worker: Pubkey, job_id: bytes, result_hash: bytes) -> Instruction:
+def deliver(pid: Pubkey, worker: Pubkey, job_id: bytes, result_hash: bytes, worker_token: Pubkey,
+            vault_token: Pubkey) -> Instruction:
+    """Commit the result hash; the claim's stake goes back to `worker_token`."""
     if len(result_hash) != 32:
         raise ValueError("result hash is 32 bytes")
-    return Instruction(pid, bytes([3]) + result_hash, [_m(worker, True, False), _m(job_pda(pid, job_id), False, True)])
+    return Instruction(pid, bytes([3]) + result_hash,
+                       [_m(worker, True, False), _m(job_pda(pid, job_id), False, True), _m(worker_token, False, True),
+                        _m(vault_token, False, True), _m(vault_authority(pid), False, False), _m(TOKEN, False, False)])
 
 
 def _payout(tag: int, data: bytes, pid: Pubkey, signer: Pubkey, job_id: bytes, vault_token: Pubkey,
-            worker_token: Pubkey, fee_token: Pubkey) -> Instruction:
+            worker_token: Pubkey, fee_token: Pubkey, buyer: Pubkey) -> Instruction:
     return Instruction(pid, bytes([tag]) + data,
-                       [_m(signer, True, False), _m(job_pda(pid, job_id), False, True), _m(vault_token, False, True),
-                        _m(vault_authority(pid), False, False), _m(worker_token, False, True),
-                        _m(fee_token, False, True), _m(config_pda(pid), False, False), _m(TOKEN, False, False)])
+                       [_m(signer, True, signer == buyer), _m(job_pda(pid, job_id), False, True),
+                        _m(vault_token, False, True), _m(vault_authority(pid), False, False),
+                        _m(worker_token, False, True), _m(fee_token, False, True), _m(config_pda(pid), False, False),
+                        _m(TOKEN, False, False), _m(buyer, signer == buyer, True)])
 
 
 def settle(pid: Pubkey, signer: Pubkey, job_id: bytes, vault_token: Pubkey, worker_token: Pubkey, fee_token: Pubkey,
-           release: bool = False) -> Instruction:
-    """Accept (the buyer) or, with release=True, release by anyone after the review window: worker paid, fee taken."""
-    return _payout(5 if release else 4, b"", pid, signer, job_id, vault_token, worker_token, fee_token)
+           release: bool = False, buyer: Pubkey | None = None) -> Instruction:
+    """Accept (the buyer) or, with release=True, release by anyone after the review window: worker paid, fee taken.
+    The job closes; its rent goes to `buyer` (default: the signer, i.e. Accept)."""
+    return _payout(5 if release else 4, b"", pid, signer, job_id, vault_token, worker_token, fee_token,
+                   buyer or signer)
 
 
 def accept(pid, buyer, job_id, vault_token, worker_token, fee_token) -> Instruction:
     return settle(pid, buyer, job_id, vault_token, worker_token, fee_token)
 
 
-def release(pid, anyone, job_id, vault_token, worker_token, fee_token) -> Instruction:
-    return settle(pid, anyone, job_id, vault_token, worker_token, fee_token, release=True)
+def release(pid, anyone, job_id, vault_token, worker_token, fee_token, buyer: Pubkey) -> Instruction:
+    return settle(pid, anyone, job_id, vault_token, worker_token, fee_token, release=True, buyer=buyer)
 
 
 def verify_release(pid: Pubkey, verifier: Pubkey, job_id: bytes, result_hash: bytes, proof_root: bytes,
-                   vault_token: Pubkey, worker_token: Pubkey, fee_token: Pubkey) -> Instruction:
+                   vault_token: Pubkey, worker_token: Pubkey, fee_token: Pubkey, buyer: Pubkey) -> Instruction:
     """Paid on proof: the job's verifier releases a delivered job whose committed result is `result_hash`, recording
-    `proof_root` in the job. The program refuses any other hash ("verifier releases unproven work")."""
+    `proof_root`. The program refuses any other hash ("verifier releases unproven work"). The job closes (rent to
+    `buyer`)."""
     if len(result_hash) != 32 or len(proof_root) != 32:
         raise ValueError("result hash and proof root are 32 bytes")
-    return _payout(11, result_hash + proof_root, pid, verifier, job_id, vault_token, worker_token, fee_token)
+    return _payout(11, result_hash + proof_root, pid, verifier, job_id, vault_token, worker_token, fee_token, buyer)
 
 
 def _refundish(tag: int, pid: Pubkey, buyer: Pubkey, job_id: bytes, vault_token: Pubkey,
                buyer_token: Pubkey) -> Instruction:
-    return Instruction(pid, bytes([tag]), [_m(buyer, True, False), _m(job_pda(pid, job_id), False, True),
+    return Instruction(pid, bytes([tag]), [_m(buyer, True, True), _m(job_pda(pid, job_id), False, True),
                                            _m(vault_token, False, True), _m(vault_authority(pid), False, False),
                                            _m(buyer_token, False, True), _m(TOKEN, False, False)])
 
 
 def reject(pid, buyer, job_id, vault_token, buyer_token) -> Instruction:
+    """The buyer rejects delivered work inside the review window (never a job that names a verifier)."""
     return _refundish(6, pid, buyer, job_id, vault_token, buyer_token)
 
 
 def refund(pid, buyer, job_id, vault_token, buyer_token) -> Instruction:
     return _refundish(7, pid, buyer, job_id, vault_token, buyer_token)
+
+
+def verify_reject(pid: Pubkey, verifier: Pubkey, job_id: bytes, proof_root: bytes, vault_token: Pubkey,
+                  buyer_token: Pubkey, buyer: Pubkey) -> Instruction:
+    """The job's verifier fails the delivered work inside the review window: the buyer is refunded, the job closes."""
+    if len(proof_root) != 32:
+        raise ValueError("proof root is 32 bytes")
+    return Instruction(pid, bytes([12]) + proof_root,
+                       [_m(verifier, True, False), _m(job_pda(pid, job_id), False, True), _m(vault_token, False, True),
+                        _m(vault_authority(pid), False, False), _m(buyer_token, False, True), _m(TOKEN, False, False),
+                        _m(buyer, False, True)])
+
+
+def crank(pid: Pubkey, anyone: Pubkey, job_id: bytes, vault_token: Pubkey, worker_token: Pubkey, fee_token: Pubkey,
+          buyer_token: Pubkey, buyer: Pubkey) -> Instruction:
+    """Settle (tag 13), the deadline crank, by anyone: delivered past the review deadline -> the worker is paid; open
+    or claimed past the work deadline -> the buyer is refunded (with a timed-out claim's stake). The job closes.
+    For an unclaimed job `worker_token` is unused: pass any token account (e.g. the buyer's)."""
+    return Instruction(pid, bytes([13]),
+                       [_m(anyone, True, anyone == buyer), _m(job_pda(pid, job_id), False, True),
+                        _m(vault_token, False, True), _m(vault_authority(pid), False, False),
+                        _m(worker_token, False, True), _m(fee_token, False, True), _m(buyer_token, False, True),
+                        _m(buyer, anyone == buyer, True), _m(config_pda(pid), False, False), _m(TOKEN, False, False)])
 
 
 @dataclass(frozen=True)
@@ -189,23 +240,26 @@ class Job:
     result: bytes | None
     verifier: Pubkey | None = None
     proof: bytes | None = None
+    stake: int = 0                 # the claim's stake held in the vault (0 once delivered or settled)
 
 
 def parse_job(address: Pubkey, raw: bytes) -> Job:
-    if len(raw) not in (JOB_LEN, LEGACY_JOB_LEN):
+    if len(raw) not in JOB_LENS:
         raise ValueError("not a knos_escrow job account")
     state, = struct.unpack_from("<B", raw, 0)
     amount, deadline, review = struct.unpack_from("<Qqq", raw, 65)
     worker = Pubkey.from_bytes(raw[33:65])
     result = bytes(raw[121:153])
-    verifier, proof = None, None
-    if len(raw) == JOB_LEN:
+    verifier, proof, stake = None, None, 0
+    if len(raw) >= V034_JOB_LEN:
         v = Pubkey.from_bytes(raw[153:185])
         verifier = None if v == NO_VERIFIER else v
         proof = None if raw[185:217] == bytes(32) else bytes(raw[185:217])
+    if len(raw) == JOB_LEN:
+        stake, = struct.unpack_from("<Q", raw, 217)
     return Job(address, STATES.get(state, "unknown"), Pubkey.from_bytes(raw[1:33]),
                None if worker == Pubkey.default() else worker, amount, deadline, review, bytes(raw[89:121]),
-               None if result == bytes(32) else result, verifier, proof)
+               None if result == bytes(32) else result, verifier, proof, stake)
 
 
 def parse_config(raw: bytes) -> dict:

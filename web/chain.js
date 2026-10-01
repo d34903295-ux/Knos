@@ -41,23 +41,25 @@ export async function rpc(method, params) {
 const u64 = (dv, o) => Number(dv.getBigUint64(o, true));
 const i64 = (dv, o) => Number(dv.getBigInt64(o, true));
 
-// Job account (src/knos/jobs/sol.py): state buyer worker amount deadline review brief result verifier proof (217 bytes);
-// jobs posted before 0.3.4 are 153 bytes (no verifier, no proof).
-export const JOB_LEN = 217, LEGACY_JOB_LEN = 153;
+// Job account (src/knos/jobs/sol.py): state buyer worker amount deadline review brief result verifier proof stake
+// (225 bytes, 0.3.5); 0.3.4 jobs are 217 bytes (no stake); jobs posted before 0.3.4 are 153 (no verifier, no proof).
+// Since 0.3.5 every settlement closes the job account, so settled jobs are no longer listed.
+export const JOB_LEN = 225, V034_JOB_LEN = 217, LEGACY_JOB_LEN = 153;
 const zero = (u8) => u8.every((b) => b === 0);
 export function parseJob(address, raw) {
   const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   const worker = raw.slice(33, 65), result = raw.slice(121, 153);
-  const full = raw.length >= JOB_LEN, verifier = full ? raw.slice(153, 185) : null, proof = full ? raw.slice(185, 217) : null;
+  const full = raw.length >= V034_JOB_LEN, verifier = full ? raw.slice(153, 185) : null, proof = full ? raw.slice(185, 217) : null;
   return { address, state: STATES[raw[0]] || "none", buyer: b58(raw.slice(1, 33)),
     worker: zero(worker) ? null : b58(worker), amount: u64(dv, 65) / 1e6, deadline: i64(dv, 73),
     review: i64(dv, 81), brief: hex(raw.slice(89, 121)), result: zero(result) ? null : hex(result),
-    verifier: verifier && !zero(verifier) ? b58(verifier) : null, proof: proof && !zero(proof) ? hex(proof) : null };
+    verifier: verifier && !zero(verifier) ? b58(verifier) : null, proof: proof && !zero(proof) ? hex(proof) : null,
+    stake: raw.length >= JOB_LEN ? u64(dv, 217) / 1e6 : 0 };
 }
 
 export async function jobs() {
   const sized = (n) => rpc("getProgramAccounts", [PROGRAM, { encoding: "base64", filters: [{ dataSize: n }] }]);
-  const got = (await Promise.all([sized(JOB_LEN), sized(LEGACY_JOB_LEN)])).flat();
+  const got = (await Promise.all([sized(JOB_LEN), sized(V034_JOB_LEN), sized(LEGACY_JOB_LEN)])).flat();
   return got.map((a) => parseJob(a.pubkey, Uint8Array.from(atob(a.account.data[0]), (c) => c.charCodeAt(0))));
 }
 
@@ -169,12 +171,14 @@ export async function settleTx(buyerB58, job, jobId, verb) {
       m(buyer, true, true), m(wtok, false, true), m(worker, false, false), m(cfg.mint, false, false),
       m(new PublicKey(SYSTEM), false, false), m(new PublicKey(TOKEN), false, false)] });
     const ix = new TransactionInstruction({ programId: p.pid, data: Uint8Array.from([4]), keys: [
-      m(buyer, true, false), m(p.job, false, true), m(vault, false, true), m(p.vaultAuth, false, false),
-      m(wtok, false, true), m(cfg.feeToken, false, true), m(cfg.address, false, false), m(new PublicKey(TOKEN), false, false)] });
+      m(buyer, true, true), m(p.job, false, true), m(vault, false, true), m(p.vaultAuth, false, false),
+      m(wtok, false, true), m(cfg.feeToken, false, true), m(cfg.address, false, false), m(new PublicKey(TOKEN), false, false),
+      m(buyer, true, true)] });   // 0.3.5: the job closes; its rent goes back to the buyer
     return serialize([create, ix], buyer);
   }
+  // Reject: refused by the escrow on a job that names a verifier (only the verifier or the deadline settles it).
   const ix = new TransactionInstruction({ programId: p.pid, data: Uint8Array.from([6]), keys: [
-    m(buyer, true, false), m(p.job, false, true), m(vault, false, true), m(p.vaultAuth, false, false),
+    m(buyer, true, true), m(p.job, false, true), m(vault, false, true), m(p.vaultAuth, false, false),
     m(await ata(buyer, cfg.mint), false, true), m(new PublicKey(TOKEN), false, false)] });
   return serialize([ix], buyer);
 }

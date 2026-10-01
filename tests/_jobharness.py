@@ -39,9 +39,10 @@ class LocalLedger:
         return bytes(acc.data) if acc is not None else None
 
     def jobs(self, state: str | None = None) -> list[sol.Job]:
+        from knos.jobs import market
         out = []
         for jid in getattr(self.env, "known_jobs", []):
-            got = self.env.job(jid)
+            got = self.env.job(jid) or market._SETTLED.get(sol.job_pda(self.program, jid))   # settled: closed
             if got and (state is None or got.state == state):
                 out.append(got)
         return out

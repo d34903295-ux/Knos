@@ -49,7 +49,7 @@ def test_full_jobs_pay_the_worker_95_percent_and_knos_5(env):
         assert env.claim(env.worker, j)
         assert env.deliver(env.worker, j)
         assert env.accept(env.buyer, j, env.w_tok)
-        assert env.job(j).state == "released"
+        assert env.job(j) is None                      # settled: the account is closed
     assert env.balance(env.w_tok) - w0 == 20 * PRICE * 95 // 100
     assert env.balance(env.fee_token) - f0 == 20 * PRICE * 5 // 100
 
@@ -99,7 +99,7 @@ def test_reject_refunds_the_buyer_in_full(env):
     b0 = e.balance(e.b_tok)
     assert e.post(e.buyer, e.b_tok, j, PRICE) and e.claim(e.worker, j) and e.deliver(e.worker, j)
     assert e.reject(e.buyer, j, e.b_tok)
-    assert e.balance(e.b_tok) == b0 and e.job(j).state == "refunded"
+    assert e.balance(e.b_tok) == b0 and e.job(j) is None
 
 
 def test_a_silent_buyer_cannot_stall_payment(env):
@@ -149,8 +149,7 @@ def test_paid_on_proof_the_verifier_releases_with_no_buyer_step(env):
     assert e.job(j).verifier == e.verifier.pubkey() and e.job(j).proof is None
     root = hashlib.sha256(b"merkle root of the proof").digest()
     assert e.verify_release(e.verifier, j, e.w_tok, proof_root=root)
-    got = e.job(j)
-    assert got.state == "released" and got.proof == root
+    assert e.job(j) is None                                  # settled: closed (the root is in the transaction)
     assert e.balance(e.w_tok) - w0 == PRICE * 95 // 100 and e.balance(e.fee_token) - f0 == PRICE * 5 // 100
 
 
@@ -208,18 +207,16 @@ def test_a_worker_cannot_verify_its_own_work(env):
     e = env
     j = jid("proof-self")
     assert e.post(e.buyer, e.b_tok, j, PRICE, verifier=e.worker.pubkey())
-    assert e.claim(e.worker, j) and e.deliver(e.worker, j)
-    assert not e.verify_release(e.worker, j, e.w_tok)
-    assert e.accept(e.buyer, j, e.w_tok)                     # the buyer still can
+    assert not e.claim(e.worker, j)                          # the named verifier cannot take the job
+    assert e.claim(e.rival, j) and e.deliver(e.rival, j)
+    assert not e.verify_release(e.rival, j, e.r_tok)         # nor the worker verify its own
+    assert e.verify_release(e.worker, j, e.r_tok)            # the named verifier releases the rival's work
 
 
-def test_a_silent_verifier_leaves_every_old_path_open(env):
+def test_a_silent_verifier_leaves_accept_release_refund_open(env):
     e = env
     a = _delivered(e, "proof-silent-accept", e.verifier)
-    assert e.accept(e.buyer, a, e.w_tok)                     # the buyer accepts as before
-    b = _delivered(e, "proof-silent-reject", e.verifier)
-    b0 = e.balance(e.b_tok)
-    assert e.reject(e.buyer, b, e.b_tok) and e.balance(e.b_tok) - b0 == PRICE
+    assert e.accept(e.buyer, a, e.w_tok)                     # the buyer may still pay
     c = _delivered(e, "proof-silent-release", e.verifier)
     e.warp(41)
     assert e.accept(e.rival, c, e.w_tok, release=True)       # anyone after the review window
@@ -331,7 +328,135 @@ def test_a_job_posted_before_the_upgrade_still_settles(env):
     w0, f0 = e.balance(e.w_tok), e.balance(e.fee_token)
     assert e.accept(e.buyer, j, e.w_tok)
     assert e.balance(e.w_tok) - w0 == 9_500 and e.balance(e.fee_token) - f0 == 500
-    assert e.job(j).state == "released" and len(bytes(e.svm.get_account(sol.job_pda(e.pid, j)).data)) == 153
+    assert e.job(j) is None and e.lamports(sol.job_pda(e.pid, j)) == 0          # settled: closed
+
+
+def test_a_job_posted_by_0_3_4_still_claims_and_settles(env):
+    """A 217-byte job from 0.3.4 (no stake field): claimed with no stake, delivered, settled, closed."""
+    from solders.account import Account
+    e = env
+    j = jid("v034-job")
+    now = int(e.svm.get_clock().unix_timestamp)
+    raw = (bytes([1]) + bytes(e.buyer.pubkey()) + bytes(32) + struct.pack("<Qqq", PRICE, now + 100, 40)
+           + jid("v034-brief") + bytes(32) + bytes(32) + bytes(32))
+    assert len(raw) == sol.V034_JOB_LEN
+    e.svm.set_account(sol.job_pda(e.pid, j), Account(e.svm.minimum_balance_for_rent_exemption(217), raw, e.pid,
+                                                     False, 0))
+    e.mint_to(e.vault, PRICE)
+    vault0 = e.balance(e.vault)
+    assert e.claim(e.worker, j) and e.balance(e.vault) == vault0 and e.job(j).stake == 0
+    assert e.deliver(e.worker, j) and e.accept(e.buyer, j, e.w_tok)
+    assert e.job(j) is None and e.balance(e.vault) == vault0 - PRICE
+
+
+# ---- 0.3.5 rules ---------------------------------------------------------------------------------------------------
+
+def test_rule_verified_job_buyer_cannot_reject(env):
+    e = env
+    j = _delivered(e, "rule1-no-buyer-reject", e.verifier)
+    vault0 = e.balance(e.vault)
+    assert not e.reject(e.buyer, j, e.b_tok)
+    assert e.job(j).state == "delivered" and e.balance(e.vault) == vault0
+
+
+def test_rule_verify_reject_refunds_the_buyer(env):
+    e = env
+    j = _delivered(e, "rule1-verify-reject", e.verifier)
+    b0 = e.balance(e.b_tok)
+    for who in (e.buyer, e.worker, e.attacker):              # a verdict is the job's verifier's signature alone
+        assert not e.verify_reject(who, j, e.b_tok)
+    assert not e.verify_reject(e.verifier, j, e.a_tok)       # refunds go to the buyer only
+    assert e.verify_reject(e.verifier, j, e.b_tok, proof_root=b"\x07" * 32)
+    assert e.balance(e.b_tok) - b0 == PRICE and e.job(j) is None
+    k = _delivered(e, "rule1-verify-reject-none")            # no verifier named: nobody can verify-reject
+    assert not e.verify_reject(e.verifier, k, e.b_tok)
+    m = _delivered(e, "rule1-verify-reject-late", e.verifier)
+    e.warp(41)                                               # past the review deadline: the deadline settles it
+    assert not e.verify_reject(e.verifier, m, e.b_tok)
+    assert e.settle(e.attacker, m) and e.job(m) is None
+
+
+def test_rule_deadline_settles_delivered_to_worker_undelivered_to_buyer(env):
+    e = env
+    w0, b0 = e.balance(e.w_tok), e.balance(e.b_tok)
+    a = _delivered(e, "rule2-delivered", e.verifier)          # a silent verifier
+    assert not e.settle(e.attacker, a)                       # inside the review window: no crank
+    b = jid("rule2-undelivered")
+    assert e.post(e.buyer, e.b_tok, b, PRICE, work=20) and e.claim(e.rival, b)
+    c = jid("rule2-unclaimed")
+    assert e.post(e.buyer, e.b_tok, c, PRICE, work=20)
+    assert not e.settle(e.attacker, b) and not e.settle(e.attacker, c)
+    e.warp(41)
+    assert not e.deliver(e.rival, b)                         # the claim timed out
+    for j in (a, b, c):
+        assert e.settle(e.attacker, j)                       # anyone may crank
+        assert e.job(j) is None and not e.settle(e.attacker, j)
+    assert e.balance(e.w_tok) - w0 == PRICE * 95 // 100
+    assert e.balance(e.b_tok) - b0 == -PRICE + sol.stake_for(PRICE)   # a paid; b, c refunded (+ b stake)
+
+
+def test_rule_buyer_cannot_claim_own_job(env):
+    e = env
+    j = jid("rule3-self-claim")
+    assert e.post(e.buyer, e.b_tok, j, PRICE)
+    assert not e.claim(e.buyer, j)
+    assert e.job(j).state == "open" and e.claim(e.worker, j)
+
+
+def test_rule_claim_stake_returned_on_delivery_and_lost_on_timeout(env):
+    e = env
+    assert sol.stake_for(PRICE) == PRICE // 10 and sol.stake_for(U) == 100_000
+    s_tok = e.stake_account(e.worker.pubkey())
+    j = jid("rule4-stake-back")
+    assert e.post(e.buyer, e.b_tok, j, PRICE)
+    s0, v0 = e.balance(s_tok), e.balance(e.vault)
+    assert e.claim(e.worker, j)
+    assert e.balance(s_tok) == s0 - PRICE // 10 and e.balance(e.vault) == v0 + PRICE // 10
+    assert e.job(j).stake == PRICE // 10
+    assert e.deliver(e.worker, j) and e.balance(s_tok) == s0 and e.job(j).stake == 0
+    broke, broke_tok = e.party()                             # no tokens: cannot stake, cannot claim
+    k = jid("rule4-no-stake")
+    assert e.post(e.buyer, e.b_tok, k, PRICE) and not e.claim(broke, k, broke_tok)
+    t = jid("rule4-timeout")
+    b0 = e.balance(e.b_tok)
+    assert e.post(e.buyer, e.b_tok, t, PRICE, work=20) and e.claim(e.worker, t)
+    e.warp(21)
+    assert not e.deliver(e.worker, t)
+    assert e.refund(e.buyer, t, e.b_tok)                     # the buyer's refund carries the stake
+    assert e.balance(e.b_tok) - b0 == PRICE // 10 and e.balance(s_tok) == s0 - PRICE // 10
+
+
+def test_rule_every_settle_closes_the_job_and_refunds_rent_to_the_buyer(env):
+    e = env
+    rent = e.svm.minimum_balance_for_rent_exemption(sol.JOB_LEN)
+    paths = {
+        "accept": lambda j: e.accept(e.buyer, j, e.w_tok),
+        "release": lambda j: (e.warp(41), e.accept(e.attacker, j, e.w_tok, release=True))[1],
+        "verify_release": lambda j: e.verify_release(e.verifier, j, e.w_tok),
+        "verify_reject": lambda j: e.verify_reject(e.verifier, j, e.b_tok),
+        "reject": lambda j: e.reject(e.buyer, j, e.b_tok),
+        "settle": lambda j: (e.warp(41), e.settle(e.attacker, j))[1],
+    }
+    for name, settle in paths.items():
+        j = _delivered(e, "rule5-" + name, None if name in ("accept", "reject", "release") else e.verifier)
+        assert e.lamports(sol.job_pda(e.pid, j)) == rent
+        l0 = e.lamports(e.buyer.pubkey())
+        assert settle(j), name
+        gain = e.lamports(e.buyer.pubkey()) - l0
+        assert e.svm.get_account(sol.job_pda(e.pid, j)) is None or e.lamports(sol.job_pda(e.pid, j)) == 0, name
+        assert rent - 5000 <= gain <= rent, (name, gain)    # the rent, less the fee when the buyer signs
+    for name in ("refund", "settle-timeout"):
+        j = jid("rule5-" + name)
+        assert e.post(e.buyer, e.b_tok, j, PRICE, work=20) and e.claim(e.worker, j)
+        e.warp(21)
+        l0 = e.lamports(e.buyer.pubkey())
+        assert e.refund(e.buyer, j, e.b_tok) if name == "refund" else e.settle(e.attacker, j)
+        assert rent - 5000 <= e.lamports(e.buyer.pubkey()) - l0 <= rent
+        assert e.job(j) is None
+    j = jid("rule5-repost")                                  # a closed id is free again only for a fresh post
+    assert e.post(e.buyer, e.b_tok, j, PRICE) and e.claim(e.worker, j) and e.deliver(e.worker, j)
+    assert e.accept(e.buyer, j, e.w_tok) and not e.accept(e.buyer, j, e.w_tok)
+    assert e.post(e.buyer, e.b_tok, j, PRICE) and e.job(j).state == "open"
 
 
 # ---- conservation --------------------------------------------------------------------------------------------------
@@ -347,14 +472,14 @@ def test_1000_random_interleavings_conserve_every_token():
     for _ in range(1000):
         j = rng.choice(ids)
         who, tok = rng.choice(actors)
-        a = rng.randrange(10)
+        a = rng.randrange(12)
         if a == 0:
             e.post(who, tok, j, rng.randint(1, 3) * 1_000_000, work=rng.choice([5, 60]), review=rng.choice([5, 60]),
                    verifier=rng.choice(actors)[0].pubkey() if rng.random() < 0.5 else None)
         elif a == 1:
-            e.claim(who, j)
+            e.claim(who, j, tok)                         # staking from its own account
         elif a == 2:
-            e.deliver(who, j)
+            e.deliver(who, j, worker_token=tok)
         elif a in (3, 4):
             e.accept(who, j, tok, release=a == 4)
         elif a == 5:
@@ -365,6 +490,10 @@ def test_1000_random_interleavings_conserve_every_token():
             got = e.job(j)
             if got and got.worker:
                 e.verify_release(who, j, e.accounts[bytes(got.worker)])
+        elif a == 8:
+            e.settle(who, j)
+        elif a == 9:
+            e.verify_reject(who, j, tok)
         else:
             e.warp(rng.choice([1, 10, 70]))
         assert total() == t0, "tokens created or destroyed"
@@ -376,9 +505,9 @@ def test_1000_random_interleavings_conserve_every_token():
             continue
         if got.state == "delivered":
             k, t = by_key[bytes(got.worker)]
-            assert e.accept(k, j, t, release=True)
+            assert e.settle(k, j, worker_token=t)
         elif got.state in ("open", "claimed"):
             k, t = by_key[bytes(got.buyer)]
-            assert e.refund(k, j, t)
-    assert all(e.job(j).state in ("released", "refunded") for j in ids if e.job(j))
+            assert e.settle(k, j, buyer_token=t)
+    assert all(e.job(j) is None for j in ids), "a job left unsettled"
     assert e.balance(e.vault) == 0, "funds stuck in escrow"

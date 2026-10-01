@@ -6,6 +6,12 @@
 //! 0.3.4: a job may name a verifier key at post; the verifier alone can release a delivered job by naming the exact
 //! result hash the worker committed (and a proof root, stored in the job). Minimum job and minimum fee; a per-job cap
 //! the admin can only lower; a pause that stops new posts only. The config moved to a new PDA ["config2"].
+//!
+//! 0.3.5: a job that names a verifier settles only by its verifier (VerifyRelease on pass, VerifyReject on fail) or
+//! the deadline; its buyer cannot reject it. Settle (anyone) at the deadline: delivered work with no verdict pays the
+//! worker, undelivered work refunds the buyer. A buyer cannot claim its own job. Claim takes a worker stake (10% of the
+//! price, at least 0.1 USDC) back on delivery, the buyer's if the claim times out. Every settlement closes the job
+//! account and returns its rent to the buyer. The config layout is unchanged.
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     clock::Clock,
@@ -27,9 +33,14 @@ pub const TOKEN_PROGRAM: Pubkey = solana_program::pubkey!("TokenkegQfeZyiNwAJbNb
 const LEGACY_CONFIG_LEN: usize = 32 + 32 + 32 + 2 + 1; // ["config"]: admin, mint, fee_token, fee_bps, bump (retired)
 // ["config2"]: admin, mint, fee_token, fee_bps u16, min_fee u64, min_amount u64, max_amount u64, paused u8, bump u8
 const CONFIG_LEN: usize = 32 + 32 + 32 + 2 + 8 + 8 + 8 + 1 + 1;
-// state, buyer, worker, amount, deadline, review, brief, result, verifier, proof
-const JOB_LEN: usize = 1 + 32 + 32 + 8 + 8 + 8 + 32 + 32 + 32 + 32;
+// state, buyer, worker, amount, deadline, review, brief, result, verifier, proof, stake
+const JOB_LEN: usize = 1 + 32 + 32 + 8 + 8 + 8 + 32 + 32 + 32 + 32 + 8;
+const V034_JOB_LEN: usize = 217;   // jobs posted by 0.3.4: no stake field (claimed without a stake); they settle as before
 const LEGACY_JOB_LEN: usize = 153; // jobs posted before 0.3.4: no verifier, no proof; they settle as before
+// The worker's stake at claim: 10% of the price, at least 0.1 USDC (6 decimals), held in the vault.
+const STAKE_BPS: u64 = 1_000;
+const MIN_STAKE: u64 = 100_000;
+fn stake_for(amount: u64) -> u64 { (((amount as u128) * (STAKE_BPS as u128) / 10_000) as u64).max(MIN_STAKE) }
 
 #[repr(u8)]
 #[derive(PartialEq, Clone, Copy)]
@@ -39,25 +50,27 @@ fn err(code: u32, m: &str) -> ProgramError { msg!("knos_escrow: {}", m); Program
 
 struct Job {
     state: u8, buyer: Pubkey, worker: Pubkey, amount: u64, deadline: i64, review: i64, brief: [u8; 32], result: [u8; 32],
-    verifier: Pubkey, proof: [u8; 32],
+    verifier: Pubkey, proof: [u8; 32], stake: u64,
 }
 impl Job {
     fn load(d: &[u8]) -> Result<Job, ProgramError> {
-        if d.len() != JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
+        if d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
         let pk = |o: usize| Pubkey::new_from_array(d[o..o + 32].try_into().unwrap());
         let u = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
-        let full = d.len() == JOB_LEN;
+        let full = d.len() >= V034_JOB_LEN;
         Ok(Job { state: d[0], buyer: pk(1), worker: pk(33), amount: u(65), deadline: u(73) as i64, review: u(81) as i64,
                  brief: d[89..121].try_into().unwrap(), result: d[121..153].try_into().unwrap(),
                  verifier: if full { pk(153) } else { Pubkey::default() },
-                 proof: if full { d[185..217].try_into().unwrap() } else { [0; 32] } })
+                 proof: if full { d[185..217].try_into().unwrap() } else { [0; 32] },
+                 stake: if d.len() == JOB_LEN { u(217) } else { 0 } })
     }
     fn store(&self, d: &mut [u8]) {
         d[0] = self.state; d[1..33].copy_from_slice(self.buyer.as_ref()); d[33..65].copy_from_slice(self.worker.as_ref());
         d[65..73].copy_from_slice(&self.amount.to_le_bytes()); d[73..81].copy_from_slice(&(self.deadline as u64).to_le_bytes());
         d[81..89].copy_from_slice(&(self.review as u64).to_le_bytes()); d[89..121].copy_from_slice(&self.brief);
         d[121..153].copy_from_slice(&self.result);
-        if d.len() >= JOB_LEN { d[153..185].copy_from_slice(self.verifier.as_ref()); d[185..217].copy_from_slice(&self.proof); }
+        if d.len() >= V034_JOB_LEN { d[153..185].copy_from_slice(self.verifier.as_ref()); d[185..217].copy_from_slice(&self.proof); }
+        if d.len() >= JOB_LEN { d[217..225].copy_from_slice(&self.stake.to_le_bytes()); }
     }
 }
 
@@ -126,6 +139,28 @@ fn pay_out<'a>(j: &mut Job, job: &AccountInfo<'a>, cfg: &Config, vault_tok: &Acc
     j.state = S::Released as u8; j.store(&mut job.try_borrow_mut_data()?);
     token_transfer(token, vault_tok, worker_tok, vauth, j.amount - fee, Some(&[b"vault", &[vault_bump]]))?;
     if fee > 0 { token_transfer(token, vault_tok, fee_tok, vauth, fee, Some(&[b"vault", &[vault_bump]]))?; }
+    Ok(())
+}
+
+/// Refund a job to its buyer: the price, plus a timed-out claim's stake. Shared by Reject, Refund, VerifyReject, Settle.
+fn refund_out<'a>(j: &mut Job, job: &AccountInfo<'a>, vault_tok: &AccountInfo<'a>, vauth: &AccountInfo<'a>,
+                  buyer_tok: &AccountInfo<'a>, token: &AccountInfo<'a>, vault_bump: u8) -> ProgramResult {
+    let (bo, _) = token_owner_mint(buyer_tok)?;
+    if bo != j.buyer { return Err(err(42, "refund to buyer only")); }
+    let total = j.amount.checked_add(j.stake).ok_or(ProgramError::ArithmeticOverflow)?;
+    j.state = S::Refunded as u8; j.stake = 0; j.store(&mut job.try_borrow_mut_data()?);
+    token_transfer(token, vault_tok, buyer_tok, vauth, total, Some(&[b"vault", &[vault_bump]]))
+}
+
+/// Close a settled job: every lamport (its rent) goes to the buyer who funded it; the account is emptied and handed
+/// back to the system program, so nothing can act on it again and its address can be reused only by a fresh post.
+fn close_job<'a>(j: &Job, job: &AccountInfo<'a>, buyer: &AccountInfo<'a>) -> ProgramResult {
+    if *buyer.key != j.buyer || !buyer.is_writable { return Err(err(44, "rent back to the buyer only")); }
+    let lamports = job.lamports();
+    **buyer.try_borrow_mut_lamports()? = buyer.lamports().checked_add(lamports).ok_or(ProgramError::ArithmeticOverflow)?;
+    **job.try_borrow_mut_lamports()? = 0;
+    job.resize(0)?;
+    job.assign(&system_program::ID);
     Ok(())
 }
 
@@ -209,31 +244,58 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             token_transfer(token, buyer_tok, vault_tok, buyer, amount, None)?;
             let now = Clock::get()?.unix_timestamp;
             Job { state: S::Open as u8, buyer: *buyer.key, worker: Pubkey::default(), amount, deadline: now.saturating_add(work), review,
-                  brief, result: [0; 32], verifier, proof: [0; 32] }
+                  brief, result: [0; 32], verifier, proof: [0; 32], stake: 0 }
                 .store(&mut job.try_borrow_mut_data()?);
             Ok(())
         }
-        // 2 Claim: worker(s), job(w)  |  3 Deliver: worker(s), job(w); data result[32]
-        2 | 3 => {
-            let worker = next_account_info(it)?; let job = next_account_info(it)?;
-            if *job.owner != *program_id || !worker.is_signer { return Err(err(8, "claim/deliver accounts")); }
+        // 2 Claim: worker(s), job(w), worker_token(w), vault_token(w), config2, token
+        //   The worker stakes max(10% of the price, 0.1 USDC) into the vault; never the buyer. The claim times out at
+        //   the job's work deadline: undelivered by then, the price and the stake go to the buyer.
+        2 => {
+            let worker = next_account_info(it)?; let job = next_account_info(it)?; let worker_tok = next_account_info(it)?;
+            let vault_tok = next_account_info(it)?; let config = next_account_info(it)?; let token = next_account_info(it)?;
+            if *job.owner != *program_id || !worker.is_signer || *token.key != TOKEN_PROGRAM { return Err(err(8, "claim accounts")); }
+            let cfg = Config::load(config, program_id, &config_key)?;
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
-            if tag == 2 {
-                if j.state != S::Open as u8 || now > j.deadline { return Err(err(20, "not open")); }
-                j.worker = *worker.key; j.state = S::Claimed as u8;
-            } else {
-                if j.state != S::Claimed as u8 || *worker.key != j.worker { return Err(err(21, "not worker")); }
-                j.result = arr32(rest, 0)?;
-                j.state = S::Delivered as u8; j.deadline = now.saturating_add(j.review);
-            }
-            j.store(&mut job.try_borrow_mut_data()?); Ok(())
+            if j.state != S::Open as u8 || now > j.deadline { return Err(err(20, "not open")); }
+            if *worker.key == j.buyer { return Err(err(22, "a buyer cannot claim its own job")); }
+            if *worker.key == j.verifier { return Err(err(36, "a worker cannot verify its own work")); }
+            let (vo, vm) = token_owner_mint(vault_tok)?; let (_, wm) = token_owner_mint(worker_tok)?;
+            if vo != vault_auth || vm != cfg.mint || wm != cfg.mint { return Err(err(7, "vault or mint")); }
+            let stake = if job.data_len() >= JOB_LEN { stake_for(j.amount) } else { 0 };   // pre-0.3.5 jobs: no stake
+            j.worker = *worker.key; j.state = S::Claimed as u8; j.stake = stake;
+            j.store(&mut job.try_borrow_mut_data()?);
+            if stake > 0 { token_transfer(token, worker_tok, vault_tok, worker, stake, None)?; }
+            Ok(())
         }
-        // 4 Accept: signer(s), job(w), vault_token(w), vault_auth, worker_token(w), fee_token(w), config2, token
+        // 3 Deliver: worker(s), job(w), worker_token(w), vault_token(w), vault_auth, token; data result[32]
+        //   Before the claim times out. The stake goes back to the worker.
+        3 => {
+            let worker = next_account_info(it)?; let job = next_account_info(it)?; let worker_tok = next_account_info(it)?;
+            let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?; let token = next_account_info(it)?;
+            if *job.owner != *program_id || !worker.is_signer || *vauth.key != vault_auth || *token.key != TOKEN_PROGRAM {
+                return Err(err(8, "deliver accounts"));
+            }
+            let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
+            if j.state != S::Claimed as u8 || *worker.key != j.worker { return Err(err(21, "not worker")); }
+            if now > j.deadline { return Err(err(23, "the claim timed out")); }
+            let (wo, _) = token_owner_mint(worker_tok)?;
+            if wo != j.worker { return Err(err(33, "stake back to the worker only")); }
+            let stake = j.stake;
+            j.result = arr32(rest, 0)?; j.stake = 0;
+            j.state = S::Delivered as u8; j.deadline = now.saturating_add(j.review);
+            j.store(&mut job.try_borrow_mut_data()?);
+            if stake > 0 { token_transfer(token, vault_tok, worker_tok, vauth, stake, Some(&[b"vault", &[vault_bump]]))?; }
+            Ok(())
+        }
+        // 4 Accept: buyer(s), job(w), vault_token(w), vault_auth, worker_token(w), fee_token(w), config2, token, buyer(w)
         // 5 Release: same accounts, anyone, after the review window
         // 11 VerifyRelease: verifier(s), same accounts. data: result_hash[32] proof_root[32]. Paid on proof.
+        // Each closes the job: its rent goes back to the buyer.
         4 | 5 | 11 => {
             let who = next_account_info(it)?; let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
             let worker_tok = next_account_info(it)?; let fee_tok = next_account_info(it)?; let config = next_account_info(it)?; let token = next_account_info(it)?;
+            let buyer = next_account_info(it)?;
             if *job.owner != *program_id || !who.is_signer || *vauth.key != vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(9, "release accounts")); }
             let cfg = Config::load(config, program_id, &config_key)?;
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
@@ -249,23 +311,52 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
                 if tag == 4 && *who.key != j.buyer { return Err(err(31, "not buyer")); }
                 if tag == 5 && now <= j.deadline { return Err(err(32, "in review")); }
             }
-            pay_out(&mut j, job, &cfg, vault_tok, vauth, worker_tok, fee_tok, token, vault_bump)
+            pay_out(&mut j, job, &cfg, vault_tok, vauth, worker_tok, fee_tok, token, vault_bump)?;
+            close_job(&j, job, buyer)
         }
-        // 6 Reject: buyer(s), job(w), vault_token(w), vault_auth, buyer_token(w), token  (inside review window)
-        // 7 Refund: same accounts (open/claimed past the work deadline)
-        6 | 7 => {
-            let buyer = next_account_info(it)?; let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
+        // 6 Reject: buyer(s,w), job(w), vault_token(w), vault_auth, buyer_token(w), token  (inside the review window;
+        //   never on a job that names a verifier: only the verifier or the deadline settles that one)
+        // 7 Refund: same accounts (open/claimed past the work deadline; a timed-out claim's stake goes to the buyer)
+        // 12 VerifyReject: verifier(s), job(w), vault_token(w), vault_auth, buyer_token(w), token, buyer(w).
+        //   data: proof_root[32]. The job's verifier fails delivered work inside the review window: buyer refunded.
+        // Each closes the job: its rent goes back to the buyer.
+        6 | 7 | 12 => {
+            let who = next_account_info(it)?; let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
             let buyer_tok = next_account_info(it)?; let token = next_account_info(it)?;
-            if *job.owner != *program_id || !buyer.is_signer || *vauth.key != vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(12, "refund accounts")); }
+            let buyer = if tag == 12 { next_account_info(it)? } else { who };
+            if *job.owner != *program_id || !who.is_signer || *vauth.key != vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(12, "refund accounts")); }
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
-            if *buyer.key != j.buyer { return Err(err(40, "not buyer")); }
-            let ok = if tag == 6 { j.state == S::Delivered as u8 && now <= j.deadline }
-                     else { (j.state == S::Open as u8 || j.state == S::Claimed as u8) && now > j.deadline };
+            if tag == 12 {
+                if j.verifier == Pubkey::default() || *who.key != j.verifier { return Err(err(34, "not the job's verifier")); }
+                j.proof = arr32(rest, 0)?;
+            } else if *who.key != j.buyer { return Err(err(40, "not buyer")); }
+            if tag == 6 && j.verifier != Pubkey::default() { return Err(err(43, "a verified job: only its verifier can reject")); }
+            let ok = if tag == 7 { (j.state == S::Open as u8 || j.state == S::Claimed as u8) && now > j.deadline }
+                     else { j.state == S::Delivered as u8 && now <= j.deadline };
             if !ok { return Err(err(41, "not refundable")); }
-            let (bo, _) = token_owner_mint(buyer_tok)?;
-            if bo != j.buyer { return Err(err(42, "refund to buyer only")); }
-            j.state = S::Refunded as u8; j.store(&mut job.try_borrow_mut_data()?);
-            token_transfer(token, vault_tok, buyer_tok, vauth, j.amount, Some(&[b"vault", &[vault_bump]]))
+            refund_out(&mut j, job, vault_tok, vauth, buyer_tok, token, vault_bump)?;
+            close_job(&j, job, buyer)
+        }
+        // 13 Settle (the deadline crank, anyone): signer(s), job(w), vault_token(w), vault_auth, worker_token(w),
+        //   fee_token(w), buyer_token(w), buyer(w), config2, token.
+        //   Delivered and past the review deadline with no verdict: the worker is paid. Open or claimed past the work
+        //   deadline: the buyer is refunded (with a timed-out claim's stake). Closes the job.
+        13 => {
+            let who = next_account_info(it)?; let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
+            let worker_tok = next_account_info(it)?; let fee_tok = next_account_info(it)?; let buyer_tok = next_account_info(it)?;
+            let buyer = next_account_info(it)?; let config = next_account_info(it)?; let token = next_account_info(it)?;
+            if *job.owner != *program_id || !who.is_signer || *vauth.key != vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(9, "settle accounts")); }
+            let cfg = Config::load(config, program_id, &config_key)?;
+            let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
+            if now <= j.deadline { return Err(err(32, "not past the deadline")); }
+            if j.state == S::Delivered as u8 {
+                pay_out(&mut j, job, &cfg, vault_tok, vauth, worker_tok, fee_tok, token, vault_bump)?;
+            } else if j.state == S::Open as u8 || j.state == S::Claimed as u8 {
+                refund_out(&mut j, job, vault_tok, vauth, buyer_tok, token, vault_bump)?;
+            } else {
+                return Err(err(41, "nothing to settle"));
+            }
+            close_job(&j, job, buyer)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

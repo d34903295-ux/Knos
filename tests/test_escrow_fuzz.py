@@ -1,17 +1,20 @@
 """Model-based fuzz of the Solana escrow program in the Solana runtime (LiteSVM + real SPL Token). Nightly (`-m slow`).
 
 KNOS_FUZZ_N random steps (default 10,000; KNOS_FUZZ_SEED picks the run) by five funded actors on a pool of job ids:
-post (with or without a verifier, sometimes under the minimum or over the cap), claim, deliver, accept, release,
-reject, refund, verify_release (right and wrong result hash), pause/unpause, lower the cap, and clock jumps. A plain
-Python model of the escrow predicts, before every step, whether the program must accept or refuse it and what every
-token account must hold afterwards. Checked after every step:
+post (with or without a verifier, sometimes under the minimum or over the cap, sometimes on a settled and closed id),
+claim (with the worker's stake; sometimes by the buyer or the verifier), deliver (sometimes after the claim timed out),
+accept, release, reject (sometimes on a verified job), refund, verify_release (right and wrong result hash),
+verify_reject, the deadline crank (settle), pause/unpause, lower the cap, and clock jumps. A plain Python model of the
+0.3.5 escrow predicts, before every step, whether the program must accept or refuse it and what every token account
+must hold afterwards. Checked after every step:
 
     the program agrees with the model (no action succeeds that should fail, and none fails that should succeed)
     conservation: every token account matches the model, and their sum never changes
-    no double payout: the vault holds exactly the price of every job still open, claimed or delivered, and the fee
-                      account exactly the fee of every released job
-Every 1,000 steps the episode ends: every job is driven to a terminal state (release or refund, which must succeed)
-and the vault must be empty: no stuck funds.
+    no double payout: the vault holds exactly the price and the claim stake of every job still open, claimed or
+                      delivered, and the fee account exactly the fee of every released job
+    settled jobs are closed: no account remains for a released or refunded job
+Every 1,000 steps the episode ends: every job is driven to a terminal state by the deadline crank (which must
+succeed) and the vault must be empty: no stuck funds.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ EPISODE = 1_000
 # Read at import: the suite's autouse fixture strips KNOS_* settings from each test's environment.
 N = int(os.environ.get("KNOS_FUZZ_N", "10000"))
 SEED = int(os.environ.get("KNOS_FUZZ_SEED", "3405"))
+LIVE = ("open", "claimed", "delivered")
 
 
 class Model:
@@ -45,12 +49,13 @@ class Model:
         self.paused, self.cap = False, 0
         self.released_fees = 0
         self.tried = self.ok = 0
+        self.settled = {"released": 0, "refunded": 0, "proven": 0, "verify_rejected": 0, "cranked": 0}
 
     def now(self) -> int:
         return int(self.e.svm.get_clock().unix_timestamp)
 
     def held(self) -> int:
-        return sum(j["amount"] for j in self.jobs.values() if j["state"] in ("open", "claimed", "delivered"))
+        return sum(j["amount"] + j["stake"] for j in self.jobs.values() if j["state"] in LIVE)
 
     def pay(self, j: dict, payee_tok) -> None:
         fee = sol.fee_for(j["amount"])
@@ -59,12 +64,19 @@ class Model:
         self.bal[self.e.fee_token] += fee
         self.released_fees += fee
         j["state"] = "released"
+        self.settled["released"] += 1
+
+    def refund(self, j: dict, buyer_tok) -> None:
+        self.bal[self.e.vault] -= j["amount"] + j["stake"]
+        self.bal[buyer_tok] += j["amount"] + j["stake"]
+        j["state"], j["stake"] = "refunded", 0
+        self.settled["refunded"] += 1
 
 
 def _step(rng: random.Random, m: Model, ids: list[bytes]) -> None:
     e, actors = m.e, m.actors
     a = rng.randrange(100)
-    live = [i for i in ids if i in m.jobs and m.jobs[i]["state"] in ("open", "claimed", "delivered")]
+    live = [i for i in ids if i in m.jobs and m.jobs[i]["state"] in LIVE]
     fresh = [i for i in ids if i not in m.jobs]
     if a < 18 and fresh and rng.random() < 0.8:
         jid = rng.choice(fresh)                                   # mostly, new posts on new ids
@@ -79,32 +91,41 @@ def _step(rng: random.Random, m: Model, ids: list[bytes]) -> None:
     if j is not None and rng.random() < 0.6:   # most of the time, the party the job is waiting for acts
         want = {"deliver": j["worker"], "accept": j["buyer"], "reject": j["buyer"], "refund": j["buyer"],
                 "verify": j["verifier"]}.get("deliver" if 30 <= a < 42 else "accept" if 42 <= a < 52 else
-                                             "verify" if 60 <= a < 72 else "reject" if 72 <= a < 80 else
-                                             "refund" if 80 <= a < 88 else "")
+                                             "verify" if 60 <= a < 72 or 90 <= a < 93 else
+                                             "reject" if 72 <= a < 80 else "refund" if 80 <= a < 88 else "")
         if want is not None:
             who, tok = next((k, t) for k, t in actors if k.pubkey() == want)
-    if a < 18:                                                   # post
+    if a < 18:                                                   # post (a settled id is free again: closed)
         amount = rng.choice([U - 1, U, 2 * U, 3 * U, 7 * U])
         work, review = rng.choice([30, 120, 600]), rng.choice([30, 120, 600])
         ver = rng.choice(actors)[0] if rng.random() < 0.5 else None
-        ok = (j is None and not m.paused and amount >= sol.MIN_JOB_UNITS and (m.cap == 0 or amount <= m.cap))
+        ok = ((j is None or j["state"] not in LIVE) and not m.paused and amount >= sol.MIN_JOB_UNITS
+              and (m.cap == 0 or amount <= m.cap))
         got = e.post(who, tok, jid, amount, work=work, review=review, verifier=ver.pubkey() if ver else None)
         if ok:
             m.jobs[jid] = {"state": "open", "buyer": who.pubkey(), "worker": None, "amount": amount,
                            "deadline": now + work, "review": review, "result": None,
-                           "verifier": ver.pubkey() if ver else None}
+                           "verifier": ver.pubkey() if ver else None, "stake": 0}
             m.bal[tok] -= amount
             m.bal[e.vault] += amount
-    elif a < 30:                                                 # claim
-        ok = j is not None and j["state"] == "open" and now <= j["deadline"]
-        got = e.claim(who, jid)
+    elif a < 30:                                                 # claim, staking from the worker's own account
+        if j is not None and j["state"] == "open" and rng.random() < 0.15:
+            who, tok = next((k, t) for k, t in actors if k.pubkey() == j["buyer"])     # the buyer tries
+        ok = (j is not None and j["state"] == "open" and now <= j["deadline"] and who.pubkey() != j["buyer"]
+              and who.pubkey() != j["verifier"])
+        got = e.claim(who, jid, tok)
         if ok:
-            j["state"], j["worker"] = "claimed", who.pubkey()
-    elif a < 42:                                                 # deliver
-        ok = j is not None and j["state"] == "claimed" and j["worker"] == who.pubkey()
-        got = e.deliver(who, jid)
+            j["state"], j["worker"], j["stake"] = "claimed", who.pubkey(), sol.stake_for(j["amount"])
+            m.bal[tok] -= j["stake"]
+            m.bal[e.vault] += j["stake"]
+    elif a < 42:                                                 # deliver (the stake comes back)
+        ok = j is not None and j["state"] == "claimed" and j["worker"] == who.pubkey() and now <= j["deadline"]
+        got = e.deliver(who, jid, worker_token=tok)
         if ok:
             j["state"], j["result"], j["deadline"] = "delivered", e.result_hash(jid), now + j["review"]
+            m.bal[tok] += j["stake"]
+            m.bal[e.vault] -= j["stake"]
+            j["stake"] = 0
     elif a < 52:                                                 # accept (sometimes paying the wrong account)
         payee = tok_of[bytes(j["worker"])] if j and j["worker"] and rng.random() < 0.8 else tok
         ok = (j is not None and j["state"] == "delivered" and j["buyer"] == who.pubkey()
@@ -128,22 +149,19 @@ def _step(rng: random.Random, m: Model, ids: list[bytes]) -> None:
         got = e.verify_release(signer, jid, payee, result_hash=h, proof_root=hashlib.sha256(h).digest())
         if ok:
             m.pay(j, payee)
-            j["proof"] = hashlib.sha256(h).digest()
-    elif a < 80:                                                 # reject inside the review window
-        ok = j is not None and j["state"] == "delivered" and j["buyer"] == who.pubkey() and now <= j["deadline"]
+            m.settled["proven"] += 1
+    elif a < 80:                                                 # reject inside the review window, no verifier
+        ok = (j is not None and j["state"] == "delivered" and j["buyer"] == who.pubkey() and now <= j["deadline"]
+              and j["verifier"] is None)
         got = e.reject(who, jid, tok)
         if ok:
-            m.bal[e.vault] -= j["amount"]
-            m.bal[tok] += j["amount"]
-            j["state"] = "refunded"
+            m.refund(j, tok)
     elif a < 88:                                                 # refund after the work deadline
         ok = (j is not None and j["state"] in ("open", "claimed") and j["buyer"] == who.pubkey()
               and now > j["deadline"])
         got = e.refund(who, jid, tok)
         if ok:
-            m.bal[e.vault] -= j["amount"]
-            m.bal[tok] += j["amount"]
-            j["state"] = "refunded"
+            m.refund(j, tok)
     elif a < 89:                                                 # the admin pauses or unpauses (or a stranger tries)
         admin = rng.random() < 0.7
         on = not m.paused and rng.random() < 0.2
@@ -151,23 +169,43 @@ def _step(rng: random.Random, m: Model, ids: list[bytes]) -> None:
         ok = admin
         if ok:
             m.paused = on
-    elif a < 90 and rng.random() < 0.1:                         # lower the cap (only downward, never under 1 USDC)
+    elif a < 90:                                                 # lower the cap (only downward, never under 1 USDC)
+        if rng.random() >= 0.1:
+            return
         cap = rng.choice([U - 1, 3 * U, 5 * U, 10 * U, 20 * U])
         ok = cap >= sol.MIN_JOB_UNITS and (m.cap == 0 or cap <= m.cap)
         got = e.lower_cap(cap)
         if ok:
             m.cap = cap
-    elif a >= 96:                                                # time passes
+    elif a < 93:                                                 # verify_reject inside the review window
+        buyer_tok = tok_of[bytes(j["buyer"])] if j and rng.random() < 0.85 else tok
+        ok = (j is not None and j["verifier"] is not None and j["verifier"] == who.pubkey()
+              and j["state"] == "delivered" and now <= j["deadline"] and buyer_tok == tok_of[bytes(j["buyer"])])
+        got = e.verify_reject(who, jid, buyer_tok, proof_root=hashlib.sha256(b"fail" + jid).digest())
+        if ok:
+            m.refund(j, buyer_tok)
+            m.settled["verify_rejected"] += 1
+    elif a < 96:                                                 # the deadline crank, by anyone
+        ok = j is not None and j["state"] in LIVE and now > j["deadline"]
+        got = e.settle(who, jid)
+        if ok:
+            m.settled["cranked"] += 1
+            if j["state"] == "delivered":
+                m.pay(j, tok_of[bytes(j["worker"])])
+            else:
+                m.refund(j, tok_of[bytes(j["buyer"])])
+    else:                                                        # time passes
         e.warp(rng.choice([1, 5, 20, 90]))
-        return
-    else:
         return
     m.tried += 1
     m.ok += ok
     assert got == ok, f"program {'accepted' if got else 'refused'} what the model {'allows' if ok else 'refuses'}"
     if ok and jid in m.jobs:
-        chain = e.job(jid)
-        assert chain.state == m.jobs[jid]["state"] and chain.amount == m.jobs[jid]["amount"]
+        chain, want = e.job(jid), m.jobs[jid]
+        if want["state"] in LIVE:
+            assert chain.state == want["state"] and chain.amount == want["amount"] and chain.stake == want["stake"]
+        else:
+            assert chain is None, "a settled job's account was not closed"
 
 
 def _check(m: Model, total: int) -> None:
@@ -183,18 +221,15 @@ def _drain(m: Model) -> None:
     e = m.e
     e.warp(10_000)
     by_key = {bytes(k.pubkey()): (k, t) for k, t in m.actors}
+    cranker = m.actors[0][0]
     for jid, j in m.jobs.items():
         if j["state"] == "delivered":
-            k, t = by_key[bytes(j["worker"])]
-            assert e.accept(k, jid, t, release=True), "a delivered job could not be released"
-            m.pay(j, t)
+            assert e.settle(cranker, jid), "a delivered job could not be settled at the deadline"
+            m.pay(j, by_key[bytes(j["worker"])][1])
         elif j["state"] in ("open", "claimed"):
-            k, t = by_key[bytes(j["buyer"])]
-            assert e.refund(k, jid, t), "an undelivered job could not be refunded"
-            m.bal[e.vault] -= j["amount"]
-            m.bal[t] += j["amount"]
-            j["state"] = "refunded"
-        assert e.job(jid).state == j["state"] and j["state"] in ("released", "refunded")
+            assert e.settle(cranker, jid), "an undelivered job could not be refunded at the deadline"
+            m.refund(j, by_key[bytes(j["buyer"])][1])
+        assert e.job(jid) is None and j["state"] in ("released", "refunded")
     assert e.balance(e.vault) == 0, "funds stuck in escrow"
 
 
@@ -216,10 +251,9 @@ def test_escrow_fuzz_model_conservation_no_double_payout_no_stuck_funds():
         _check(m, total)
         episode += 1
     took = time.perf_counter() - t0
-    released = sum(j["state"] == "released" for j in m.jobs.values())
-    refunded = sum(j["state"] == "refunded" for j in m.jobs.values())
-    proven = sum("proof" in j for j in m.jobs.values())
+    s = m.settled
     print(f"\nescrow fuzz: {steps} steps ({m.tried} transactions: {m.ok} accepted, {m.tried - m.ok} refused, all as "
-          f"the model predicted), {episode} episodes, {len(m.jobs)} jobs ({released} released, {proven} of them on "
-          f"proof, {refunded} refunded), seed {seed}, {took:.1f} s")
-    assert steps == n and released and refunded and (proven or n < 2000)
+          f"the model predicted; 0 violations), {episode} episodes, {s['released']} released ({s['proven']} on "
+          f"proof), {s['refunded']} refunded ({s['verify_rejected']} by a verifier), {s['cranked']} by the deadline "
+          f"crank, seed {seed}, {took:.1f} s")
+    assert steps == n and s["released"] and s["refunded"] and (s["proven"] or n < 2000)
