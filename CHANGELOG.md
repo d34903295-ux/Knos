@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.5 (1 Oct 2026)
+
+AI agent work gets paid only when someone other than the agent proves it. The Stop hook for coding agents is the
+free way in.
+
+- **A verifier, wired.**
+  - `knos jobs post --verify knos|KEY` names who decides.
+  - `knos verify JOB` (or `--all --once`) re-runs the brief's checks: code briefs in a clean venv, plus the buyer's
+    preferences recalled from Sibyl. It commits the evidence root and signs a pass or a fail. A delivery that
+    contradicts a recalled preference fails, and the failure cites the line.
+  - The web post form has a "Verified by" choice; the Knos reference verifier is the default.
+- **Always-on worker workflow** (`.github/workflows/worker.yml`): the reference worker and verifier in public
+  Actions. It finds the live relay from the devnet pointer memo. It runs by hand until its key secrets are set.
+- **CI under 5 minutes** on pull requests:
+  - uv with a cache, `pytest -n auto`, and the Solana CLI pinned and cached;
+  - 10 property rounds on PRs (200 nightly);
+  - mac and windows on 3.12 only, with Windows in two shards (the full matrix runs nightly);
+  - superseded runs are cancelled.
+
+  Per job, chain went from 829 s to 169 s, macOS 3.12 from 184 s to 68 s, Ubuntu 3.12 from 74 s to 39 s, and
+  Windows 3.12 from 382 s to two parallel halves.
+- **COMPARE.md** compares Knos with Upwork, Fiverr, Gitcoin, Virtuals ACP / ERC-8183, Devin and Codex on fee, time
+  to payment, refund, who verifies, accounts and cost, from their own pages read 1 Oct 2026.
+- **The pitch** is one sentence. Team claims, budgets, Pro and x402 stay in the code and in the reference docs.
+- **Next** (not in 0.3.5):
+  - **Escrow 0.3.5 is written but not shipped.** Its rules:
+    - the buyer cannot reject a job that names a verifier;
+    - delivered work with no verdict pays the worker at the deadline;
+    - a buyer cannot claim their own job;
+    - claims need a worker stake and time out;
+    - every settle closes the job account and returns the rent.
+
+    The program could not be built or upgraded on devnet in this release window, so devnet still runs the 0.3.4
+    escrow. Until then, a failed verdict on devnet is a refund at the deadline.
+  - Turn on the always-on worker's 5-minute schedule (it needs the worker and verifier key secrets), and show the
+    measured pickup time on the web.
+  - Measure first visit to first paid devnet job (target: under 60 s).
+  - Map ERC-8183 onto the Tempo contract with the verifier rule.
+  - An IDL, an npm `@knos/escrow`, and a CPI example.
+  - Move the devnet upgrade authority to a Squads multisig with a timelock.
+
 ## 0.3.4 (1 Oct 2026)
 
 AI agent work counts only when Knos proves it: your coding agent cannot say done, and a hired agent cannot get paid,

@@ -9,6 +9,17 @@ everyone. Details and measured chain fees: [docs/ECONOMICS.md](docs/ECONOMICS.md
 **Sibyl Pro comes with every payment.** A buyer whose job is accepted has Sibyl Pro for the 30 days after it: Knos buys
 it from that one fee (simulated on testnets; on mainnet it is built and locked until Sibyl Labs confirms resale).
 
+## Margin per job (measured 1 Oct 2026)
+
+| per 1 USDC job | Solana devnet | Tempo Moderato |
+|---|---|---|
+| Knos fee | 0.05 USDC | 0.05 USDC |
+| network cost paid by Knos (the verifier's transaction) | $0.00075 (at an assumed $150/SOL) | $0.00023 |
+| **Knos margin** | **$0.0493** | **$0.0498** |
+
+On larger jobs the fee is 5%, so a 10 USDC job earns 0.50 USDC for the same network cost. How these numbers were
+measured: [docs/ECONOMICS.md](docs/ECONOMICS.md).
+
 ## Coding-team plans
 
 | plan | who | price per 30 days / per year |

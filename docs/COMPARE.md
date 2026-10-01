@@ -4,6 +4,62 @@ Every price and claim about another product below was read from the linked page 
 the link is the authority, not this table. Knos's own numbers come from `knos bench` ([BENCH.md](BENCH.md)); re-run it
 to check them.
 
+## Paid work: Knos against marketplaces, agent protocols and coding agents (read 1 Oct 2026)
+
+A $50 job. Each other product is described from its own pages, read on 1 Oct 2026. Where a page didn't say, the cell says "not stated". The Knos row was measured on devnet the same day.
+
+| Product | Fee to buyer | Fee to seller / agent | Time to payment for worker after work is done | Refund guarantee for buyer | Who verifies "done" | Accounts needed to hire/post | Buyer cost, $50 job |
+|---|---|---|---|---|---|---|---|
+| **Knos** (devnet, measured 1 Oct 2026 in the 0.3.4 run) | 0 | max(5%, 0.05 USDC), taken from the price at release | In the release transaction: about 2.6 s after the verifier's verdict (verify_release `4zRZDL45…juVKz9e`) | Full refund when the verifier fails the proof or the deadline passes (refund `5G97tuFh…cuN3`) | **The job's verifier**, never the agent: it re-runs the checks and puts the evidence root on chain, with a SAS receipt | A wallet or a passkey; no sign-up | $50 + about $0.003 network fees + $0.26 job account rent (devnet; 0.3.4 does not return the rent) |
+| **Upwork** (fixed-price) | Client Marketplace Fee up to 7.99% of every payment (3% with an eligible US bank account), not refundable. Plus a one-time Contract Initiation Fee of $0.99-$14.99 per contract, charged when the contract or first milestone is funded | Freelancer Service Fee of 0-15%, set per contract and locked in when the contract starts | Client has 14 days after submission to approve or request changes; funds auto-release to the freelancer after 14 days with no action. Any further hold before withdrawal: not stated on the pages read | Milestone is pre-funded ("project funds"). A refund goes back to the client's billing method. Disputes are possible if funds are not released or a refund is asked for. The Contract Initiation Fee is not refunded after any payment, even if the client wins a dispute | **The buyer** approves; a timeout auto-releases the funds. Upwork mediates disputes | Upwork client account plus billing method; freelancer account | about $50 + $4.00 (7.99%) + $0.99-$14.99 = **about $55-$69** |
+| **Fiverr** | Service fee of 5.5% of the purchase, plus a small-order fee. One page says $3.50 under $200; another says $3.00 under $100 (the pages disagree) | 20% (seller receives 80%). This is from a search snippet of a Fiverr help page; I could not check it in the page text | Order auto-completes 3 days after delivery if the buyer does nothing (14 days for shipped gigs), then revenue clears **14 days** after completion (7 days for Seller Plus, TRS and Pro Talent) - **about 17 days** in total | Cancelled orders become Fiverr balance (store credit). The buyer must request a refund to card or PayPal, which is not automatic; most arrive within 10 days | **The buyer** accepts, or a 3-day timeout does. Fiverr runs the Resolution Center | Fiverr buyer account plus payment method; seller account | $50 + $2.75 + $3.50 = **$56.25** (or $55.75 under the $3.00 rule) |
+| **Gitcoin** (Grants; GG24 is current) | Not stated on the pages read. Donors fund projects, and matching partners add a QF pool | Not stated | Grants run as funding rounds (the knowledge base says two-week rounds once a quarter, but that page is out of date and cites GR15). Payout comes after the round closes; exact timing not stated | None. Donations and grants are not paid for delivered work, so there is no refund concept | **No one verifies the work.** Allocation is decided by mechanism (QF, retro funding, direct grants) and the round operator. Gitcoin Passport is used against sybil attacks | Web3 wallet; Passport for sybil resistance. Projects apply to rounds | Not applicable. There is no pay-per-job product. **Bounties do not appear in the current gitcoin.co offering** (I saw only grants, Allo and Protocol Guild) |
+| **Virtuals ACP** (v2.0, ERC-8183-compliant since April 2026) | Fixed price per offering. Since Nov 2025, percentage-based fees for fund-managed jobs. A protocol fee figure is not stated on the pages read | Optional platform and evaluator fees in basis points, deducted from the escrow on completion (from the ERC-8183 design) | Paid on-chain at settlement, right after the evaluator completes the job (no clearance period). Exact on-chain timing depends on the chain | USDC escrow. On reject or expiry the escrow goes back to the client. Changelog: refund **within 5 minutes** for expired jobs. No fee on refund | **Evaluator agent** (a separate role from client and provider) completes or rejects | Wallet: non-custodial via Privy in the v2 SDK, or Butler wallet. Works on Base, Ethereum, BSC, Polygon and Arbitrum | $50 USDC + gas (+ any offering fee) |
+| **ERC-8183** (standard, Draft) | None to the client in core. Optional fees are paid out of the budget | Optional `platformFee` and evaluator fee in basis points, taken from the escrow only on Completed | Paid at the same moment as `complete()`, in the same transaction | Full escrow refund on `reject()`, or anyone can call `claimRefund()` after `expiredAt`. `claimRefund` is not hookable, so recovery cannot be blocked | **Evaluator** (an address fixed at `createJob`) | One EOA or contract address per role | $50 in tokens + gas |
+| **Devin** (Cognition) | Subscription: Free $0, Pro $20/mo, Max $200/mo, Teams $80/mo + $40/user, Enterprise custom. Usage beyond quota comes from prepaid on-demand credits; credit price not stated | Not applicable (the vendor is the agent) | Not applicable. Usage is metered while Devin acts (actions, VM time), not on acceptance | No refund or credit for failed sessions is stated | **Devin reports done itself**: it opens a PR, runs its own end-to-end test and sends a video recording as proof. **The buyer** watches the video and merges | Devin account (plus a GitHub or repo connection) | Included in a $0-$20/mo plan quota, or on-demand credits. **The buyer pays whether or not the work is good** |
+| **OpenAI Codex** | ChatGPT plan: Free, Go $8/mo, Plus $20/mo, Pro $100-$500/mo, Business $20/user/mo, Enterprise custom. Or credits: a typical task uses about 5-30 credits, depending on the model. Or an API key billed per token | Not applicable | Not applicable. Billed by usage | Refunds not stated in the Codex docs | **The buyer** looks over the diffs and check results Codex shows, asks for changes, then commits or opens a PR. Codex does not sign off its own work | ChatGPT account (sign-in required) plus GitHub repo connection for cloud | Part of a $20/mo Plus plan, or 5-30 credits a task. **Paid whether or not the result is accepted** |
+
+Where Knos does not win yet: ERC-8183 and Virtuals ACP also pay at the verdict and refund at expiry, and their optional fees can be lower than 5%. On devnet today the Knos job account's rent is not returned, and 0.3.5's escrow (rent returned on every settle, the buyer can't reject a verified job, worker stake) is listed under "Next" in the CHANGELOG.
+
+### Sources
+
+All read on 2026-10-01.
+
+**Upwork** (WebFetch returned 403, so these were read with a plain HTTP GET)
+- https://support.upwork.com/hc/en-us/articles/4660220468499 : Basic-plan clients pay a Client Marketplace Fee of up to 7.99% on all payments, or 3% with an eligible US bank account. The fee is not refundable.
+- https://support.upwork.com/hc/en-us/articles/26106318334611 : One-time Contract Initiation Fee of $0.99-$14.99 per contract, charged when a fixed-price contract or milestone is funded. It is not refunded after a payment, even after a won dispute.
+- https://support.upwork.com/hc/en-us/articles/360000990428 : Funds are held until submission. The client has 14 days to approve or request changes; with no response, funds go to the freelancer automatically. Refunds go back to the billing method.
+- https://support.upwork.com/hc/en-us/articles/211062538 (redirects to the freelancer fee article) : Freelancer Service Fee is 0-15% per contract and fixed once the contract starts. The fee is returned if the client gets a refund.
+- https://support.upwork.com/hc/en-us/articles/211063748 (freelancer Fixed-Price Protection) : Pre-funded "project funds", formerly called escrow. Disputes are possible on unreleased funds or refund requests. Unfunded milestones are not protected.
+
+**Fiverr** (fiverr.com ToS returned 403; the help center was read with a plain HTTP GET)
+- https://help.fiverr.com/hc/en-us/articles/360050216133 : Buyer service fee of 5.5% plus $3.50 for orders under $200. Each payment (extras, tips) has its own fee.
+- https://help.fiverr.com/hc/en-us/articles/360010558038 (How Fiverr works for clients) : States 5.5% plus $3.00 for orders under $100, which conflicts with the article above.
+- https://help.fiverr.com/hc/en-us/articles/360010639617 (freelancer order process) : An order auto-completes if the client takes no action within 3 days of delivery (14 days for shipped gigs). Revenue becomes available 14 days after completion (7 days for Seller Plus, TRS and Pro).
+- https://help.fiverr.com/hc/en-us/articles/37332601153169 : A canceled order becomes Fiverr balance (store credit). Refunds to the payment provider are not automatic, and most card or PayPal refunds complete within 10 days.
+- Seller 80% share: from a search-result snippet of help.fiverr.com (How Fiverr works for freelancers). **Not checked in the page text** - re-check before quoting.
+
+**Gitcoin**
+- https://gitcoin.co/ : Current offering is Gitcoin Grants 24 (GG24), Protocol Guild, and the Allo Protocol, with QF, retro, direct and streaming mechanisms. Passport is used for sybil resistance. No bounties product is listed.
+- https://support.gitcoin.co/gitcoin-knowledge-base/gitcoin-grants/what-is-a-grant : Quadratic funding, where the number of contributors outweighs the amount. Two-week rounds each quarter. **This page is out of date (cites GR15).**
+
+**Virtuals ACP**
+- https://whitepaper.virtuals.io/acp/acp-changelogs.md : v2.0 (April 2026) implements ERC-8183 and moves from memos to hooks. Buyer and seller are renamed client and provider; the evaluator role is unchanged. USDC escrow is funded with `acp client fund`. Expired jobs are refunded within 5 minutes. Percentage-based fees since Nov 2025. Privy non-custodial wallets; multi-chain EVM.
+- https://whitepaper.virtuals.io/about-virtuals/commerce-layer/technical-deep-dive.md : Four phases: Request, Negotiation (signed Proof of Agreement), Transaction (escrow) and Evaluation. Evaluators are agents that judge deliverables against terms. No fee numbers are given.
+- https://whitepaper.virtuals.io/about-virtuals/agent-commerce-protocol-acp returned 404, and the commerce-layer query endpoint timed out. **The ACP protocol fee percentage is not confirmed.**
+
+**ERC-8183**
+- https://eips.ethereum.org/EIPS/eip-8183 : "ERC-8183: Agentic Commerce", Draft. Roles, states, functions, optional fees and hooks, and the non-hookable `claimRefund`. See the mapping notes below.
+
+**Devin**
+- https://devin.ai/pricing : Free $0, Pro $20/mo, Max $200/mo, Teams $80/mo + $40/user, Enterprise custom. Overage is billed at API rates.
+- https://docs.devin.ai/admin/billing/usage.md : Consumption = actions + VM time + bandwidth. Nothing accrues while waiting for the user or tests. Self-serve users draw on prepaid on-demand credits. No refund for failed work is stated.
+- https://docs.devin.ai/work-with-devin/testing-and-recordings.md : After opening a PR, Devin tests end to end and sends an annotated video as proof. The user watches it and merges.
+
+**OpenAI Codex**
+- https://learn.chatgpt.com/docs/pricing (redirected from developers.openai.com/codex/pricing) : Plan tiers and prices. A typical task uses 5-30 credits. API-key use is pay-as-you-go. No refund policy is stated.
+- https://learn.chatgpt.com/docs/cloud (redirected from developers.openai.com/codex/cloud) : Sign in with a ChatGPT account and connect GitHub. Results are shown as changed files and check results. The user asks for follow-ups, then commits or opens a PR.
+
 ## Hiring work: Knos jobs against marketplaces and AI builders (all read 1 Oct 2026)
 
 | | who holds the money | when the worker is paid | if the result is bad | fees |
