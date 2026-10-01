@@ -1,0 +1,8 @@
+# What a pull request to Knos must pass before GitHub may sign a proof for it (prove.yml reads this from the base).
+[[check]]
+name = "manifests parse"
+run = "python -c \"import json; [json.load(open(p)) for p in ('server.json', 'docs/bench.json', 'programs/knos_escrow/idl.json')]\""
+
+[[check]]
+name = "benchmark docs match their source"
+run = "python scripts/bench_docs.py --check"
