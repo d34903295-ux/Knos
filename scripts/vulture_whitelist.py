@@ -35,3 +35,7 @@ _.fee_for, _.set_paused, _.failures, _._mem
 
 # 0.3.5: `knos verify` is registered by its typer decorator; a verdict's `settled` is what the CLI prints.
 _.verify_cmd, _.settled
+
+# 0.3.6 escrow: the stake rule and a settled job's state are read by the tests and by clients; the LiteSVM harness's
+# token-account helper is used by the escrow tests.
+_.stake_for, _.is_closed, _._tok
