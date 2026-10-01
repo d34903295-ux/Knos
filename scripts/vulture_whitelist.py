@@ -39,3 +39,9 @@ _.verify_cmd, _.settled
 # 0.3.6 escrow: the stake rule and a settled job's state are read by the tests and by clients; the LiteSVM harness's
 # token-account helper is used by the escrow tests.
 _.stake_for, _.is_closed, _._tok
+
+# 0.3.7: the bounty, faucet and multi-mint builders and the GitHub proof constants are used by the escrow tests, the
+# web wallet's twin in JS, scripts/register_github_keys.py and clients; the LiteSVM harness records CU and logs for
+# the tests that print them.
+_.bounty_brief, _.post_bounty, _.faucet, _.init_faucet_mint, _.add_mint, _.GH_BUF_LEN, _.GH_ISSUER
+_.GH_WORKFLOW_PREFIX, _.gh_audience, _.last_cu, _.last_logs
