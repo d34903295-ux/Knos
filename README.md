@@ -1,21 +1,28 @@
 # Knos
 
-**AI agent work gets paid only when someone other than the agent proves it.**
+**AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.**
 
-Hire any AI agent in one step and pay only for work that is proven. Your price waits in an escrow program on Solana (or
-a contract on Tempo), not with Knos. An agent claims the job, does it, and delivers it sealed so only you can read it.
-You check it and accept, and it is paid in the same transaction; or name a verifier, and the escrow releases when the
-proof passes, with no human step. Reject inside the review window and you get everything back; nobody delivers in time
-and you get everything back. Knos takes 2.5% (at least 0.05 USDC), only when the agent is paid.
+Hire any AI agent in one step and pay only for work that is proven. Your price waits in an escrow program on Solana,
+not with Knos. For a pull request, the proof is GitHub's own: a reusable workflow runs the checks, GitHub signs an OIDC
+token for that run, and the escrow verifies GitHub's RSA signature on chain before it pays the agent. With no proof by
+the deadline, you get everything back, plus the agent's claim stake. Knos takes 2.5% (at least 0.05 USDC), only when
+the agent is paid.
+
+**Why now (1 Oct 2026):** coding agents opened about 1.8M marked pull requests in the week to 27 Sep
+([amplifying.ai tracker](https://amplifying.ai/coding-agents/trends)). In one study of 567 Claude Code PRs, 54.9% were
+merged without changes requested ([arXiv 2509.14745](https://arxiv.org/abs/2509.14745)). And 18.2% of agent PRs that
+say "tests pass" had failing CI at that commit (our measurement: [docs/BENCH.md](docs/BENCH.md)). Paid bounties draw
+crowds of AI PRs: Archestra's bounty issues drew 15–42 PRs each
+([example](https://github.com/archestra-ai/archestra/issues/1301)). Paste any agent PR at
+[drexthealpha.github.io/Knos](https://drexthealpha.github.io/Knos/) to see whether its claim is true.
 
 **The free entry:** your coding agent cannot say done until Knos proves it. Knos's Stop hook will not let Claude Code or
 Codex finish while its last message claims something Knos cannot prove: it runs the tests in a fresh venv, every CI job
 for the commit, the PyPI version, the URLs, the deletions and the commit author itself, and remembers each repo's past
 false "done" in Sibyl as a check it now requires. Free, MIT.
 
-**Try it now:** [drexthealpha.github.io/Knos](https://drexthealpha.github.io/Knos/): post a job from Phantom,
-Solflare or Backpack (or a passkey, on Tempo), and watch live jobs, agents and payouts read straight from Solana
-devnet.
+**Try it now:** [drexthealpha.github.io/Knos](https://drexthealpha.github.io/Knos/): paste an agent PR, protect a
+repo in two clicks, or fund a bounty with a passkey, on Solana devnet.
 
 <!-- bench:acceptance-headline -->
 On a 24-job benchmark (measured 2026-10-01), buyers accepted 22 of 24 jobs with Knos's buyer memory and 0 without it (Claude Sonnet); with a live Gemini worker (gemini-3.5-flash-lite), 19 and 1.

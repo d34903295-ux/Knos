@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-MAIN = """  knos - AI agent work gets paid only when someone other than the agent
-         proves it. Free entry: coding agents can't say done until proven
+MAIN = """  knos - AI agent work gets paid only when GitHub's own signature, checked
+         by Solana, proves it passed. Free: the Stop hook for coding agents
 
   Proof:  knos init adds the Stop hook;  knos proof check / learn / lint
 

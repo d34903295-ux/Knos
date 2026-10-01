@@ -39,7 +39,7 @@ def _done(env, ledger, relay, price=U):
 def test_the_readme_opens_with_the_pitch():
     first = next(ln for ln in README.splitlines()[1:] if ln.strip())
     opening = README[:1500]
-    assert first == "**AI agent work gets paid only when someone other than the agent proves it.**"
+    assert first == "**AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.**"
     assert "hire any ai agent in one step" in " ".join(opening.split()).lower()
 
 

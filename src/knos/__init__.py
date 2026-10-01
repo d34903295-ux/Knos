@@ -1,4 +1,4 @@
-"""knos - AI agent work gets paid only when someone other than the agent proves it."""
+"""knos - AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed."""
 
 from importlib.metadata import PackageNotFoundError, version as _installed
 
