@@ -1,14 +1,14 @@
 {
- "updated": "2026-09-30 10:25 UTC",
+ "updated": "2026-10-01 12:22 UTC",
  "clusters": [
   {
    "cluster": "devnet",
-   "teams": 0,
-   "claims_live": 0,
+   "teams": 2,
+   "claims_live": 2,
    "renewals_live": 0,
-   "members": 0,
+   "members": 4,
    "records": 0,
-   "closes_recent": 0,
+   "closes_recent": 2,
    "rejected_lookalikes": 0,
    "error": ""
   },
@@ -27,10 +27,7 @@
  "github": {
   "stars": 1,
   "forks": 1,
-  "open_issues": 0,
+  "open_issues": 10,
   "contributors": 1
- },
- "licences": {
-  "mainnet_licence_payments": 0
  }
 }

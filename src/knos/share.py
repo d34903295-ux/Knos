@@ -71,10 +71,9 @@ def _safe(repo: Path, text: str, about: str) -> bool:
 def _one_line(note: str) -> str:
     """The readable part of a note, for a file other people commit.
 
-    A decision is a sentence. What an agent pays for is a whole API response,
-    and `remember` keeps it in full because that is what was bought. Putting
-    all of it in the shared file turns a repo's decision record into a data
-    dump, so this takes the first paragraph and caps it. The store still has
+    A decision is a sentence, but a note can be long. Putting all of it in the
+    shared file turns a repo's decision record into a data dump, so this takes
+    the first paragraph and caps it. The store still has
     the whole thing; `knos ask` still answers from it.
     """
     first = note.strip().split("\n\n", 1)[0].strip()
@@ -197,8 +196,8 @@ def _clean(text: str) -> str:
 def read_decisions(text: str) -> list[tuple[str, str, str]]:
     """Parse the decisions back out of an exported file, as (about, note, when).
 
-    The mirror of `export`. Tolerant in the same way `read_claims` is: a line
-    that does not parse is skipped rather than throwing, because a restore
+    The mirror of `export`. Tolerant: a line that does not parse is skipped
+    rather than throwing, because a restore
     that recovers nine of ten decisions is worth far more than one that
     refuses because of a stray character in the tenth.
     """

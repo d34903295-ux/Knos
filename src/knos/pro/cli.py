@@ -300,7 +300,7 @@ def register(app: typer.Typer, out, Stop) -> None:
         if got.status >= 400:
             raise typer.Exit(1)
 
-    pro = typer.Typer(help="Knos Pro: status, buying with USDC on Solana, activating a code.")
+    pro = typer.Typer(help="Knos Pro (Sibyl Pro included): status, buying with USDC on Solana or Tempo, activating a code.")
     app.add_typer(pro, name="pro")
 
     @pro.callback(invoke_without_command=True)
@@ -468,7 +468,7 @@ def register(app: typer.Typer, out, Stop) -> None:
             raise Stop("That is not a Knos licence code.", "Paste the whole code, or buy:  knos pro buy") from None
         if not licence.verify_signed(body):
             raise Stop("That code's signature does not verify.",
-                       "Check it was pasted whole. Needs: pipx inject knos cryptography")
+                       "Check it was pasted whole.")
         if not licence.valid(body):
             raise Stop("That licence has expired.", "knos pro buy")
         licence.write(body)

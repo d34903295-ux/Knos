@@ -90,7 +90,7 @@ Limits, said plainly: the advisory arm simulates a check-then-write lease; the h
 | Tempo escrow on a local anvil | `knos bench jobs --tempo` | 20 | — | — | code speed, no network |
 | Solana devnet, `finalized` | `KNOS_COMMITMENT=finalized knos bench jobs --live` | 5 | 2.2 s | 2.6 s | testnet, wall clock from Lagos |
 | Solana devnet, `confirmed` | `KNOS_COMMITMENT=confirmed knos bench jobs --live` | 5 | 2.6 s | 3.0 s | testnet, wall clock from Lagos |
-| Tempo Moderato | `v03` deploy script (5 jobs, 0.01 pathUSD each) | 5 | 5.5 s | 2.6 s | testnet, wall clock from Lagos |
+| Tempo Moderato | a recorded run (deploy, then 5 jobs at 0.01 pathUSD) | 5 | 5.5 s | 2.6 s | testnet, wall clock from Lagos |
 
 Measured 1 Oct 2026. The live rows include every RPC round trip the client makes, from a home connection in Lagos.
 
@@ -123,3 +123,18 @@ Lighthouse 12.8.2, headless Chrome, `web/` served as static files (as on GitHub 
 accessibility 100, best practices 100, SEO 100 on both the mobile and desktop presets (mobile first contentful paint
 1.1 s). Wallet and crypto libraries load only when used. Served instead through the Python dev server (`knos jobs
 serve`) on the same loaded machine, mobile performance was 55, all of it the server's 9.3 s time to first byte.
+
+## Acceptance with a live model (0.3.3)
+
+The same 24 jobs, buyers, histories and grader, with the reference worker's prompt (`Worker.prompt`) answered live by
+Gemini through its native API on 1 Oct 2026. One attempt per job, temperature 0.2.
+
+| worker model | buyer memory | preferences recalled | task correct | accepted |
+|---|---|---|---|---|
+| **gemini-3.5-flash-lite** (all 48 answers; gemini-3.8-flash was out of free-tier quota) | captured when said (Sibyl) | 72/72 | 19/24 | **19/24** |
+| **gemini-3.5-flash-lite** | none | 0 | 16/24 | **1/24** |
+| Claude Sonnet (0.3.1) | captured when said | 72/72 | 22/24 | 22/24 |
+| Claude Sonnet (0.3.1) | none | 0 | 23/24 | 0/24 |
+
+With memory every rejection was a task error (dates read month-first, "twenty percent" for "20%", two wrong JSON
+keys or values); no buyer preference was broken. Without memory 23 of 24 broke a preference the buyer had stated once.

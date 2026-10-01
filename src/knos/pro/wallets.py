@@ -174,15 +174,15 @@ def _sweep_solana(agent: str, network: str, to: str, amount: float) -> str:
         from solders.message import MessageV0
         from solders.pubkey import Pubkey
         from solders.transaction import VersionedTransaction
-        from x402.mechanisms.svm.utils import derive_ata
     except ImportError as why:
-        raise NeedsExtra("Sweeping a Solana wallet needs:  pipx inject knos 'knos[agentpay]'") from why
+        raise NeedsExtra("Sweeping a Solana wallet needs solders:  pip install -U knos") from why
+    from . import sol_budget as sb
     token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"  # USDC is a classic SPL token
     kp = solana_keypair(agent)
     owner = kp.pubkey()
     mint = Pubkey.from_string(solana.USDC[network])
-    src = Pubkey.from_string(derive_ata(str(owner), str(mint), token_program))
-    dst = Pubkey.from_string(derive_ata(to, str(mint), token_program))
+    src = sb.ata(owner, mint)
+    dst = sb.ata(Pubkey.from_string(to), mint)
     ata_program = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
     system = Pubkey.from_string("11111111111111111111111111111111")
     tok = Pubkey.from_string(token_program)
@@ -206,11 +206,8 @@ def _sweep_solana(agent: str, network: str, to: str, amount: float) -> str:
 
 
 def solana_keypair(agent: str):
-    """The agent's key as a solders Keypair, for signing inside the x402 client. Never logged."""
-    try:
-        from solders.keypair import Keypair
-    except ImportError as why:
-        raise NeedsExtra("Solana agent payments need the extra:  pipx inject knos 'knos[agentpay]'") from why
+    """The agent's key as a solders Keypair, for signing x402 payments and sweeps. Never logged."""
+    from solders.keypair import Keypair
     return Keypair.from_bytes(bytes(_secret(agent, "solana")["keypair"]))
 
 

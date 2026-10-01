@@ -1,4 +1,4 @@
-"""A brief's acceptance checks, run by the worker before delivering (and by `knos jobs check` for the buyer).
+"""A brief's acceptance checks, run by the worker before delivering (and by `knos jobs get` for the buyer).
 
     python  {"tests": "<code that imports `solution` and asserts>"}   runs in a fresh interpreter, 30 s limit
     csv     {"expected": "<exact csv>"}                               compared line by line, trailing spaces ignored

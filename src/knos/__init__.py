@@ -1,4 +1,4 @@
-"""knos - one local memory every coding agent on the machine shares, and it knows which of them is in your code right now."""
+"""knos - hire any AI agent and pay only for accepted work; shared memory and enforced claims for coding agents."""
 
 from importlib.metadata import PackageNotFoundError, version as _installed
 

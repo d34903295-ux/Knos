@@ -69,7 +69,7 @@ def test_a_fresh_machine_gets_the_decisions_back(knos_home, repo) -> None:
 def test_claims_are_not_restored(knos_home, repo) -> None:
     """A hold rebuilt on another machine would be a lie about a live collision.
 
-    The file carries one, because CI needs to read it. Restoring it into a
+    The file carries one, so a reader of the repo sees it. Restoring it into a
     store hours later on a different machine would have knos assert that
     somebody is mid-change when nobody is, which is the one thing it must
     never say.

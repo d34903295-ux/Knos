@@ -52,6 +52,7 @@ skips every git hook, and nothing records that it was used.
 
 ## Sibyl credentials
 
-Read only from your own `~/.sibyl-memory/credentials.json`, sent only to `api.sibyllabs.org`, used only after you
-consent at purchase time, and never printed (at most a short prefix). Knos never reads, writes or pays for any Sibyl
-account but yours, and never routes around Sibyl's tier gate or its free-tier cap.
+Read only from your own `~/.sibyl-memory/credentials.json` and handed only to Sibyl's own cap gate when a store
+opens; never printed, never sent anywhere by Knos. Knos never routes around Sibyl's tier gate or its free-tier cap.
+Sibyl Pro that Knos buys for a paying wallet (knos.sibyl_pro) is simulated on testnets, so Sibyl's cap still applies
+there.

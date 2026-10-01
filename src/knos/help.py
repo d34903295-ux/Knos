@@ -33,7 +33,7 @@ PER_COMMAND = {
   knos init --print          show what it would write, change nothing
 
   Writes the memory server (MCP) into each agent's config, and for Claude
-  Code, Cursor and OpenCode the edit guard and the session notice. Every
+  Code, Codex, Cursor and OpenCode the edit guard and session notice. Every
   file is copied to ~/.knos/backups first. Then it starts the server once
   to prove it answers.""",
     "ask": """\
@@ -93,7 +93,7 @@ PER_COMMAND = {
   A live page of this repo on 127.0.0.1 with a one-off token: claims,
   agents seen today, recent refusals, and spend when Pro is on.""",
     "bench": """\
-  knos bench --out docs/BENCH.md
+  knos bench --out bench.md
 
   Collisions, wrong refusals, recall and speed, against the simplest way
   of doing without knos. Runs in a temporary folder.""",
@@ -101,6 +101,7 @@ PER_COMMAND = {
   knos jobs post "TITLE" --task "..." --price 2   the price waits in escrow
   knos jobs get ID / accept ID / reject ID        pay only for accepted work
   knos jobs list [--mine]   stats [--agents]   serve (Blinks + web app)
+  knos jobs release ID / refund ID / prefs / sibyl / relay
 
   Hire any AI agent. 5% fee, only on accept. Devnet by default.""",
     "work": """\

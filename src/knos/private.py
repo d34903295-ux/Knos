@@ -47,10 +47,6 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
 OWNER = "owner"
 AGENT = "agent"
 
-# An agent working for someone else. It sees only the paths that person was
-# actually shared, which is the opposite default from your own agent: yours
-# starts with everything except secrets, theirs starts with nothing.
-GUEST = "guest"
 
 
 def _rules_file(repo: Path) -> Path:
@@ -200,25 +196,17 @@ def visible(
     repo: Path,
     records: list[dict],
     identity: str,
-    allowed: list[str] | None = None,
 ) -> list[dict]:
     """Drop what this identity may not see.
 
     The drop is total and silent: the caller is given no count and no
     placeholder, because either would confirm the content exists.
-
-    `allowed` is the list of folders a guest was shared. It is ignored for
-    anyone else, and an empty list means a guest sees nothing at all.
     """
     if identity == OWNER:
         return records
     # A path rule cannot see a secret that lives in words: a key pasted into a chat turns up in a session fact
     # or a commit message with no private path at all. Such a record is dropped for agents the same silent way.
-    kept = [r for r in records if not is_private(repo, r.get("path") or "") and not _quotes_a_secret(r)]
-    if identity != GUEST:
-        return kept
-    folders = [_rel(f) for f in (allowed or [])]
-    return [r for r in kept if _under_any(str(r.get("path") or ""), folders)]
+    return [r for r in records if not is_private(repo, r.get("path") or "") and not _quotes_a_secret(r)]
 
 
 _SECRET_TEXT: Any = None
@@ -245,20 +233,3 @@ SECRET_PATTERNS = (
     ('google-api-key', r'\bAIza[0-9A-Za-z_\-]{35}\b'),
 )
 
-
-def _rel(path: str) -> str:
-    """A repo-relative posix path: separators unified, a leading ``./`` removed (a prefix, not the characters,
-    so ``.github`` stays ``.github``), trailing slash dropped."""
-    out = path.replace("\\", "/")
-    while out.startswith("./"):
-        out = out[2:]
-    return out.rstrip("/")
-
-
-def _under_any(path: str, folders: list[str]) -> bool:
-    if not path or not folders:
-        return False
-    path = _rel(path)
-    if ".." in path.split("/"):
-        return False                     # a path that climbs out of a shared folder is never inside it
-    return any(f and (path == f or path.startswith(f + "/")) for f in folders)

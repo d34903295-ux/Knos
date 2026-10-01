@@ -1,4 +1,4 @@
-"""Knos does not talk to anything.
+"""Knos's coding-agent memory does not talk to anything (jobs and teams use their chain's RPC; this is the rest).
 
 Every other memory tool on the comparison list either binds ports, downloads
 a model, or wants an API key. Saying "local-first" is cheap; this asserts it

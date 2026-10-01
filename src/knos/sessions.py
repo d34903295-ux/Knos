@@ -3,8 +3,8 @@
 The decision lives in a session that is gone when it ends. This is the
 highest-value source knos has, and the reason the product exists.
 
-Two clients are read: Claude Code (JSONL transcripts) and Cursor (a SQLite
-key-value store). Both are read-only and both are read on demand, when a
+Three clients are read: Claude Code (JSONL transcripts), Codex (rollout JSONL)
+and Cursor (a SQLite key-value store). Both are read-only and both are read on demand, when a
 person runs a command. Nothing watches, nothing polls.
 """
 
@@ -32,7 +32,7 @@ MAX_CHARS = 4000
 class Turn:
     """One thing said in one agent session."""
 
-    client: str  # "Claude Code" | "Cursor"
+    client: str  # "Claude Code" | "Codex" | "Cursor"
     session: str
     role: str  # "user" | "agent"
     text: str

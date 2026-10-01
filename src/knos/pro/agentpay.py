@@ -1,7 +1,7 @@
 # Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """An agent pays for an API over HTTP 402, from its own budget wallet, inside its Knos cap.
 
-Two protocols, both through their reference SDKs (the optional `knos[agentpay]` extra):
+Two protocols: MPP through its reference SDK (the optional `knos[agentpay]` extra), x402 built here with solders:
 
   MPP on Tempo   pympp (github.com/tempoxyz/pympp): the server answers 402 with `WWW-Authenticate: Payment ...`;
                  the client signs a TIP-20 transfer and retries with `Authorization: Payment ...`.

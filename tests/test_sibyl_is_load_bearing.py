@@ -28,7 +28,7 @@ from knos import answer, paths, private, refresh
 from knos.claims import Claims
 from knos.cli import main
 from knos.identity import Agent
-from knos.memory import INTERNAL, TOPIC, Fact, Memory, StoreGone
+from knos.memory import TOPIC, Fact, Memory, StoreGone
 
 CLAUDE = Agent(host="claude", session="aaaa1111bbbb")
 CURSOR = Agent(host="cursor", session="cccc2222dddd")
@@ -139,19 +139,6 @@ def test_the_claims_tier_says_nothing_is_claimed_when_nothing_is(knos_home, repo
     with Memory(repo) as mem:
         named = {name: what for name, what, _ in mem.tiers()}
     assert named["claims"] == "nothing claimed"
-
-
-def test_what_the_work_is_about_is_overwritten_not_accumulated(knos_home, repo):
-    """Focus is about now. It does not accumulate, unlike the journal."""
-    with Memory(repo) as mem:
-        before = len(mem.journal())
-        mem.set_focus({"topic": "redis"})
-        mem.set_focus({"topic": "auth"})
-        focus = json.dumps(mem.client.get_state(INTERNAL + "focus"), default=str)
-        assert len(mem.journal()) == before
-
-    assert "auth" in focus
-    assert "redis" not in focus
 
 
 def test_one_agent_claiming_changes_what_another_agent_is_told(knos_home, repo):

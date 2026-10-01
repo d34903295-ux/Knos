@@ -19,7 +19,7 @@ from . import version
 from .memory import TOPIC, Fact, Memory, StoreGone
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False,
-                  help="one local memory every coding agent here shares, and it knows who is in your code now")
+                  help="hire any AI agent and pay only for work you accept; memory and claims for coding agents")
 
 # Answers quote other people's writing, which on Windows routinely contains characters the console's code page cannot
 # encode. Ask for UTF-8 and replace what will not fit rather than fail on an em dash.
@@ -130,7 +130,7 @@ def init(
         cmd = setup.server_command()
         out.print("Would add this MCP server to: " + (", ".join(setup.NAMES[h] for h in chosen) or "(no agents found)"))
         _quote(f'  "knos": {{"command": "{cmd[0]}", "args": {cmd[1:]}}}')
-        out.print("and the edit guard + session notice hooks for Claude Code, Cursor and OpenCode.")
+        out.print("and the edit guard + session notice hooks for Claude Code, Codex, Cursor and OpenCode.")
         return
 
     if undo:
@@ -146,7 +146,7 @@ def init(
         return
 
     if not chosen:
-        raise Stop("No coding agent found on this machine (Claude Code, Claude Desktop, Cursor, OpenCode).",
+        raise Stop("No coding agent found on this machine (Claude Code, Codex, Claude Desktop, Cursor, OpenCode).",
                    "Install one, or name it:  knos init --hosts claude")
     here = paths.repo_here()
     if read and here is not None:
@@ -185,7 +185,7 @@ def init(
             for p in problems:
                 out.print(f"[red]self-test: {p}[/red]")
             raise typer.Exit(1)
-        out.print("[green]Self-test passed:[/green] the memory server answered with its four tools and the guard "
+        out.print("[green]Self-test passed:[/green] the memory server answered with its tools and the guard "
                   "allowed an empty edit.")
     for line in rep.restart:
         out.print(f"  Restart {line}")
@@ -404,12 +404,40 @@ def claim(
         raise Stop(f"Not claimed: {', '.join(conflict.globs)} is held by {conflict.label} since "
                    f"{_since(conflict.taken_at)} ({conflict.description}).",
                    "Ask them, or take other work. A person can release it:  knos done --all")
+    if mine is not None and not mine.advisory:
+        held = _team_claim(repo, mine.globs, me)
+        if held:
+            with Claims(repo) as c:
+                c.release(me, mine.id)
+            raise Stop(f"Not claimed: {', '.join(mine.globs)} is held on another machine by {held}.",
+                       "Ask them, or take other work.")
     if mine is None or mine.advisory:
         out.print(f"Claimed \"{what}\" as advisory: no file named in it resolved, so other agents are told but "
                   "nothing is blocked. Name files:  knos claim \"...\" -p src/parser/**")
     else:
         out.print(f"Claimed {', '.join(mine.globs)} for {mine.holds_min} min. Other agents' edits to it are refused.")
     out.print("Give it back:  knos done")
+
+
+def _session_of(agent) -> str:
+    return agent.session or (f"pid{agent.anchor}" if agent.anchor else "")
+
+
+def _team_claim(repo: Path, globs: list[str], agent) -> str | None:
+    """In a team (.knos/team.json), the same claim on Solana: who holds it when another machine's agent won."""
+    try:
+        from .team import live
+    except ImportError:
+        return None
+    return live.explicit(repo, globs, agent.host, _session_of(agent))
+
+
+def _team_release(repo: Path, agent) -> None:
+    try:
+        from .team import live
+    except ImportError:
+        return
+    live.explicit_release(repo, agent.host, _session_of(agent))
 
 
 @app.command()
@@ -438,6 +466,8 @@ def done(
             gone = c.release(me, what, everyone=True)
         else:
             gone = c.release(me, what)
+    if gone:
+        _team_release(repo, me)
     if not gone:
         out.print("You hold no claims here." if not what else f"You hold no claim on {what} here.")
         out.print("[dim]This releases only your own. Every agent's:  knos done --all[/dim]")
@@ -728,7 +758,7 @@ def bench(
 
 @app.command("mcp", hidden=True)
 def mcp_cmd() -> None:
-    """The memory MCP server over stdio."""
+    """The Knos MCP server over stdio (memory, claims, jobs, pay)."""
     from . import mcp
 
     mcp.main()

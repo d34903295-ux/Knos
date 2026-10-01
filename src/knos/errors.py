@@ -6,7 +6,7 @@ with the command that fixes it. No stack traces, no exception names, no
 
 A private path never appears here. Not as a skip, not as a count, not as a
 reason a number is lower than expected: a message that says a secret was
-skipped has leaked the secret's existence, which is the one thing 1.6
+skipped has leaked the secret's existence, which is the one thing knos
 promises will not happen.
 """
 
@@ -89,11 +89,3 @@ def report_skipped(skipped: list[Skipped]) -> str:
     lines.append("  Everything else was read.")
     return "\n".join(lines)
 
-
-def stale(path: str) -> str:
-    """A file that was read and has since gone.
-
-    Said out loud rather than quietly dropped, because an answer that cites
-    a file nobody can open is worse than one that admits the file moved.
-    """
-    return f"{path} is gone since knos read it"

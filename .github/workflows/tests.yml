@@ -68,7 +68,7 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - run: bash scripts/devchain.sh start
-      - run: pytest -q tests/test_sas.py tests/test_team_protocol.py tests/test_team_two_homes.py tests/test_team_records.py tests/test_chain_budgets.py tests/test_bench_chain.py tests/test_network_stats.py tests/test_team_property.py
+      - run: pytest -q -m "" tests/test_sas.py tests/test_team_protocol.py tests/test_team_two_homes.py tests/test_team_records.py tests/test_chain_budgets.py tests/test_bench_chain.py tests/test_network_stats.py tests/test_team_property.py
         env:
           KNOSTEST_PROPERTY_N: "200"
       - uses: actions/setup-node@v4

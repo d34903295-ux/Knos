@@ -1,6 +1,6 @@
 """Names vulture cannot see being used, each with the reason it exists. CI runs:
 
-    vulture src/knos scripts/vulture_whitelist.py --min-confidence 60
+    vulture src/knos scripts --min-confidence 60
 
 Everything else vulture would report is deleted, not listed here.
 """

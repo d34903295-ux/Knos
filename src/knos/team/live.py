@@ -6,7 +6,7 @@ check reads that table. Only when the mirror is older than 5 seconds does it mak
 budget; if that fails too, the edit goes ahead in local-only mode with a one-line warning. An RPC outage never
 blocks work.
 
-The rules (section 6 of the design):
+The rules:
   - an edit to unit U is allowed if this agent holds a confirmed winning claim covering U;
   - otherwise it is refused if any live claim of another holder overlaps U, winner or pending;
   - otherwise the guard places a claim and waits up to 5 s for the verdict: won -> allowed, lost -> refused,
@@ -414,8 +414,8 @@ def _event(rt: Runtime, kind: str, detail: dict) -> None:
 
 def claim_units(rt: Runtime, globs: list[str], host: str, session: str,
                 verdict_s: float = VERDICT_S) -> list[tuple[str, protocol.Verdict]]:
-    """An explicit claim (`knos claim`, the MCP `remember(claiming=true)`): one chain claim per glob, directory
-    globs as directory units."""
+    """An explicit claim (`knos claim`, the MCP `remember(claiming=true)` through `explicit`, and the SDK): one chain
+    claim per glob, directory globs as directory units."""
     out = []
     holder = rt.holder(host, session)
     for g in globs:
@@ -460,9 +460,6 @@ def release_all(rt: Runtime, host: str, session: str) -> int:
         _event(rt, "release", {"claim": address, "holder": holder.hash(rt.salt).hex()})
     return n
 
-
-if __name__ == "__main__":  # the background mirror: python -m knos.team.live <repo>
-    raise SystemExit(run_mirror(Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()))
 
 
 def events(rt: Runtime, since: float = 0.0) -> list[dict]:
@@ -519,3 +516,37 @@ def write_records(rt: Runtime, now: float | None = None) -> list[str]:
         if sig:
             done.append(sig)
     return done
+
+
+def explicit(repo: Path, globs: list[str], host: str, session: str) -> str | None:
+    """`knos claim` and the MCP `remember(claiming=true)` in a team: claim the same globs on chain. Returns who holds
+    them when another machine's agent won, else None (won, or no team, or the chain unreachable: local only)."""
+    if not (Path(repo) / ".knos" / "team.json").exists() or not globs:
+        return None
+    try:
+        rt = runtime(Path(repo))
+        if rt is None:
+            return None
+        for _, v in claim_units(rt, globs, host, session):
+            if v.outcome == "lost" and v.lost_to is not None:
+                release_all(rt, host, session)
+                return who(rt, str(v.lost_to.signer), v.lost_to.data.holder)
+    except Exception:  # noqa: BLE001 - unreachable chain: the claim stays local, as the guard fails open
+        return None
+    return None
+
+
+def explicit_release(repo: Path, host: str, session: str) -> None:
+    """`knos done` and the MCP `done` in a team: give this agent's chain claims back too (else they lapse)."""
+    if not (Path(repo) / ".knos" / "team.json").exists():
+        return
+    try:
+        rt = runtime(Path(repo))
+        if rt is not None:
+            release_all(rt, host, session)
+    except Exception:  # noqa: BLE001 - it lapses at its lease
+        pass
+
+
+if __name__ == "__main__":  # the background mirror: python -m knos.team.live <repo>
+    raise SystemExit(run_mirror(Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()))

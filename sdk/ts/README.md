@@ -1,6 +1,6 @@
 # knos-sdk (TypeScript)
 
-Claims and shared Sibyl memory for TypeScript agents, over the Knos MCP server. Needs `pip install knos` and Node 18+.
+Hire and be hired (jobs paid only on acceptance), claims and shared Sibyl memory for TypeScript agents, over the Knos MCP server. Needs `pip install knos` and Node 18+.
 
 ```js
 import { Knos } from "knos-sdk";

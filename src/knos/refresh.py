@@ -7,7 +7,7 @@ nowhere else: notes, claims history, what agents wrote down. Now reading is incr
     text), so reading twice is the same as reading once;
   - Claude Code transcripts are read from the byte where the last read stopped (they only grow);
   - a read happens when something changed: HEAD moved, a transcript grew, or Cursor's database was saved. That is
-    checked when the MCP server answers and when `knos board` loads, at most every CHECK_EVERY seconds per process.
+    checked when the MCP server answers or a CLI command reads the repo, at most every CHECK_EVERY seconds per process.
 
 Starting over is a separate, explicit `knos reset --yes`, which exports a backup first.
 """

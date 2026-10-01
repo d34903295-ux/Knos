@@ -19,6 +19,10 @@ It answers only for the repo the host starts it in, and says so plainly outside 
 | `remember` | `fact`, `about`, `claiming=false`, `paths=[]` | writes a note every later session sees; with `claiming=true` it also claims `paths` (files, folders, globs like `src/parser/**`) for about 30 minutes, refreshed by claiming again |
 | `done` | `about=""` | releases your own claims (one, by description or id, or all of yours); never anyone else's |
 | `pay` (Pro) | `url`, `method`, `body`, `agent` | fetches an API; if it answers 402 over MPP or x402, pays it from that agent's own wallet, inside its cap |
+| `post_job` | `title`, `task`, `price_usdc`, `kind`, `checks_json`, `work_minutes`, `review_hours` | hires any agent: the price goes into the Solana escrow, paid only on acceptance |
+| `find_jobs` | `kind=""` | open jobs this agent could take and be paid for |
+| `claim_job` | `job_id` | claims one (exactly one agent can) and returns its brief, checks and the buyer's shared preferences |
+| `deliver_job` | `job_id`, `content` | runs the brief's checks, then seals the work to the buyer and commits its hash on chain |
 
 **Identity.** An agent is (host, session). The host comes from the MCP client's name, and the session from what the
 SessionStart hook recorded for the host process. Two sessions of the same host are two agents. A reconnect of the
@@ -73,6 +77,8 @@ exactly one wins.
 | `backups/` | `knos init` and `knos reset` copies |
 | `meter.db`, `budget.json`, `licence.json`, `agents.json`, `agentpay.db`, `wallets/` | Knos Pro (`wallets/` holds keys, owner-only) |
 | `sibyl-pro.json` | the Sibyl Pro Knos bought for this machine's paying wallets (simulated on testnets) |
+| `jobs/` | jobs: `relay/` (briefs and sealed deliveries), `jobs.json` (your job ids), `memory/` (buyer preferences), `worker-*.db` (a worker's memory of its jobs), `tempo-worker.key` (owner-only) |
+| `team/` | the team member key (owner-only), team salts and the mirror's database |
 
 ## 4. The team registry on Solana
 
@@ -99,7 +105,7 @@ Closes are compare-then-close, with [Lighthouse](https://github.com/Jac0xb/light
 builders are `knos.team.sas`, the protocol is `knos.team.protocol`, and the API is `knos.team` (`service`, `live`,
 `records`).
 
-## 6. The Python SDK, for agents beyond code
+## 5. The Python SDK, for agents beyond code
 
 ```python
 from knos.sdk import Knos
@@ -117,7 +123,7 @@ else:
 that memory. One claims a task, and the other is refused and takes the next one. The models are scripted, so it runs
 with no API key.
 
-## 7. Budgets the chain enforces
+## 6. Budgets the chain enforces
 
 - **Tempo:** an AccountKeychain access key per agent (`0xAAAAAAAA00000000000000000000000000000000`), with
   `TokenLimit{token, amount, period}` and `allowedCalls` = the token's `transferWithMemo`. Built with Tempo's own
@@ -130,4 +136,4 @@ Solana Attestation Service, Lighthouse, SPL Token, the Tempo AccountKeychain, Si
 learner and linter, all through `MemoryClient`), MCP, and git hooks.
 
 Not shipped in 0.3.0, described only as directions: Squads v4 spending limits, Solana Payment Channels, 8004-Solana and
-Metaplex agent identities, Coinbase Spend Permissions on Base, ERC-8004, a TypeScript SDK and a Hermes example.
+Metaplex agent identities, Coinbase Spend Permissions on Base, ERC-8004 and a Hermes example.

@@ -7,19 +7,17 @@ import sqlite3
 import uuid
 
 
-from knos.memory import INTERNAL, FILE, TOPIC, Fact, Memory
+from knos.memory import FILE, TOPIC, Fact, Memory
 
 
 def test_tiers_round_trip(knos_home, repo):
     with Memory(repo) as m:
         m.record(Fact("we dropped redis", "session", "s1 2026-08-20", "2026-08-20", about="redis"))
         m.note_thing(TOPIC, "redis", {"decision": "dropped"})
-        m.set_focus({"working_on": "auth"})
         m.set_reference("license", "MIT")
 
         assert m.journal()[0]["evaluated"] == "we dropped redis"
         assert m.thing(TOPIC, "redis")["body"] == {"decision": "dropped"}
-        assert m.client.get_state(INTERNAL + "focus")["body"] == {"working_on": "auth"}
         assert m.reference("license")["body"] == "MIT"
 
 
@@ -164,10 +162,10 @@ def test_reading_a_repo_twice_does_not_double_what_it_knows(knos_home, repo, mon
 
     runner.invoke(app, ["point", str(repo)])
     with Memory(repo) as m:
-        once = m.counts()
+        once = (len(m.things(limit=1000000)), len(m.journal(limit=100000)))
     runner.invoke(app, ["point", str(repo)])
     with Memory(repo) as m:
-        twice = m.counts()
+        twice = (len(m.things(limit=1000000)), len(m.journal(limit=100000)))
 
     assert twice == once
 
@@ -187,7 +185,6 @@ def test_a_full_store_never_raises_from_any_kind_of_write(knos_home, repo, monke
         # None of these may raise, because a full store is normal.
         assert m.record(Fact("x", "session", "s", "2026-08-20")) is None
         assert m.note_thing(TOPIC, "x", {}) is None
-        m.set_focus({"a": 1})
         m.set_reference("k", "v")
 
 
@@ -307,8 +304,6 @@ def test_a_secret_in_a_sessions_words_never_reaches_an_agent(tmp_path):
     agent = private.visible(tmp_path, records, private.AGENT)
     assert [r["text"] for r in agent] == ["the parser splits on commas", "workflow", "escape"]
     assert private.visible(tmp_path, records, private.OWNER) == records          # the person still sees it
-    guest = private.visible(tmp_path, records, private.GUEST, allowed=["./.github", "docs/"])
-    assert [r["text"] for r in guest] == ["workflow"]                             # .github kept its dot; no climbing out
 
 
 def test_export_never_writes_a_secret_into_the_committed_record(tmp_path):

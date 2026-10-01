@@ -3,8 +3,10 @@
 Every host ships a hook that runs before a tool call and can refuse it:
 
     Claude Code   PreToolUse on Edit|Write|MultiEdit|NotebookEdit   permissionDecision "deny", or exit 2
+    Codex         PreToolUse on apply_patch and shell commands      permissionDecision "deny", or exit 2
     Cursor        preToolUse                                        permission "deny", or exit 2
     OpenCode      tool.execute.before                               throw
+    Copilot       the cloud agent's preToolUse hook (.github/hooks)  exit 2
 
 The guard refuses one thing: a path covered by a live claim held by a different agent (`claims.py`, `identity.py`),
 including a claimed file that has been renamed. Git sees the rename, or the new file is byte-identical to the
@@ -15,8 +17,8 @@ The rules it keeps (the product's invariants):
   - the agent that holds a claim is never refused (same host and the same session or host process);
   - it refuses only a verified collision, or (Knos Pro, only when a person set one) an agent spend cap that has
     been reached. Rules in CLAUDE.md, withdrawn decisions and text similarity never block;
-  - it guards edits, not reads. Shell commands that write files (`sed -i`, `mv`, a script) are not seen by any of
-    these hooks, and this does not pretend otherwise;
+  - it guards edits, not reads. Claude Code, Cursor and OpenCode hooks do not see shell writes (`sed -i`, `mv`, a
+    script); Codex and Copilot shell writes are parsed best-effort; the commit guard is the backstop;
   - anything unexpected (no store, a crash, an old version, an unreadable payload) exits 0 and writes one line to
     ~/.knos/hook.log. A broken install must never stand between an agent and its own repository.
 """
@@ -223,8 +225,8 @@ def _check_team(repo: Path, rel: str, agent: Agent) -> Verdict:
 def _check_local(repo: Path, rel: str, agent: Agent) -> Verdict:
     from .claims import Claims, claims_db
 
-    if not claims_db(repo).exists() and not (paths.home() / "team.json").exists():
-        return Verdict(True)  # no local claims and no team server: nothing can be held
+    if not claims_db(repo).exists():
+        return Verdict(True)  # no local claims: nothing can be held here
     try:
         with Claims(repo) as c:
             live = [x for x in c.live() if not x.advisory and not x.held_by(agent)]

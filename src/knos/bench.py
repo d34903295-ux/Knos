@@ -12,7 +12,7 @@
   speed     the guard's decision and a search on a 5,000-file repo; p50 and p95 in milliseconds.
   budget    200 attempted agent payments of random size against a cap, through the gate that runs before any
             signature. Counted: spend beyond the cap.
-  init      seconds for `knos init` to wire five hosts in a fresh home, self-test included.
+  init      seconds for `knos init` to wire four hosts in a fresh home, self-test included.
 
 Everything runs in a temporary KNOS_HOME and HOME; your repos, agents' settings and store are not touched.
 """

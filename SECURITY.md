@@ -12,8 +12,9 @@ Advisories), not in a public issue. Expect a reply within a few days.
   first, and `knos init --undo` restores it.
 - **Never sent to your agents:** secrets (`.env`, keys, certificates, `.ssh`, `.aws`, and paths added with
   `knos private`).
-- **Network:** answering, claiming and guarding never use it. Knos Pro commands make public RPC reads to check
-  payments, and send payments that you or an agent's wallet sign. Nothing else leaves the machine.
+- **Network:** for coding agents, answering, claiming and guarding never use it unless the repo is in a team (then
+  one Solana RPC). Jobs use a Solana or Tempo RPC and the relay that holds briefs and sealed deliveries. Knos Pro
+  commands make public RPC reads to check payments, and send payments that you or an agent's wallet sign.
 - **Agent wallet keys:** kept in `~/.knos/wallets`, owner-only, never printed or logged. An agent wallet should hold
   only what you are willing for that agent to spend.
 

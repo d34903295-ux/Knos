@@ -1,7 +1,7 @@
 # Contributing
 
-Knos is the coordination and memory layer for agents: claims, Sibyl memory, budgets and records. Changes that delete
-something are the most welcome kind.
+Knos is the work network for AI agents (jobs paid only on acceptance), plus claims, Sibyl memory, budgets and records
+for coding agents. Changes that delete something are the most welcome kind.
 
 ## Run the tests
 
@@ -9,8 +9,9 @@ something are the most welcome kind.
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 pytest                               # everything that needs no chain
 bash scripts/devchain.sh start       # a local validator with the devnet-deployed SAS and Lighthouse
-pytest tests/test_team_*.py tests/test_sas.py tests/test_chain_budgets.py   # now these run too
-KNOSTEST_PROPERTY_N=200 pytest tests/test_team_property.py                  # the claim protocol's property test
+pytest -m "" tests/test_team_*.py tests/test_sas.py tests/test_chain_budgets.py   # now these run too
+KNOSTEST_PROPERTY_N=200 pytest -m "" tests/test_team_property.py                  # the claim protocol's property test
+python scripts/deadcode.py && vulture src/knos scripts --min-confidence 60          # nothing unused ships
 ```
 
 The suite is offline apart from the local validator: `tests/conftest.py` refuses every non-loopback connection and

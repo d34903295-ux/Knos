@@ -8,11 +8,12 @@ What it writes, per host:
   desktop   the MCP server in Claude Desktop's config (it has no hooks)
   cursor    the MCP server in ~/.cursor/mcp.json and a preToolUse hook in ~/.cursor/hooks.json
   opencode  the MCP server in opencode.json and a guard plugin
+  codex     the MCP server under [mcp_servers.knos] in ~/.codex/config.toml and a PreToolUse hook in ~/.codex/hooks.json
 
 Every file is copied to ~/.knos/backups/init-<time>/ before it is changed, and a file that is not JSON knos can read
 is left exactly as it is. `--undo` removes only what knos added (entries named "knos", hooks marked knos-guard), so
 anything the person changed since is kept. Then a self-test: the MCP server is started the way an agent starts it and
-must answer the handshake and list its four tools; the guard hook must exit 0 on an empty event.
+must answer the handshake and list the memory tools; the guard hook must exit 0 on an empty event.
 """
 
 from __future__ import annotations

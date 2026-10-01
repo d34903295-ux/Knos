@@ -27,13 +27,11 @@ eight is worth forty-five.
 
 Quiet counts too. Evidence halves every HALF_LIFE_DAYS, so a name that closed
 everything it took in June is drifting back toward the prior by September
-rather than still spending June's credit, and an agent nobody has seen for a
-season leaves WARM entirely until it claims again.
+rather than still spending June's credit.
 
 What makes it load-bearing rather than decorative: the store is the only place
 this history exists. Delete it and every agent is a stranger again, worth
-exactly thirty minutes - which is the behaviour knos had before this module,
-and is what `scripts/contention.py` measures the cost of.
+exactly thirty minutes - which is the behaviour knos had before this module.
 
 Two limits, stated rather than discovered later. The history is the last
 thousand journal entries, so in a repo busy enough to push claims past that
@@ -66,9 +64,7 @@ FINISHED = "finished"
 # as a known limit before it was measured; measuring the cap made it real.
 #
 # So the counts are also kept as one canonical WARM record per agent, which
-# does not fall out of a window. The journal stays the audit trail - `knos at`
-# still reconstructs from it, because a point-in-time answer has to come from
-# what was written at the time, not from a running total.
+# does not fall out of a window. The journal stays the audit trail.
 STANDING = "agent_record"
 
 # Observations before the record is canonical rather than provisional. Below
@@ -99,11 +95,7 @@ STRONG = 8
 # punishing it - it is forgetting, not a penalty.
 HALF_LIFE_DAYS = 45.0
 
-# Archive. An agent nobody has seen for this long leaves WARM entirely, so the
-# tier stays a list of who is actually around. It is recoverable: the next
-# claim it makes writes the record again, and the journal never lost anything.
-# Written as ordinary journal facts so `knos why` and search see them like
-# anything else. The prefix is what makes them findable again.
+# Claim events are ordinary journal facts with this prefix, so search sees them like anything else.
 _MARK = "knos.claim"
 
 
@@ -197,8 +189,7 @@ def _fields(entry: dict[str, Any]) -> tuple[str, str]:
 def entries(mem: Any) -> list[dict[str, Any]]:
     """Every claim event in the journal, as (kind, who, topic, when).
 
-    Read once here so `history` and `knos.rewind` walk the same list rather
-    than each parsing the journal in its own slightly different way.
+    Read once here so every count walks the same list rather than each parsing the journal in its own way.
     """
     out: list[dict[str, Any]] = []
     for entry in mem.journal(limit=1000):
@@ -220,18 +211,11 @@ def entries(mem: Any) -> list[dict[str, Any]]:
     return out
 
 
-def history(mem: Any, who: str, before: str = "") -> tuple[int, int]:
-    """(taken, finished) for `who`, out of the journal.
-
-    `before` restricts it to what had happened by an ISO timestamp, which is
-    what lets `knos at` say what an agent had earned *then* rather than what
-    it has earned since.
-    """
+def history(mem: Any, who: str) -> tuple[int, int]:
+    """(taken, finished) for `who`, out of the journal."""
     taken = finished = 0
     for event in entries(mem):
         if event["who"] != who:
-            continue
-        if before and event["when"] and event["when"] > before:
             continue
         if event["kind"] == TAKEN:
             taken += 1
@@ -331,26 +315,12 @@ def standing(mem: Any, who: str, now: str = "") -> dict[str, Any]:
     }
 
 
-def holds_for(mem: Any, who: str, before: str = "") -> int:
+def holds_for(mem: Any, who: str) -> int:
     """Minutes `who` may hold a claim, given what it has done before.
 
     Unknown agents get the old flat default. Nobody is punished for being
     new, and nobody earns a long hold without having closed anything.
-
-    `before` asks what it had earned at a past moment, which is what a
-    reconstruction of an old collision has to use - the hold that applied
-    then, not the one the agent has earned since.
     """
-    if before:
-        # A reconstruction has to use what was written by then, so it reads
-        # the journal rather than a running total that includes everything
-        # since. `knos at` is the only caller that passes this.
-        taken, finished = history(mem, who, before)
-        if taken < PROVEN:
-            return UNKNOWN
-        kept = min(1.0, finished / taken)
-        return max(FLOOR, min(CEILING, round(FLOOR + kept * (CEILING - FLOOR))))
-
     got = standing(mem, who)
     if got["taken"] < PROVEN:
         return UNKNOWN
@@ -394,10 +364,3 @@ def everyone(mem: Any) -> list[dict[str, Any]]:
     out = [reliability(mem, who) for who in seen]
     out.sort(key=lambda r: (r["kept"] if r["kept"] is not None else 1.0, r["who"]))
     return out
-
-
-# Spending is the other thing a record can decide, and the reason it is worth
-# deciding: on a machine several agents share, the money one of them spends is
-# money out of the same pocket. An agent that buys a brief and then abandons
-# the work it bought it for has spent it on nothing, and it will do it again in
-# half an hour.

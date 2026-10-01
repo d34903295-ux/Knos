@@ -28,7 +28,7 @@ from . import paths
 
 from sibyl_memory_client import FREE_TIER_CAP_BYTES, CapExceededError, Storage
 
-# Warn when a capped store is this full, with the exact choices (WP5).
+# Warn when a capped store is this full, with the exact choices.
 WARN_AT = 0.8
 
 # knos keeps its own bookkeeping in the same store as the facts. Internal
@@ -36,11 +36,6 @@ WARN_AT = 0.8
 # the person who asked.
 INTERNAL = "knos:"
 
-# How long one agent's statement of what it is doing stays worth telling
-# another agent. This is the only thing knos stores that expires, because
-# it is the only thing that is about now rather than about what happened.
-_CLAIM_TRIES = 5  # attempts before a claim write gives up
-_CLAIM_BACKOFF = 0.05  # seconds, multiplied by the attempt number
 _OPEN_TRIES = 8  # attempts to open a store two agents reached at once
 _OPEN_BACKOFF = 0.05  # seconds, multiplied by the attempt number
 
@@ -52,7 +47,7 @@ class StoreGone(Exception):
     answer every question with "nothing is known", which an agent reads as a
     fact about the repo, not about a missing file. The marker next to the
     store holds no data; it only records that a store was born here. `knos
-    point` starts over on purpose and removes both.
+    reset --yes` starts over on purpose (and keeps a backup).
     """
 
 
@@ -268,16 +263,13 @@ class Memory:
         """How many things exist nowhere but this file.
 
         Everything knos read out of your repo it can read again. These it
-        cannot: what somebody told it, what was claimed, who stood down for
-        whom, who overrode whom and why. Delete the store and this number is
+        cannot: what somebody told it. Delete the store and this number is
         what is actually gone — which is the whole question anyone should ask
         of a memory that claims to be load-bearing.
         """
         # The journal row keeps the source in `acted`; `source` is a key
         # inside `extra`, not a column. Reading the wrong one made this
-        # count zero on every store, which is worse than not printing it:
-        # the README points at this number as the thing not to take on
-        # trust.
+        # count zero on every store, which is worse than not printing it.
         told = sum(1 for e in self.journal(limit=5000) if e.get("acted") == "note")
         return told
 
@@ -349,14 +341,6 @@ class Memory:
         """Whether that note is still standing, or has been forgotten."""
         return self.thing(TOPIC, about) is not None
 
-    # ---- HOT: what the current work is about ---------------------------
-
-    def set_focus(self, body: dict[str, Any]) -> None:
-        try:
-            self.client.set_state(INTERNAL + "focus", body)
-        except CapExceededError:
-            pass  # bookkeeping is the first thing to go when there is no room
-
     # Claims live in claims.db (claims.py): path globs held by one agent identity, taken in one transaction.
 
     # ---- REFERENCE: facts that do not change ---------------------------
@@ -411,12 +395,6 @@ class Memory:
             return int(row[0]) if row else 0
         except Exception:
             return 0
-
-    def counts(self) -> dict[str, int]:
-        return {
-            "entities": len(self.things(limit=1000000)),
-            "journal": len(self.journal(limit=100000)),
-        }
 
     def compact(self, older_than_days: int = 30) -> dict[str, int]:
         """Make room without losing anything an answer uses.

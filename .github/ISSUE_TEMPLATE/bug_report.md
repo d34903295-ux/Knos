@@ -22,6 +22,6 @@ knos ...
 ```
 ```
 
-Knos never sends anything anywhere, so there is no log to fetch. If it read
+Knos keeps no remote log (guard errors are in ~/.knos/hook.log). If it read
 the wrong thing, `knos ask` prints the source of every answer — paste that
 line rather than the answer if the content is private.

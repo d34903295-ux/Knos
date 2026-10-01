@@ -1,7 +1,7 @@
 # Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """Whether this machine may use Knos Pro: a 14-day trial, a licence paid on chain, or a signed licence code.
 
-~/.knos/licence.json is written by `knos pro buy` after the payment is verified on Solana (it records the
+~/.knos/licence.json is written by `knos pro buy` after the payment is verified on Solana or Tempo (it records the
 transaction, which anyone can look up) or by `knos pro activate <code>`, where the code is signed with the Knos
 licence key (Ed25519; the public half is below). There is no server and no account.
 

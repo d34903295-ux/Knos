@@ -487,9 +487,6 @@ def _parse(line: str, repo: Path) -> Symbol | None:
     return Symbol(name=name, kind=kind, path=path, line=number)
 
 
-def close() -> None:
-    """Nothing is held open, so there is nothing to close."""
-
 # Lines that declare something, across the languages ctags reads for us. Not a
 # parser: this only has to pick the declaration out of the lines that mention
 # the name, and being wrong here costs a line number rather than an answer.

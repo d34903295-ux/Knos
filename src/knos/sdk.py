@@ -1,4 +1,5 @@
-"""The Knos Python SDK: claims, memory, budgets and records for any agent, not only coding agents.
+"""The Knos Python SDK: claims, memory, budgets and records for any agent, not only coding agents. (To hire or be
+hired, see knos.jobs.api: post_job, find_jobs, claim_job, deliver_job and serve.)
 
     from knos import sdk
 
@@ -43,7 +44,7 @@ class Knos:
     def claim(self, unit: str, minutes: int = 30) -> bool:
         """Take `unit` for this agent. True if held (or already held by it); False if another agent has it."""
         self.holder = None
-        with Claims(self.workspace, local=True) as c:
+        with Claims(self.workspace) as c:
             took, clash, _ = c.take(self._me, unit, [unit], holds_min=minutes)
         if not took:
             self.holder = clash.label if clash else "another agent"
@@ -66,7 +67,7 @@ class Knos:
 
     def release(self, unit: str | None = None) -> int:
         """Give back one claim (or all of this agent's). Returns how many were released."""
-        with Claims(self.workspace, local=True) as c:
+        with Claims(self.workspace) as c:
             gone = c.release(self._me, unit or "")
         rt = self._team()
         if rt is not None:
@@ -78,7 +79,7 @@ class Knos:
         return len(gone)
 
     def holder_of(self, unit: str) -> str | None:
-        with Claims(self.workspace, local=True) as c:
+        with Claims(self.workspace) as c:
             got = c.holder(unit, self._me)
         return got.label if got else None
 
@@ -110,7 +111,7 @@ class Knos:
         return got[:limit]
 
     def memory_client(self):
-        """This workspace's Sibyl MemoryClient (for Sibyl's LangGraph BaseStore or Hermes provider). Close it with
+        """This workspace's Sibyl MemoryClient (for Sibyl's LangGraph BaseStore). Close it with
         the returned Memory: `mem, client = k.memory_client()`."""
         mem = Memory(self.workspace)
         return mem, mem.client

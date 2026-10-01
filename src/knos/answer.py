@@ -366,15 +366,6 @@ def point(
         counts["code"] = int(result.get("nodes") or 0)
         mem.set_reference(INTERNAL + "code_index", result)
 
-    # What goes into the store has to be plain data, so the skipped files are
-    # counted here and handed back to the caller in full.
-    mem.set_focus(
-        {
-            "repo": str(repo),
-            "read": {k: v for k, v in counts.items() if isinstance(v, int)},
-            "skipped": len(counts["skipped"]),
-        }
-    )
     return counts
 
 
@@ -402,7 +393,6 @@ def ask(
     question: str,
     identity: str = private.OWNER,
     limit: int = 8,
-    allowed: list[str] | None = None,
 ) -> list[Passage]:
     """Ranked passages with their sources. No prose, no synthesis.
 
@@ -494,7 +484,7 @@ def ask(
     # Counted over what this caller may actually see. A teammate shared one
     # folder has most of the repo filtered away, and judging "enough" on the
     # part they cannot see left them with a grant that answered nothing.
-    seen_so_far = private.visible(repo, [p.__dict__ for p in found], identity, allowed)
+    seen_so_far = private.visible(repo, [p.__dict__ for p in found], identity)
     thin = sum(1 for p in seen_so_far if p["score"] > 0) < ENOUGH
     structural = looks_structural(question)
     if structural or thin:
@@ -524,7 +514,7 @@ def ask(
                     )
                 )
 
-    found = private.visible(repo, [p.__dict__ for p in found], identity, allowed)
+    found = private.visible(repo, [p.__dict__ for p in found], identity)
     passages = [Passage(**p) for p in found]
 
     seen: set[str] = set()

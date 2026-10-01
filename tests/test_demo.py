@@ -14,7 +14,7 @@ The 0.2.0 sequence, each beat a real call:
 
 Rewritten for 0.2.0. Dropped, because the beats are gone from the product: the rule quoted then deleted from
 CLAUDE.md ("Nothing about that"), the withhold ("Withheld.", "the withhold gone"), the paid answer and the money gate
-("verdict = buy/have", "money moves"), the reversed decision holding work ("held = True"), the private-path beat
+("verdict = buy/have", "money moves"), the reversed decision holding work ("held = True"), the beat about private paths
 ("cannot tell is there"), the track record ("closed N of N", "who finishes"), the rewind (`knos at 2h`), and the
 ending that deletes the memory ("There is no product").
 """
@@ -201,7 +201,7 @@ def test_the_documented_command_works() -> None:
 
 
 def test_it_runs_in_a_time_a_person_will_sit_through(knos_home) -> None:
-    """The main help screen says "20 seconds". Measured without the pauses (a constant a human reads at, about eight
+    """`knos demo` should take about 20 seconds. Measured without the pauses (a constant a human reads at, about eight
     seconds of `demo.PAUSE`), because this is about the work: a git repo, a read, three processes. On a spinning disk
     with other suites running the work alone measured up to 21s, so the bound is a regression guard, not the promise."""
     start = time.perf_counter()

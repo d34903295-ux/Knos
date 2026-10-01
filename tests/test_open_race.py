@@ -37,7 +37,7 @@ def test_several_agents_can_open_stores_that_do_not_exist_yet(knos_home, repo, t
         "from knos.memory import Memory\n"
         "repo, n = sys.argv[1], sys.argv[2]\n"
         "with Memory(repo) as mem:\n"
-        "    mem.counts()\n"
+        "    mem.journal()\n"
         "with Claims(repo) as c:\n"
         "    took, conflict, mine = c.take(Agent(host='agent-' + n, session=n), 'mine ' + n, ['src/own_' + n + '.py'])\n"
         "print('ok' if took else 'refused')\n",

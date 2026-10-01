@@ -97,8 +97,7 @@ def _send(url: str, chain_id: int, calls: tuple, sign, sender: str, fee_token: s
         rec = rpc(url, "eth_getTransactionReceipt", [h])
         if rec:
             ok = rec.get("status") in ("0x1", 1)
-            used = int(rec.get("gasUsed", "0x0"), 16) * int(rec.get("effectiveGasPrice", "0x0"), 16)
-            return Sent(h, ok, "succeeded" if ok else "reverted on chain (the fee was still paid)", used)
+            return Sent(h, ok, "succeeded" if ok else "reverted on chain (the fee was still paid)")
         time.sleep(1)
     return Sent(h, False, "not mined in time")
 

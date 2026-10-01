@@ -1,6 +1,6 @@
 """Budgets the chain enforces. Solana: an SPL delegate on a per-agent vault, live on the local validator; the agent's
 key signing directly (no Knos code in the way) cannot move a token beyond its allowance. Tempo: the Keychain call
-encoding and the remaining-allowance read, offline (the live Moderato run is `knos bench --budgets`)."""
+encoding and the remaining-allowance read, offline (the live Moderato run is a recorded measurement)."""
 
 from __future__ import annotations
 

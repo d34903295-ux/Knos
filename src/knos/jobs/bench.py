@@ -3,7 +3,6 @@
     knos bench jobs                  Solana escrow in the Solana runtime (LiteSVM, in-process): no network
     knos bench jobs --live           Solana devnet: the deployed program, real RPC, real finality
     knos bench jobs --tempo          Tempo escrow on a local anvil (needs Foundry)
-    knos bench jobs --tempo --live   Tempo Moderato testnet (needs KNOS_TEMPO_KEY with testnet pathUSD)
 
 Every result says where it ran. Numbers from the in-process runtime and anvil measure the code, not a network.
 """
@@ -156,7 +155,7 @@ def solana_live(jobs: int = 3) -> dict:
 
 def run(live: bool = False, tempo: bool = False, jobs: int | None = None) -> dict:
     if tempo and live:
-        raise NotImplementedError("Tempo Moderato bench: set KNOS_TEMPO_KEY; see docs/BENCH.md")
+        raise NotImplementedError("A live Tempo bench is not built in: the Moderato numbers in docs/BENCH.md are recorded runs")
     if tempo:
         return tempo_local(jobs or 20)
     if live:

@@ -929,7 +929,7 @@ def test_hook_guard_exits_zero_when_it_breaks(monkeypatch):
 
 
 def test_init_self_test_starts_the_server_and_the_guard(capsys):
-    """The one test that starts the memory server the way an agent does: handshake, four tools, and the guard
+    """The one test that starts the memory server the way an agent does: handshake, the memory tools, and the guard
     allowing an empty edit."""
     rc, said = run(capsys, "init", "--hosts", "cursor", "--no-read")
     assert rc == 0, said

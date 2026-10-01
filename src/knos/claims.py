@@ -258,9 +258,8 @@ def claims_db(repo: Path) -> Path:
 class Claims:
     """One repo's claim list. Open it as a context manager."""
 
-    def __init__(self, repo: str | Path = ".", db: Path | None = None, local: bool = False) -> None:
-        """`db` names the file directly. Claims across machines are the team registry on Solana (`knos team`), not
-        this file; `local` is kept for callers that say so explicitly."""
+    def __init__(self, repo: str | Path = ".", db: Path | None = None) -> None:
+        """`db` names the file directly. Claims across machines are the team registry on Solana (`knos team`)."""
         self.repo = Path(repo).resolve()
         self.path = Path(db) if db is not None else claims_db(self.repo)
         self._conn: sqlite3.Connection | None = None
@@ -423,7 +422,7 @@ def lookup_session(repo: Path):
     def find(host: str, anchor: int) -> str | None:
         if not claims_db(repo).exists():
             return None
-        with Claims(repo, local=True) as c:
+        with Claims(repo) as c:
             return c.session_for(host, anchor)
     return find
 

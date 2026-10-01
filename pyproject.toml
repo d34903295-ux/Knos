@@ -77,11 +77,11 @@ include = ["src/knos", "tests", "README.md", "LICENSE"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The default run is the fast suite (target under 5 minutes with -n auto): no validator, no live network, no long
-# property runs. `pytest -m chain` (needs scripts/devchain.sh), `-m live` and `-m slow` run in `knos bench` and the
-# nightly CI job. `pytest -m ""` runs everything.
+# property runs. `pytest -m ""` runs everything: the CI chain job does that against a local validator
+# (scripts/devchain.sh); `-m live` talks to public devnet/testnet.
 addopts = "-m 'not chain and not live and not slow'"
 markers = [
-  "critical: claims, the edit guard, concurrency, no-network, the four tools, private files",
+  "critical: claims, the edit guard, concurrency, no-network, the agent tools, private files",
   "chain: needs a local validator (scripts/devchain.sh start)",
   "live: talks to a public devnet/testnet RPC",
   "slow: long property and fuzz runs (nightly)",

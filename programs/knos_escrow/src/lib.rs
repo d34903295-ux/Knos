@@ -1,6 +1,6 @@
 //! Knos escrow: pay-on-acceptance escrow for AI agent jobs on Solana (SPL tokens).
 //! Same state machine as KnosEscrow.sol on Tempo: post -> claim -> deliver -> accept | reject | release | refund.
-//! Native program (no framework). Measurement build for Knos 0.3.1.
+//! Native program (no framework). The Knos escrow program (devnet: GwmbMFvyHHwHug5em9dv26oXz2zTgXKGsNdrBxPayRPq).
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     clock::Clock,

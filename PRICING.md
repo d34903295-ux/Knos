@@ -30,13 +30,14 @@ What each plan includes:
   - agent budgets enforced by the chain (Tempo Keychain limits per period, Solana delegates);
   - agent wallets for MPP and x402 payments.
 - **Team adds:**
-  - Sibyl Pro for every seat;
+  - Sibyl Pro for the paying wallet, with every seat paid for recorded;
   - chain budgets for every agent;
   - private registries past 3 keys, and a records policy;
   - priority fixes.
 
 **One payment.** Whatever a wallet pays Knos (Pro, a Team seat, or a job's 5% fee), Knos buys that wallet Sibyl Pro for
-the 30 days after the payment, from that payment. There is no second checkout and nobody pays Sibyl separately.
+the 30 days after the payment, from that payment. There is no second checkout and nobody pays Sibyl separately. On
+testnets the purchase is simulated (and labelled so); on mainnet it is built and locked until Sibyl Labs confirms resale.
 
 For comparison (read 30 Sep 2026): Sibyl Pro alone is $12 a month, Conductor Teams $60 per user (a different product),
 Portkey $49 and Helicone $79 a month.
@@ -57,11 +58,11 @@ The CLI checks the payment against the chain itself, over a public RPC:
 
 It then writes `~/.knos/licence.json`, and Sibyl Pro is bought for the paying wallet. Every payment is public on chain.
 
-Paying another way (card, bank)? Write to the author for a signed licence code: `knos pro activate <code>`.
+Paying another way (card, bank)? Write to zulibro1999@gmail.com for a signed licence code: `knos pro activate <code>`.
 
 ## Money-back
 
-Within 30 days, send the transaction and the address to refund to. The refund goes back on the same chain.
+Within 30 days, send the transaction and the address to refund to (zulibro1999@gmail.com). The refund goes back on the same chain.
 
 ## Source
 

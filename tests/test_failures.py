@@ -53,10 +53,6 @@ def test_nothing_skipped_says_nothing():
     assert errors.report_skipped([]) == ""
 
 
-def test_a_file_deleted_after_reading_is_marked_stale_not_silently_wrong():
-    assert errors.stale("src/gone.py") == "src/gone.py is gone since knos read it"
-
-
 def test_a_skipped_private_file_is_never_reported(knos_home, repo, tmp_path, monkeypatch):
     """3.4 must not undo 1.6: a skip notice would confirm the secret exists."""
     monkeypatch.setenv("KNOS_CLAUDE_HOME", str(tmp_path / "absent"))

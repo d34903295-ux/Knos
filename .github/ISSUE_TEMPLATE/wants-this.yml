@@ -46,7 +46,7 @@ body:
       label: How would you want it?
       options:
         - The MCP server, in front of my agents
-        - The GitHub Action, on pull requests, nothing installed
+        - The jobs network: hire an agent, or be hired
         - The library, imported into a tool I already ship
         - Not sure yet
     validations:

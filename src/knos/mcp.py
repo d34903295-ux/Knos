@@ -1,7 +1,8 @@
 """The MCP server. Local stdio, launched by the client. Nothing hosted.
 
-Four tools: search, about, remember (optionally claiming files), done. Every answer that touches claimed files says
-who holds them; nothing an agent asks is ever hidden. Claims are enforced where edits happen, by the edit guard
+Tools: search, about, remember (optionally claiming files), done; pay; and the jobs tools post_job, find_jobs,
+claim_job, deliver_job. Every answer that touches claimed files says who holds them; nothing an agent asks is ever
+hidden. Claims are enforced where edits happen, by the edit guard
 (`guard.py`), not by withholding memory.
 
 The server answers only for the repo it was started in. It never falls back to another repo.
@@ -28,7 +29,9 @@ server = MCPServer("knos", version=version(), instructions=(
     "result names its source.\n\n"
     "Before you change files, claim them: remember(fact, about, claiming=true, paths=[...]). Another agent's edit "
     "to a claimed file is refused by the knos edit guard; yours never is. Call done() when you finish, so others "
-    "stop waiting. If a file you need is claimed, you are told who holds it and since when."
+    "stop waiting. If a file you need is claimed, you are told who holds it and since when.\n\n"
+    "Jobs: post_job hires any AI agent (the price waits in escrow, paid only on acceptance); find_jobs, claim_job and "
+    "deliver_job let you be hired and paid for work a buyer accepts."
 ))
 
 NOT_A_REPO = (
@@ -106,6 +109,23 @@ def _recalled(mem, query: str, shown: set[str], limit: int) -> list[str]:
             shown.add(text)
             out.append(f"{text}\n    source: {r.get('where') or 'past session ' + str(r.get('date') or '')}")
     return out
+
+
+def _team_claim(repo: Path, globs: list[str], agent) -> str | None:
+    """In a team, the same claim on Solana (knos.team.live.explicit): who holds it when another machine won."""
+    try:
+        from .team import live
+    except ImportError:
+        return None
+    return live.explicit(repo, globs, agent.host, agent.session or (f"pid{agent.anchor}" if agent.anchor else ""))
+
+
+def _team_release(repo: Path, agent) -> None:
+    try:
+        from .team import live
+    except ImportError:
+        return
+    live.explicit_release(repo, agent.host, agent.session or (f"pid{agent.anchor}" if agent.anchor else ""))
 
 
 def _claim_notes(repo: Path, text: str, agent) -> str:
@@ -196,6 +216,7 @@ def done(about: str = "", ctx: Context | None = None) -> str:
     with Claims(repo) as c:
         gone = c.release(agent, about.strip())
     if gone:
+        _team_release(repo, agent)
         try:
             with Memory(repo) as mem:
                 for x in gone:
@@ -252,6 +273,13 @@ def remember(fact: str, about: str, claiming: bool = False, paths: list[str] | N
         from .guard import _since
         return (f"Remembered, about {about}. Not claimed: {', '.join(conflict.globs)} is held by {conflict.label} "
                 f"since {_since(conflict.taken_at)} ({conflict.description}). Ask them, or take other work.")
+    if mine is not None and not mine.advisory:
+        held = _team_claim(repo, mine.globs, agent)
+        if held:
+            with Claims(repo) as c:
+                c.release(agent, mine.id)
+            return (f"Remembered, about {about}. Not claimed: {', '.join(mine.globs)} is held on another machine by "
+                    f"{held}. Ask them, or take other work.")
     try:
         with Memory(repo) as mem:
             record.note_taken(mem, about, agent.host, now)

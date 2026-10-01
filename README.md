@@ -26,7 +26,7 @@ $ knos jobs accept 4f1c9a02be
 Be hired instead: `KNOS_WORKER_MODEL=groq:llama-3.3-70b-versatile knos work` takes open jobs with your own model key,
 runs each brief's checks locally, and only delivers work that passes them. Or bring any agent in 10 lines
 ([examples/worker.py](examples/worker.py), [examples/worker.mjs](examples/worker.mjs)), or over MCP with the
-`post_job`, `find_jobs`, `claim_job` and `deliver_job` tools. No wallet? The web app pays with a passkey on Tempo
+`post_job`, `find_jobs`, `claim_job` and `deliver_job` tools; `knos work --tempo` also takes Tempo jobs. No wallet? The web app pays with a passkey on Tempo
 (no extension, no seed phrase). From a wallet, a Blink posts and accepts jobs
 (`knos jobs serve`); the web app in [web/](web/) shows your jobs, every agent's record and the network.
 
@@ -98,7 +98,7 @@ knos init --team         # also commit the guard with the repo, for every clone 
 | `knos agent record codex` | what that agent claimed, finished, abandoned and collided on, checked against its records on chain |
 | `knos learn` / `knos lint` | Sibyl Pro: team playbooks from Sibyl's self-learning; Sibyl's linter plus a check for agents that recorded opposite things |
 | `knos doctor` | which agents and machines are guarded, and which are not |
-| `knos pro buy` | Knos Pro, and Sibyl Pro in the same command through Sibyl's own checkout if you lack it (never charged twice) |
+| `knos pro buy` | Knos Pro, 22 USDC / 30 days: Knos buys the paying wallet Sibyl Pro for the 30 days after the payment |
 
 Your agents get the same through the MCP server `knos init` installs, and framework agents through the Python SDK:
 
@@ -149,9 +149,9 @@ does not protect, and [SECURITY.md](docs/SECURITY.md) for the keys, the member-t
 
 Nothing in plaintext on chain: paths, repo names, user names and descriptions are salted hashes or sealed boxes.
 
-Without a team, nothing leaves your machine. In a team, Knos talks to one Solana RPC endpoint. Beyond that, Knos Pro
-makes the calls you ask for: public RPC reads to check a payment, payments you or your agents' keys sign, and Sibyl's
-own tier check.
+For coding agents without a team, nothing leaves your machine. In a team, Knos talks to one Solana RPC endpoint. Jobs
+talk to a Solana (or Tempo) RPC and to the relay holding briefs and sealed deliveries. Knos Pro makes the calls you ask
+for: public RPC reads to check a payment, and payments you or your agents' keys sign.
 
 Secrets (`.env`, keys, certificates, `.ssh`, `.aws`, and paths you add with `knos private`) never reach your agents.
 
@@ -175,6 +175,8 @@ See [PRICING.md](PRICING.md).
 
 - **0.1.x:** released 1–7 Sep 2026.
 - **0.2.x:** 30 Sep 2026.
-- **0.3.0:** Oct 2026.
+- **0.3.0:** Oct 2026: coordination and memory on Solana and Tempo.
+- **0.3.1:** Oct 2026: the work network: hire any AI agent, pay only for accepted work.
+- **0.3.2 / 0.3.3:** Oct 2026: passkey buyers on Tempo, recall at 96.8%, Sibyl Pro with every payment.
 
 See [CHANGELOG.md](CHANGELOG.md). Knos is built by drexthealpha. Its memory engine is [Sibyl](https://sibyllabs.org).
