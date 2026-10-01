@@ -3,7 +3,7 @@
 // Jobs go to the Knos escrow contract on Moderato; on Tempo a job id is the sha256 of its brief, so the brief on
 // the relay is checked against the id itself.
 const V = "2.57.2";
-export const ESCROW = "0x70043F5c1A3db0Fb243Fd1270176557cCA1dE584";   // KnosEscrow 0.3.4 on Moderato (testnet): paid on proof, 1 USDC minimum
+export const ESCROW = "0x8B913C5946a4C1CD95089D7a563dB864d46b694E";   // KnosEscrow 0.3.6 on Moderato (testnet): ERC-8183, verifier rule, 2.5% fee
 export const ESCROW_V031 = "0x888d39bB186cC718481E98080Bdb5fd8Df27Ab49";   // the 0.3.1 contract: its jobs settle there
 export const PATH_USD = "0x20C0000000000000000000000000000000000000";
 const STORE = "knos-tempo-passkey";

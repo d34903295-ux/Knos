@@ -21,6 +21,7 @@ CALLS = {
     "init": lambda: sol.init(PID, K[0], K[1]),
     "set_pause": lambda: sol.set_pause(PID, K[0], True),
     "lower_cap": lambda: sol.lower_cap(PID, K[0], 5_000_000),
+    "lower_fee": lambda: sol.lower_fee(PID, K[0], 250),
     "post": lambda: sol.post(PID, K[0], H, 2_000_000, 60, 60, H, K[1], K[2], verifier=K[3]),
     "claim": lambda: sol.claim(PID, K[0], H, K[1], K[2]),
     "deliver": lambda: sol.deliver(PID, K[0], H, H, K[1], K[2]),
@@ -69,7 +70,7 @@ def test_builders_match_idl():
                 assert str(meta.pubkey) == acc["address"], (name, acc["name"])
         arg_len = sum(_size(a["type"]) for a in entry["args"])
         assert len(ix.data) == 1 + arg_len, name
-    assert seen == set(BY_TAG) == set(range(1, 14))
+    assert seen == set(BY_TAG) == set(range(1, 15))
 
 
 def _layout(name):

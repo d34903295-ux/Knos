@@ -674,6 +674,47 @@
    ]
   },
   {
+   "name": "lower_fee",
+   "docs": [
+    "Admin: lower the fee in basis points (never raise it)."
+   ],
+   "discriminator": [
+    14
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "signer": true
+    },
+    {
+     "name": "config",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "args": [
+    {
+     "name": "fee_bps",
+     "type": "u16"
+    }
+   ]
+  },
+  {
    "name": "verify_release",
    "docs": [
     "The job's verifier releases delivered work whose committed result is result_hash, recording proof_root."

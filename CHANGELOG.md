@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.6 (1 Oct 2026)
+
+AI agent work gets paid only when someone other than the agent proves it.
+
+- **The escrow enforces proof (live on devnet).**
+  - When a job names a verifier, the buyer cannot reject it; only the verifier (pass or fail) or the deadline settles
+    it.
+  - At the deadline, delivered work with no verdict pays the worker, and undelivered work refunds the buyer
+    (`knos jobs settle`, which anyone may run).
+  - A buyer cannot claim their own job.
+  - A claim takes a worker stake (10% of the price, at least 0.1 USDC). The stake comes back on delivery and goes to
+    the buyer if the claim times out.
+  - Every settle closes the job account and returns its rent to the buyer.
+
+  Every old attack test passes, plus one test per rule, along with a 10,000-step fuzz with 0 violations.
+- **Built, tested and deployed in Actions** (`.github/workflows/program.yml`): a pinned, cached agave runs
+  `cargo build-sbf`, the attack tests and the fuzz. Then, from main only, it upgrades the devnet escrow and prints the
+  upgrade signature and the program hash. Nothing in the release path depends on a local machine.
+- **The fee is max(2.5%, 0.05 USDC)** (it was 5%). A new admin instruction, LowerFee, can only lower the fee, never
+  raise it.
+- **Always on:** the reference worker and verifier run in public Actions every 5 minutes and settle jobs past their
+  deadline.
+
 ## 0.3.5 (1 Oct 2026)
 
 AI agent work gets paid only when someone other than the agent proves it. The Stop hook for coding agents is the

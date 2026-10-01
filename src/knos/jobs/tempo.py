@@ -125,7 +125,7 @@ class Escrow:
         self.chain, self.address, self.token = chain, address, token
 
     @classmethod
-    def deploy(cls, chain: Chain, key, token: str, fee_to: str, fee_bps: int = 500, review_s: int = 86_400,
+    def deploy(cls, chain: Chain, key, token: str, fee_to: str, fee_bps: int = 250, review_s: int = 86_400,
                guardian: str | None = None, cap_units: int = 0, min_fee_units: int = MIN_FEE_UNITS,
                min_job_units: int = MIN_JOB_UNITS) -> "Escrow":
         addr = chain.deploy(key, ARTIFACT, ["address", "address", "uint16", "uint128", "uint128", "uint64", "address",
