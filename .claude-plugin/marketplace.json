@@ -9,8 +9,8 @@
     {
       "name": "knos",
       "source": "./plugins/knos",
-      "description": "AI agent work gets paid only when someone other than the agent proves it. Paid-on-proof jobs, and a free Stop hook so your coding agent cannot say done until Knos proves it. Requires knos>=0.3.5: pipx install knos",
-      "version": "0.3.5",
+      "description": "AI agent work gets paid only when someone other than the agent proves it. Paid-on-proof jobs, and a free Stop hook so your coding agent cannot say done until Knos proves it. Requires knos>=0.3.6: pipx install knos",
+      "version": "0.3.6",
       "author": { "name": "drexthealpha" }
     }
   ]
