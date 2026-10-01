@@ -261,7 +261,7 @@ def parse_job(address: Pubkey, raw: bytes) -> Job:
         v = Pubkey.from_bytes(raw[153:185])
         verifier = None if v == NO_VERIFIER else v
         proof = None if raw[185:217] == bytes(32) else bytes(raw[185:217])
-    if len(raw) == JOB_LEN:
+    if len(raw) >= JOB_LEN:
         stake, = struct.unpack_from("<Q", raw, 217)
     return Job(address, STATES.get(state, "unknown"), Pubkey.from_bytes(raw[1:33]),
                None if worker == Pubkey.default() else worker, amount, deadline, review, bytes(raw[89:121]),
@@ -275,3 +275,99 @@ def parse_config(raw: bytes) -> dict:
     return {"admin": Pubkey.from_bytes(raw[0:32]), "mint": Pubkey.from_bytes(raw[32:64]),
             "fee_token": Pubkey.from_bytes(raw[64:96]), "fee_bps": fee_bps, "min_fee": min_fee,
             "min_amount": min_amount, "max_amount": max_amount, "paused": bool(paused)}
+
+
+# -- 0.3.7: GitHub Actions OIDC proof, verified on chain (programs/knos_escrow/src/github.rs) ---------------------------
+#    15 RegisterKey  admin(s,w) config key(w) system   data: kid_len u8 kid n[256] r2[256] n0inv u32 (big-endian n, r2)
+#    16 BufferWrite  prover(s,w) buffer(w) system      data: job_id[32] total_len u16 offset u16 chunk
+#    17 VerifyStep1  prover(s) buffer(w) key           data: job_id[32]
+#    18 VerifyStep2  prover(s,w) buffer(w) key job(w) vault_token(w) vault_auth worker_token(w) fee_token(w) buyer(w)
+#                    config token                      data: job_id[32]
+#    19 PostGithub   buyer(s,w) job(w) buyer_token(w) vault_token(w) config token system
+#                    data: id[32] amount u64 work i64 review i64 brief[32] repo_hash[32] ref_hash[32]
+GH_JOB_LEN = JOB_LEN + 64      # a github job: the job, then sha256(repository), sha256(ref)
+JOB_LENS = (JOB_LEN, GH_JOB_LEN, V034_JOB_LEN, LEGACY_JOB_LEN)
+GH_BUF_LEN = 291 + 2048
+GH_MAX_JWT = 2048
+GH_ISSUER = "https://token.actions.githubusercontent.com"
+GH_WORKFLOW_PREFIX = "drexthealpha/Knos/.github/workflows/prove.yml@refs/tags/"
+COMPUTE_BUDGET = Pubkey.from_string("ComputeBudget111111111111111111111111111111")
+
+
+def gh_key_pda(pid: Pubkey, kid: str | bytes) -> Pubkey:
+    import hashlib
+    kid = kid.encode() if isinstance(kid, str) else kid
+    return Pubkey.find_program_address([b"ghkey", hashlib.sha256(kid).digest()], pid)[0]
+
+
+def gh_buffer_pda(pid: Pubkey, job_id: bytes, prover: Pubkey) -> Pubkey:
+    return Pubkey.find_program_address([b"ghproof", job_id, bytes(prover)], pid)[0]
+
+
+def gh_audience(job_id: bytes) -> str:
+    return "knos:" + job_id.hex()
+
+
+def rsa_r2_n0inv(n: int) -> tuple[int, int]:
+    """R^2 mod n (R = 2^2048) and -n^-1 mod 2^32: what RegisterKey takes (and checks)."""
+    return pow(2, 4096, n), (-pow(n, -1, 2 ** 32)) % 2 ** 32
+
+
+def compute_limit(units: int = 1_400_000) -> Instruction:
+    return Instruction(COMPUTE_BUDGET, bytes([2]) + struct.pack("<I", units), [])
+
+
+def register_key(pid: Pubkey, admin: Pubkey, kid: str | bytes, n: int, r2: int | None = None,
+                 n0inv: int | None = None) -> Instruction:
+    """RegisterKey (15, admin only): an RSA-2048 key GitHub signs OIDC tokens with, at ["ghkey", sha256(kid)].
+    r2 and n0inv default to the right values; the program refuses wrong ones."""
+    kid = kid.encode() if isinstance(kid, str) else kid
+    if not 0 < len(kid) <= 64:
+        raise ValueError("kid is 1..64 bytes")
+    r2d, n0d = rsa_r2_n0inv(n)
+    r2 = r2d if r2 is None else r2
+    n0inv = n0d if n0inv is None else n0inv
+    data = bytes([15, len(kid)]) + kid + n.to_bytes(256, "big") + r2.to_bytes(256, "big") + struct.pack("<I", n0inv)
+    return Instruction(pid, data, [_m(admin, True, True), _m(config_pda(pid), False, False),
+                                   _m(gh_key_pda(pid, kid), False, True), _m(SYSTEM, False, False)])
+
+
+def buffer_write(pid: Pubkey, prover: Pubkey, job_id: bytes, total_len: int, offset: int, chunk: bytes) -> Instruction:
+    """BufferWrite (16): a chunk of the JWT into the proof buffer ["ghproof", job_id, prover] (created on first use)."""
+    return Instruction(pid, bytes([16]) + job_id + struct.pack("<HH", total_len, offset) + chunk,
+                       [_m(prover, True, True), _m(gh_buffer_pda(pid, job_id, prover), False, True),
+                        _m(SYSTEM, False, False)])
+
+
+def verify_step1(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey) -> Instruction:
+    """VerifyStep1 (17): s*R mod n, then 8 squarings, into the buffer. ~1.05M CU: send with compute_limit()."""
+    return Instruction(pid, bytes([17]) + job_id, [_m(prover, True, False),
+                                                   _m(gh_buffer_pda(pid, job_id, prover), False, True),
+                                                   _m(key, False, False)])
+
+
+def verify_step2(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey, vault_token: Pubkey, worker_token: Pubkey,
+                 fee_token: Pubkey, buyer: Pubkey) -> Instruction:
+    """VerifyStep2 (18): 8 squarings, * s, the PKCS#1 v1.5 check and the claims; on success the worker is paid and the
+    job and the buffer close."""
+    return Instruction(pid, bytes([18]) + job_id,
+                       [_m(prover, True, True), _m(gh_buffer_pda(pid, job_id, prover), False, True),
+                        _m(key, False, False), _m(job_pda(pid, job_id), False, True), _m(vault_token, False, True),
+                        _m(vault_authority(pid), False, False), _m(worker_token, False, True),
+                        _m(fee_token, False, True), _m(buyer, False, True), _m(config_pda(pid), False, False),
+                        _m(TOKEN, False, False)])
+
+
+def post_github(pid: Pubkey, buyer: Pubkey, job_id: bytes, amount: int, work_s: int, review_s: int, brief_hash: bytes,
+                repository: str, ref: str, buyer_token: Pubkey, vault_token: Pubkey) -> Instruction:
+    """PostGithub (19): a job paid on a GitHub Actions proof for `repository` at `ref`. amount 0 = a bounty with no
+    money (the claim stake only)."""
+    import hashlib
+    if len(job_id) != 32 or len(brief_hash) != 32:
+        raise ValueError("job id and brief hash are 32 bytes")
+    data = bytes([19]) + job_id + struct.pack("<Qqq", amount, work_s, review_s) + brief_hash + \
+        hashlib.sha256(repository.encode()).digest() + hashlib.sha256(ref.encode()).digest()
+    return Instruction(pid, data, [_m(buyer, True, True), _m(job_pda(pid, job_id), False, True),
+                                   _m(buyer_token, False, True), _m(vault_token, False, True),
+                                   _m(config_pda(pid), False, False), _m(TOKEN, False, False),
+                                   _m(SYSTEM, False, False)])

@@ -972,6 +972,371 @@
     }
    ],
    "args": []
+  },
+  {
+   "name": "register_key",
+   "docs": [
+    "Admin only: an RSA-2048 key GitHub signs Actions OIDC tokens with, at PDA [\"ghkey\", sha256(kid)]. r2 = R^2 mod n and n0inv = -n^-1 mod 2^32 are checked once here."
+   ],
+   "discriminator": [
+    15
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "signer": true,
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "key",
+     "writable": true,
+     "docs": [
+      "PDA [\"ghkey\", sha256(kid)]"
+     ]
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": [
+    {
+     "name": "kid",
+     "type": "bytes",
+     "docs": [
+      "u8 length, then the kid (1..64 bytes)"
+     ]
+    },
+    {
+     "name": "n",
+     "type": {
+      "array": [
+       "u8",
+       256
+      ]
+     }
+    },
+    {
+     "name": "r2",
+     "type": {
+      "array": [
+       "u8",
+       256
+      ]
+     }
+    },
+    {
+     "name": "n0inv",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "buffer_write",
+   "docs": [
+    "A chunk of the JWT into the proof buffer PDA [\"ghproof\", job_id, prover] (created on first use)."
+   ],
+   "discriminator": [
+    16
+   ],
+   "accounts": [
+    {
+     "name": "prover",
+     "signer": true,
+     "writable": true
+    },
+    {
+     "name": "buffer",
+     "writable": true,
+     "docs": [
+      "PDA [\"ghproof\", job_id, prover]"
+     ]
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": [
+    {
+     "name": "job_id",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "total_len",
+     "type": "u16"
+    },
+    {
+     "name": "offset",
+     "type": "u16"
+    },
+    {
+     "name": "chunk",
+     "type": "bytes",
+     "docs": [
+      "raw, to the end of the data"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "verify_step1",
+   "docs": [
+    "s*R mod n, then 8 squarings, into the buffer (~1.05M CU)."
+   ],
+   "discriminator": [
+    17
+   ],
+   "accounts": [
+    {
+     "name": "prover",
+     "signer": true
+    },
+    {
+     "name": "buffer",
+     "writable": true
+    },
+    {
+     "name": "key"
+    }
+   ],
+   "args": [
+    {
+     "name": "job_id",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "verify_step2",
+   "docs": [
+    "8 squarings, * s, PKCS#1 v1.5 SHA-256 check and the token's claims; on success the worker is paid (price - fee + stake) and the job and the buffer close."
+   ],
+   "discriminator": [
+    18
+   ],
+   "accounts": [
+    {
+     "name": "prover",
+     "signer": true,
+     "writable": true
+    },
+    {
+     "name": "buffer",
+     "writable": true
+    },
+    {
+     "name": "key"
+    },
+    {
+     "name": "job",
+     "writable": true
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "vault_authority",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         118,
+         97,
+         117,
+         108,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "worker_token",
+     "writable": true
+    },
+    {
+     "name": "fee_token",
+     "writable": true
+    },
+    {
+     "name": "buyer",
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+   ],
+   "args": [
+    {
+     "name": "job_id",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "post_github",
+   "docs": [
+    "Post a job paid on a GitHub Actions proof for a repository and ref (their sha256 stored). amount 0 = a bounty with no money."
+   ],
+   "discriminator": [
+    19
+   ],
+   "accounts": [
+    {
+     "name": "buyer",
+     "signer": true,
+     "writable": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id] (289 bytes)"
+     ]
+    },
+    {
+     "name": "buyer_token",
+     "writable": true
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": [
+    {
+     "name": "id",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "amount",
+     "type": "u64"
+    },
+    {
+     "name": "work",
+     "type": "i64"
+    },
+    {
+     "name": "review",
+     "type": "i64"
+    },
+    {
+     "name": "brief",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "repo_hash",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "ref_hash",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    }
+   ]
   }
  ],
  "accounts": [

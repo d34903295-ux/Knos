@@ -357,3 +357,59 @@ def refund(ledger, buyer: Keypair, job_id: bytes) -> str:
                                   token_account_for(ledger, buyer.pubkey(), cfg["mint"]))], buyer)
     _record(ledger, j, "refunded")
     return sig
+
+
+# ---- 0.3.7: a job paid on a GitHub Actions proof ---------------------------------------------------------------------
+
+def post_github(ledger, relay, buyer: Keypair, brief: Brief, price_units: int, repo: str, ref: str,
+                work_s: int = 3600, review_s: int = 86_400, job_id: bytes | None = None) -> bytes:
+    """Post a github job: paid when a GitHub Actions OIDC token for the pinned prove.yml on `repo` at `ref`, with
+    audience "knos:<job id hex>", is verified on chain (prove_github). price_units 0 = a bounty with no money (the
+    claim stake only). With no proof by the deadline, settle/refund returns the price and the claim's stake."""
+    cfg = ledger.config()
+    mint = cfg["mint"]
+    brief.buyer = str(buyer.pubkey())
+    brief.price_units = price_units
+    brief.created = brief.created or int(time.time())
+    job_id = job_id or new_job_id()
+    brief.job_id = job_id.hex()
+    h = relay.put_brief(brief.encode())
+    ix = sol.post_github(ledger.program, buyer.pubkey(), job_id, price_units, work_s, review_s, bytes.fromhex(h),
+                         repo, ref, token_account_for(ledger, buyer.pubkey(), mint), vault_for(ledger, mint))
+    ledger.send([ix], buyer)
+    if getattr(ledger, "env", None) is not None:
+        ledger.env.known_jobs.append(job_id)
+    return job_id
+
+
+def _jwt_kid(jwt: str) -> str:
+    import base64
+    head = jwt.split(".")[0]
+    return json.loads(base64.urlsafe_b64decode(head + "=" * (-len(head) % 4)))["kid"]
+
+
+def prove_github(ledger, payer: Keypair, job_id: bytes, jwt: str) -> tuple[str, str]:
+    """Prove a claimed github job with a GitHub Actions OIDC token: write it to the proof buffer, then VerifyStep1 and
+    VerifyStep2 (1.4M CU each). On success the job's worker is paid (price - fee + the stake back) and the job and
+    the buffer close. Returns (sig1, sig2)."""
+    raw = jwt.strip().encode()
+    if len(raw) > sol.GH_MAX_JWT:
+        raise ValueError("token too long")
+    j = job(ledger, job_id)
+    if j is None or j.state != "claimed" or j.worker is None:
+        raise LookupError("not a claimed job")
+    pid = ledger.program
+    cfg = ledger.config()
+    mint = cfg["mint"]
+    key = sol.gh_key_pda(pid, _jwt_kid(jwt))
+    step = 800
+    for off in range(0, len(raw), step):
+        ledger.send([sol.buffer_write(pid, payer.pubkey(), job_id, len(raw), off, raw[off:off + step])], payer)
+    sig1 = ledger.send([sol.compute_limit(), sol.verify_step1(pid, payer.pubkey(), job_id, key)], payer)
+    pre = _ensure_ata(ledger, payer, j.worker, mint)
+    worker_tok = stake_account_for(ledger, j.worker, mint)
+    sig2 = ledger.send(pre + [sol.compute_limit(), sol.verify_step2(pid, payer.pubkey(), job_id, key,
+                                                                    vault_for(ledger, mint), worker_tok,
+                                                                    cfg["fee_token"], j.buyer)], payer)
+    _record(ledger, j, "released")
+    return sig1, sig2

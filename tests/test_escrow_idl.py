@@ -33,9 +33,15 @@ CALLS = {
     "refund": lambda: sol.refund(PID, K[0], H, K[1], K[2]),
     "verify_reject": lambda: sol.verify_reject(PID, K[0], H, H, K[1], K[2], K[3]),
     "crank": lambda: sol.crank(PID, K[0], H, K[1], K[2], K[3], K[4], K[5]),
+    "register_key": lambda: sol.register_key(PID, K[0], "kid-1", (1 << 2047) | 3),
+    "buffer_write": lambda: sol.buffer_write(PID, K[0], H, 100, 0, b"x" * 10),
+    "verify_step1": lambda: sol.verify_step1(PID, K[0], H, K[1]),
+    "verify_step2": lambda: sol.verify_step2(PID, K[0], H, K[1], K[2], K[3], K[4], K[5]),
+    "post_github": lambda: sol.post_github(PID, K[0], H, 0, 60, 60, H, "o/r", "refs/heads/main", K[1], K[2]),
+    "compute_limit": None,
 }
 BY_TAG = {ix["discriminator"][0]: ix for ix in IDL["instructions"]}
-SIZES = {"u8": 1, "u16": 2, "u64": 8, "i64": 8, "pubkey": 32}
+SIZES = {"u8": 1, "u16": 2, "u32": 4, "bytes": 0, "u64": 8, "i64": 8, "pubkey": 32}
 
 
 def _size(t) -> int:
@@ -51,6 +57,8 @@ def test_every_builder_is_called():
 def test_builders_match_idl():
     seen = set()
     for name, call in CALLS.items():
+        if call is None:          # compute_limit: a ComputeBudget instruction, not the escrow's
+            continue
         ix = call()
         tag = ix.data[0]
         assert tag in BY_TAG, f"{name}: tag {tag} not in the IDL"
@@ -69,8 +77,11 @@ def test_builders_match_idl():
             if "address" in acc:
                 assert str(meta.pubkey) == acc["address"], (name, acc["name"])
         arg_len = sum(_size(a["type"]) for a in entry["args"])
-        assert len(ix.data) == 1 + arg_len, name
-    assert seen == set(BY_TAG) == set(range(1, 15))
+        if any(a["type"] == "bytes" for a in entry["args"]):   # a variable-length tail (kid, chunk)
+            assert len(ix.data) > 1 + arg_len, name
+        else:
+            assert len(ix.data) == 1 + arg_len, name
+    assert seen == set(BY_TAG) == set(range(1, 20))
 
 
 def _layout(name):

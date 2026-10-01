@@ -19,7 +19,9 @@ succeed) and the vault must be empty: no stuck funds.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import os
 import random
 import time
@@ -31,6 +33,8 @@ pytest.importorskip("solders.litesvm")
 from _jobharness import Escrow  # noqa: E402
 
 from knos.jobs import sol  # noqa: E402
+from cryptography.hazmat.primitives import hashes  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import padding, rsa  # noqa: E402
 
 pytestmark = pytest.mark.slow
 U = 1_000_000
@@ -39,6 +43,32 @@ EPISODE = 1_000
 N = int(os.environ.get("KNOS_FUZZ_N", "10000"))
 SEED = int(os.environ.get("KNOS_FUZZ_SEED", "3405"))
 LIVE = ("open", "claimed", "delivered")
+GH_KID, GH_REPO, GH_REF = "fuzz-kid", "octo/widgets", "refs/heads/main"
+GH_KEY: list = []
+
+
+def _b64(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def gh_prove(e, who, jid: bytes, worker_tok, good: bool) -> bool:
+    """Write a GitHub-style OIDC token for `jid` (signed by the fuzz key; `good` False: audience of another job) and run
+    BufferWrite, VerifyStep1, VerifyStep2. True if all of them succeeded."""
+    claims = {"aud": sol.gh_audience(jid if good else bytes(32)), "ref": GH_REF, "repository": GH_REPO,
+              "job_workflow_ref": sol.GH_WORKFLOW_PREFIX + "v1", "iss": sol.GH_ISSUER, "exp": 4_000_000_000}
+    head = _b64(json.dumps({"alg": "RS256", "kid": GH_KID}).encode())
+    body = _b64(json.dumps(claims).encode())
+    sig = GH_KEY[0].sign(f"{head}.{body}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    t = f"{head}.{body}.{_b64(sig)}".encode()
+    p, k = e.pid, sol.gh_key_pda(e.pid, GH_KID)
+    j = e.job(jid)
+    buyer = j.buyer if j else who.pubkey()
+    for off in range(0, len(t), 800):
+        if not e.send([sol.buffer_write(p, who.pubkey(), jid, len(t), off, t[off:off + 800])], who, [who]):
+            return False
+    return (e.send([sol.compute_limit(), sol.verify_step1(p, who.pubkey(), jid, k)], who, [who]) and
+            e.send([sol.compute_limit(), sol.verify_step2(p, who.pubkey(), jid, k, e.vault, worker_tok, e.fee_token,
+                                                          buyer)], who, [who]))
 
 
 class Model:
@@ -49,7 +79,8 @@ class Model:
         self.paused, self.cap = False, 0
         self.released_fees = 0
         self.tried = self.ok = 0
-        self.settled = {"released": 0, "refunded": 0, "proven": 0, "verify_rejected": 0, "cranked": 0}
+        self.settled = {"released": 0, "refunded": 0, "proven": 0, "verify_rejected": 0, "cranked": 0,
+                        "proven_github": 0}
 
     def now(self) -> int:
         return int(self.e.svm.get_clock().unix_timestamp)
@@ -98,14 +129,23 @@ def _step(rng: random.Random, m: Model, ids: list[bytes]) -> None:
     if a < 18:                                                   # post (a settled id is free again: closed)
         amount = rng.choice([U - 1, U, 2 * U, 3 * U, 7 * U])
         work, review = rng.choice([30, 120, 600]), rng.choice([30, 120, 600])
-        ver = rng.choice(actors)[0] if rng.random() < 0.5 else None
-        ok = ((j is None or j["state"] not in LIVE) and not m.paused and amount >= sol.MIN_JOB_UNITS
+        gh = rng.random() < 0.3                              # 0.3.7: a github job (paid on proof), 0 = a bounty
+        if gh:
+            amount, ver = rng.choice([0, 0, U - 1, U, 3 * U]), None
+        else:
+            ver = rng.choice(actors)[0] if rng.random() < 0.5 else None
+        ok = ((j is None or j["state"] not in LIVE) and not m.paused
+              and (amount >= sol.MIN_JOB_UNITS or (gh and amount == 0))
               and (m.cap == 0 or amount <= m.cap))
-        got = e.post(who, tok, jid, amount, work=work, review=review, verifier=ver.pubkey() if ver else None)
+        if gh:
+            got = e.send([sol.post_github(e.pid, who.pubkey(), jid, amount, work, review, bytes(32), GH_REPO, GH_REF,
+                                          tok, e.vault)], who, [who])
+        else:
+            got = e.post(who, tok, jid, amount, work=work, review=review, verifier=ver.pubkey() if ver else None)
         if ok:
             m.jobs[jid] = {"state": "open", "buyer": who.pubkey(), "worker": None, "amount": amount,
                            "deadline": now + work, "review": review, "result": None,
-                           "verifier": ver.pubkey() if ver else None, "stake": 0}
+                           "verifier": ver.pubkey() if ver else None, "stake": 0, "github": gh}
             m.bal[tok] -= amount
             m.bal[e.vault] += amount
     elif a < 30:                                                 # claim, staking from the worker's own account
@@ -118,8 +158,23 @@ def _step(rng: random.Random, m: Model, ids: list[bytes]) -> None:
             j["state"], j["worker"], j["stake"] = "claimed", who.pubkey(), sol.stake_for(j["amount"])
             m.bal[tok] -= j["stake"]
             m.bal[e.vault] += j["stake"]
+    elif a < 42 and j is not None and j.get("github") and rng.random() < 0.6:   # 0.3.7: prove a github job
+        good = rng.random() < 0.8
+        payee = tok_of[bytes(j["worker"])] if j["worker"] and rng.random() < 0.9 else tok
+        ok = (j["state"] == "claimed" and now <= j["deadline"] and good and payee == tok_of[bytes(j["worker"])])
+        got = gh_prove(e, who, jid, payee, good)
+        if ok:
+            c = e.config(); fee = sol.fee_for(j["amount"], c["fee_bps"], c["min_fee"], c["min_amount"])
+            m.bal[e.vault] -= j["amount"] + j["stake"]
+            m.bal[payee] += j["amount"] - fee + j["stake"]
+            m.bal[e.fee_token] += fee
+            m.released_fees += fee
+            j["state"], j["stake"] = "released", 0
+            m.settled["released"] += 1
+            m.settled["proven_github"] += 1
     elif a < 42:                                                 # deliver (the stake comes back)
-        ok = j is not None and j["state"] == "claimed" and j["worker"] == who.pubkey() and now <= j["deadline"]
+        ok = (j is not None and j["state"] == "claimed" and j["worker"] == who.pubkey() and now <= j["deadline"]
+              and not j.get("github"))
         got = e.deliver(who, jid, worker_token=tok)
         if ok:
             j["state"], j["result"], j["deadline"] = "delivered", e.result_hash(jid), now + j["review"]
@@ -238,6 +293,9 @@ def test_escrow_fuzz_model_conservation_no_double_payout_no_stuck_funds():
     rng = random.Random(seed)
     e = Escrow()
     actors = [e.party(10 ** 12) for _ in range(5)]
+    GH_KEY.append(rsa.generate_private_key(public_exponent=65537, key_size=2048))
+    assert e.send([sol.register_key(e.pid, e.admin.pubkey(), GH_KID, GH_KEY[0].public_key().public_numbers().n)],
+                  e.admin, [e.admin])
     m = Model(e, actors)
     total = sum(m.bal.values())
     t0, steps, episode = time.perf_counter(), 0, 0
@@ -255,5 +313,5 @@ def test_escrow_fuzz_model_conservation_no_double_payout_no_stuck_funds():
     print(f"\nescrow fuzz: {steps} steps ({m.tried} transactions: {m.ok} accepted, {m.tried - m.ok} refused, all as "
           f"the model predicted; 0 violations), {episode} episodes, {s['released']} released ({s['proven']} on "
           f"proof), {s['refunded']} refunded ({s['verify_rejected']} by a verifier), {s['cranked']} by the deadline "
-          f"crank, seed {seed}, {took:.1f} s")
+          f"crank, {s['proven_github']} on a GitHub Actions proof, seed {seed}, {took:.1f} s")
     assert steps == n and s["released"] and s["refunded"] and (s["proven"] or n < 2000)

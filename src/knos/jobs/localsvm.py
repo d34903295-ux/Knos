@@ -65,7 +65,11 @@ class Escrow:
         msg = MessageV0.try_compile(payer.pubkey(), ixs, [], self.svm.latest_blockhash())
         r = self.svm.send_transaction(VersionedTransaction(msg, signers))
         self.svm.expire_blockhash()
-        return type(r).__name__ == "TransactionMetadata"
+        ok = type(r).__name__ == "TransactionMetadata"
+        meta = r if ok else getattr(r, "meta", lambda: None)()
+        self.last_cu = meta.compute_units_consumed() if meta is not None and callable(getattr(meta, "compute_units_consumed", None)) else getattr(meta, "compute_units_consumed", None)
+        self.last_logs = list(meta.logs() if callable(getattr(meta, "logs", None)) else getattr(meta, "logs", []) or []) if meta is not None else []
+        return ok
 
     # -- tokens --------------------------------------------------------------------------------------------------------
     def _tix(self, data, metas) -> Instruction:
