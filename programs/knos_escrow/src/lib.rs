@@ -26,6 +26,8 @@ use solana_program::{
     sysvar::Sysvar,
 };
 
+pub mod github;
+
 #[cfg(not(feature = "no-entrypoint"))]
 solana_program::entrypoint!(process);
 
@@ -54,7 +56,7 @@ struct Job {
 }
 impl Job {
     fn load(d: &[u8]) -> Result<Job, ProgramError> {
-        if d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
+        if d.len() != JOB_LEN && d.len() != github::GH_JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
         let pk = |o: usize| Pubkey::new_from_array(d[o..o + 32].try_into().unwrap());
         let u = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
         let full = d.len() >= V034_JOB_LEN;
@@ -62,7 +64,7 @@ impl Job {
                  brief: d[89..121].try_into().unwrap(), result: d[121..153].try_into().unwrap(),
                  verifier: if full { pk(153) } else { Pubkey::default() },
                  proof: if full { d[185..217].try_into().unwrap() } else { [0; 32] },
-                 stake: if d.len() == JOB_LEN { u(217) } else { 0 } })
+                 stake: if d.len() >= JOB_LEN { u(217) } else { 0 } })
     }
     fn store(&self, d: &mut [u8]) {
         d[0] = self.state; d[1..33].copy_from_slice(self.buyer.as_ref()); d[33..65].copy_from_slice(self.worker.as_ref());
@@ -284,6 +286,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             }
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
             if j.state != S::Claimed as u8 || *worker.key != j.worker { return Err(err(21, "not worker")); }
+            if job.data_len() == github::GH_JOB_LEN { return Err(err(77, "a github job settles by proof, not delivery")); }
             if now > j.deadline { return Err(err(23, "the claim timed out")); }
             let (wo, _) = token_owner_mint(worker_tok)?;
             if wo != j.worker { return Err(err(33, "stake back to the worker only")); }
@@ -364,6 +367,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             }
             close_job(&j, job, buyer)
         }
+        // 15 RegisterKey, 16 BufferWrite, 17 VerifyStep1, 18 VerifyStep2, 19 PostGithub: see github.rs
+        15..=19 => github::process(program_id, accounts, tag, rest, &config_key, &vault_auth, vault_bump),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
