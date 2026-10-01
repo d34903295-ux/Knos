@@ -91,6 +91,7 @@ jobs:
           DEVNET_UPGRADE_KEY: ${{ secrets.DEVNET_UPGRADE_KEY }}
         run: |
           umask 077; printf '%s' "$DEVNET_UPGRADE_KEY" > "$RUNNER_TEMP/up.json"
+          solana config set --url devnet --keypair "$RUNNER_TEMP/up.json" >/dev/null
           have=$(solana -u devnet program show "$PROGRAM_ID" --output json | python3 -c 'import sys,json;print(json.load(sys.stdin)["dataLen"])')
           need=$(stat -c%s knos_escrow.so)
           if [ "$need" -gt "$have" ]; then solana -u devnet program extend "$PROGRAM_ID" $(( need - have + 4096 )) --keypair "$RUNNER_TEMP/up.json"; fi
