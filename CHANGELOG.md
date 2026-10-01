@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.7 (1 Oct 2026)
+
+AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.
+
+- **GitHub's proof, verified on chain.** The escrow verifies GitHub Actions OIDC tokens itself.
+  - The signature check is RSA-2048, done in Montgomery form in two transactions (1,148,681 and 1,193,853 compute
+    units). The token is written through a buffer account first.
+  - The program checks the issuer, the pinned `prove.yml` tag (`job_workflow_ref`), the repository, the ref and
+    `aud = knos:<job>`. Each proof can be used once.
+  - GitHub's 4 JWKS keys are registered on devnet; r2 is checked once, when a key is registered.
+  - A "github" job pays the worker only on a verified token. With no proof by the deadline, the buyer gets the price
+    back plus the claim stake.
+  - Tests cover tampered claims and signatures, wrong keys, workflows, audiences, repositories and refs, and replay,
+    plus a 10,000-step fuzz with 0 violations.
+- **`prove.yml`, a reusable workflow.**
+  - Job 1 runs `.knos/proof.toml`, read from the base branch, on the PR head with no token.
+  - Job 2 runs no PR code. It mints a token for `knos:<job>` and calls `knos prove`.
+  - `knos proof run` runs a repo's checks. Knos proves its own work with `prove-demo.yml`.
+- **Front door, nothing to install.** The home page is "Paste an agent PR". Your browser asks GitHub directly and shows
+  in 0.95–2.5 s whether the PR's "tests pass" is true at its head commit, along with that agent's record. "Protect
+  this repo" opens GitHub's new-file page with the workflow already filled in: 2 clicks. The Agent PR Index (per
+  agent: claimed green, actually failed) is rebuilt every 30 minutes into the Pages site, with no data commits, and
+  each batch root is attested on devnet SAS.
+- **Bonded PR bounties.**
+  - A maintainer funds an issue; a 0 bounty is allowed.
+  - An agent claims it with a stake, and the proof transaction pays the bounty plus the stake back.
+  - The escrow takes several mints (AddMint).
+  - A devnet-only faucet mints test USDC from a program-owned mint.
+  - The web wallet is a passkey guarding a throwaway devnet gas key, topped up by `POST /gas`.
+- **Sibyl on the money path.** Before a proof is minted, the checks recall the repo's rules from Sibyl:
+  CONTRIBUTING.md, plus past rejections. `lint` fails a PR that breaks one and cites the line; `learn` makes each
+  flagged rule a required check.
+- **Compared against** CodeRabbit, Algora, Vouch, Virtuals ACP and Upwork ([docs/COMPARE.md](docs/COMPARE.md)).
+- **Fee:** 2.5% everywhere. The pitch is Solana only.
+- **Next** (not in 0.3.7):
+  - LazorKit's paymaster with a call into the Knos escrow (untested; the gas-key wallet is used instead);
+  - a Squads upgrade authority with a timelock, a solana-verify build, and the IDL on chain;
+  - agent verdicts written to Solana Agent Registry reputation;
+  - list 257-byte multi-mint jobs in the web app's "My jobs".
+
 ## 0.3.6 (1 Oct 2026)
 
 AI agent work gets paid only when someone other than the agent proves it.
