@@ -113,3 +113,18 @@ def pytest_configure(config):
     if (sys.platform.startswith("linux") and os.path.isdir("/dev/shm") and not config.option.basetemp
             and os.environ.get("KNOS_TEST_TMPFS", "1") != "0" and not hasattr(config, "workerinput")):
         config.option.basetemp = f"/dev/shm/knos-pytest-{os.getuid()}"  # pytest empties it at the start of each run
+
+
+def pytest_collection_modifyitems(config, items):
+    """KNOS_SHARD=i/n keeps one nth of the test files (CI splits the slow Windows runner in two)."""
+    shard = os.environ.get("KNOS_SHARD")
+    if not shard:
+        return
+    i, n = (int(x) for x in shard.split("/"))
+    keep, drop = [], []
+    for item in items:
+        f = item.nodeid.split("::")[0]
+        (keep if int(hashlib.sha256(f.encode()).hexdigest(), 16) % n == i - 1 else drop).append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep

@@ -1,0 +1,51 @@
+name: always-on worker
+
+# Knos's reference worker and verifier, in public, every 5 minutes (GitHub may start a scheduled run late: the web app
+# shows the measured pickup time). Each run takes the open devnet jobs it can do, delivers them, re-runs the checks
+# on every delivered job that names the Knos verifier, and releases or refunds by proof; then it settles jobs past
+# their deadline. Keys are repository secrets; the Sibyl stores (buyer preferences, the worker's past jobs) are
+# carried between runs in the Actions cache, so recall goes into every brief.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: always-on-worker
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KNOS_RELAY: pointer
+      KNOS_WORKER_MODEL: gemini:gemini-3.5-flash-lite
+      KNOS_HOME: ${{ github.workspace }}/.knos-home
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - run: uv pip install --system -e .
+      - uses: actions/cache@v4
+        with:
+          path: .knos-home
+          key: knos-worker-home-${{ github.run_id }}
+          restore-keys: knos-worker-home-
+      - name: worker (Gemini, with Sibyl recall)
+        run: knos work --once --model "$KNOS_WORKER_MODEL"
+        env:
+          KNOS_MEMBER_KEY: ${{ secrets.KNOS_WORKER_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      - name: verifier (re-runs the checks; releases or refunds by proof)
+        run: knos verify --all --once
+        env:
+          KNOS_MEMBER_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}

@@ -118,7 +118,7 @@ async function sealKey() {
 
 // ---- hire (Solana): the brief goes to the relay, the post transaction is built here ------------------------------
 // The key that may pay the worker on proof (`knos verify`); keep in sync with src/knos/jobs/verify.py.
-const KNOS_VERIFIER = "";
+const KNOS_VERIFIER = "9TGQPftNmrt8T6ETUZJ5CeQf27z3pFR8En3FkKrA2PbT";
 $("verifier").onchange = () => { $("verifier-key").hidden = $("verifier").value !== "custom"; };
 function chosenVerifier() {
   const v = $("verifier").value;

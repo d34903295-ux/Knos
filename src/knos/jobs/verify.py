@@ -20,7 +20,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
 # The Knos reference verifier: the key the always-on `knos verify --all --once` worker signs with.
-KNOS_VERIFIER = ""   # base58 public key of devnet-worker2; filled in from that key file (public half only)
+KNOS_VERIFIER = "9TGQPftNmrt8T6ETUZJ5CeQf27z3pFR8En3FkKrA2PbT"   # base58 public key of devnet-worker2; filled in from that key file (public half only)
 
 
 def resolve(spec: str | None) -> Pubkey | None:

@@ -55,8 +55,48 @@ def finality(url: str) -> str:
         return "confirmed"
 
 
+POINTER = "q6F1zDrYM1skVMyfFLsvgbxALDouZQURheFhr5dT4xY"   # signs the `knos-api:<url>` memo (web/chain.js reads it too)
+MEMO = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+
+
+def api_url() -> str | None:
+    """The live API (relay + Actions): the newest `knos-api:<url>` memo signed by POINTER on devnet."""
+    from ..team import rpc
+    url = rpc.CLUSTERS["devnet"]
+    for s in rpc.call(url, "getSignaturesForAddress", [POINTER, {"limit": 10}]) or []:
+        if s.get("err"):
+            continue
+        tx = rpc.call(url, "getTransaction", [s["signature"], {"encoding": "json",
+                                                                "maxSupportedTransactionVersion": 0}])
+        m = tx and tx["transaction"]["message"]
+        if not m or m["accountKeys"][0] != POINTER:
+            continue
+        for ix in m["instructions"]:
+            if m["accountKeys"][ix["programIdIndex"]] != MEMO:
+                continue
+            text = _b58decode(ix["data"]).decode(errors="replace")
+            if text.startswith("knos-api:https://"):
+                return text[len("knos-api:"):]
+    return None
+
+
+def _b58decode(s: str) -> bytes:
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    n = 0
+    for c in s:
+        n = n * 58 + alphabet.index(c)
+    body = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    return bytes(len(s) - len(s.lstrip("1"))) + body
+
+
 def relay():
-    return open_relay(os.environ.get("KNOS_RELAY") or (paths.home() / "jobs" / "relay"))
+    """KNOS_RELAY: a directory, an http(s) relay, or `pointer` (the live API named on devnet: always-on workers)."""
+    where = os.environ.get("KNOS_RELAY") or (paths.home() / "jobs" / "relay")
+    if where == "pointer":
+        where = api_url()
+        if not where:
+            raise Refused("No live Knos API is named on devnet right now.")
+    return open_relay(where)
 
 
 def key() -> Keypair:
