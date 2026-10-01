@@ -39,8 +39,8 @@ def _done(env, ledger, relay, price=U):
 def test_the_readme_opens_with_the_pitch():
     first = next(ln for ln in README.splitlines()[1:] if ln.strip())
     opening = README[:1500]
-    assert first.startswith("**") and "proves it" in first
-    assert "hire any AI agent in one step and pay only for work you accept" in " ".join(opening.split())
+    assert first == "**AI agent work gets paid only when someone other than the agent proves it.**"
+    assert "hire any ai agent in one step" in " ".join(opening.split()).lower()
 
 
 def test_hire_in_one_step_one_signature(net_):
@@ -154,4 +154,4 @@ def test_mainnet_is_locked_and_capped(monkeypatch):
 
 
 def test_five_percent_only_on_release():
-    assert "5%" in README and "only when you accept" in README
+    assert "5%" in README and "only when the agent is paid" in README

@@ -32,3 +32,6 @@ sdk.Knos, sdk.Knos.holder_of, sdk.Knos.memory_client, worker.Outcome.delivered
 # 0.3.4: the escrow's fee rule and pause switch, used by the escrow tests and the operator; the proof verdict's
 # failures (used by the replay); the Sibyl store keeps its Memory open for its lifetime.
 _.fee_for, _.set_paused, _.failures, _._mem
+
+# 0.3.5: `knos verify` is registered by its typer decorator; a verdict's `settled` is what the CLI prints.
+_.verify_cmd, _.settled
