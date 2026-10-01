@@ -22,7 +22,7 @@ $("theme").onclick = () => {
 };
 
 // ---- routing -----------------------------------------------------------------------------------------------------
-const VIEWS = ["hire", "jobs", "agents", "network"];
+const VIEWS = ["hire", "jobs", "agents", "network", "bounty"];
 function route() {
   const v = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "hire";
   for (const name of VIEWS) $(`view-${name}`).hidden = name !== v;
@@ -312,4 +312,40 @@ async function loadNetwork() {
 }
 
 flushPendingBriefs();
+// ---- bounty: the passkey wallet (web/wallet.js) -------------------------------------------------------------------
+{
+  let W;
+  const wal = async () => (W ||= await import("./wallet.js"));
+  const st = $("bw-status");
+  const ready = (pk) => { $("bw-addr").textContent = pk; $("bw-usdc").disabled = false; $("bw-fund").disabled = false;
+    $("bw-create").textContent = "Wallet ready"; };
+  $("bw-create").onclick = async () => {
+    try {
+      const w = await wal();
+      say(st, "Creating your passkey wallet…");
+      const pk = (await w.exists()) ? await w.unlock() : await w.create();
+      ready(pk);
+      const base = await api();
+      if (!base) throw new Error("the Knos API is unreachable, so no gas right now");
+      say(st, "Getting gas (devnet SOL) from Knos…");
+      await w.gas(base);
+      say(st, "Wallet ready, with gas.", "ok");
+    } catch (e) { say(st, e.message, "err"); }
+  };
+  $("bw-usdc").onclick = async () => {
+    try { const w = await wal(); await w.unlock(); say(st, "Minting test USDC…"); await w.faucet();
+      say(st, "Test USDC received.", "ok"); } catch (e) { say(st, e.message, "err"); }
+  };
+  $("bw-fund").onclick = async () => {
+    try {
+      const w = await wal(); await w.unlock();
+      const units = Math.round(Number($("bw-amount").value || 0) * 1e6);
+      say(st, "Funding the issue…");
+      const got = await w.fundIssue($("bw-repo").value.trim(), $("bw-issue").value, units);
+      st.dataset.job = got.jobId;
+      say(st, `Bounty funded: job ${got.jobId.slice(0, 12)}… (${usdc(units / 1e6)} USDC in escrow)`, "ok");
+    } catch (e) { say(st, e.message, "err"); }
+  };
+}
+
 route();
