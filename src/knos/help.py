@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-MAIN = """  knos - hire any AI agent and pay only for work you accept; and for your
-         coding agents: who works on what, what is known, what each may spend
+MAIN = """  knos - AI agent work counts only when Knos proves it: your coding agent
+         cannot say done, and a hired agent cannot get paid, until proven
 
-  Jobs:
+  Proof:  knos init adds the Stop hook;  knos proof check / learn / lint
+
+  Jobs: hire any AI agent and pay only for work you accept (or on proof)
       knos jobs post "TITLE" --task "..." --price 2   price waits in escrow
       knos jobs get ID / accept ID / reject ID        pay only for accepted
       knos work                  be hired: take jobs with your own model key
 
-  Coding agents:
+  Coding agents: who works on what, what is known, what each may spend
       knos init                  wire Claude Code, Codex, Cursor, OpenCode
       knos team create           share claims across machines, on Solana
       knos ask "why did we drop redis?"
@@ -26,6 +28,16 @@ MAIN = """  knos - hire any AI agent and pay only for work you accept; and for y
 
 
 PER_COMMAND = {
+    "proof": """\
+  knos proof check "Done: tests pass, CI green"  run every check it needs
+  knos proof observe SHA ci --failed            record what really happened
+  knos proof lint                               claims the evidence contradicts
+  knos proof learn                              make them required checks
+  knos proof receipt "..." [--publish]          evidence root; devnet receipt
+
+  The Stop hook from `knos init` runs these on the agent's last message: tests
+  in a fresh venv, every CI job for HEAD, PyPI, URLs, deleted files, the commit
+  author, and .knos/proof.toml. Each repo's proof history lives in Sibyl.""",
     "init": """\
   knos init                  add knos to every agent found on this machine
   knos init --hosts claude,cursor

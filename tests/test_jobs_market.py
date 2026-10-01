@@ -82,6 +82,32 @@ def test_reject_refunds_and_silent_buyer_releases(net):
     assert env.balance(worker_tok) == 950_000
 
 
+def test_paid_on_proof_through_the_market(net):
+    """A job naming a verifier: the verifier's release pays the worker with no buyer step and records the proof root;
+    nobody else can, and a job under the minimum never reaches the chain."""
+    import hashlib
+    env, ledger, relay = net
+    buyer, buyer_tok = env.party(10 * USDC)
+    worker, worker_tok = env.party()
+    verifier, _ = env.party()
+    with pytest.raises(RuntimeError):
+        market.post(ledger, relay, buyer, market.Brief("tiny", "x"), USDC - 1)          # below the 1 USDC minimum
+    jid = market.post(ledger, relay, buyer, market.Brief("Proof", "x"), 2 * USDC, verifier=verifier.pubkey())
+    assert market.job(ledger, jid).verifier == verifier.pubkey()
+    market.claim(ledger, worker, jid)
+    root = hashlib.sha256(b"proof root").digest()
+    with pytest.raises(LookupError):
+        market.verify_release(ledger, verifier, jid, root)                              # nothing delivered yet
+    market.deliver(ledger, relay, worker, jid, buyer.pubkey(), b"done")
+    with pytest.raises(LookupError):
+        market.verify_release(ledger, buyer, jid, root)                                 # not the verifier
+    market.verify_release(ledger, verifier, jid, root)
+    got = market.job(ledger, jid)
+    assert got.state == "released" and got.proof == root
+    assert env.balance(worker_tok) == 1_900_000 and env.balance(env.fee_token) == 100_000
+    assert env.balance(buyer_tok) == 8 * USDC and env.balance(env.vault) == 0
+
+
 def test_buyer_preferences_are_checked_before_delivery():
     prefs = ["Never use exclamation marks.", "Always sign off with — Ada"]
     assert not checks.run("copy", {}, "Great news!\n— Ada", prefs)[0]

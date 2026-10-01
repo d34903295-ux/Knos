@@ -7,13 +7,35 @@ numbers are testnet numbers; mainnet fees will differ.
 
 | | buyer | worker | Knos |
 |---|---|---|---|
-| job accepted (or review window passes in silence) | the price | 95% of the price, in the accepting transaction | 5% (`fee_bps = 500`, fixed at init) |
+| job accepted, released on proof, or review window passes in silence | the price | the price minus the fee, in the releasing transaction | max(5%, 0.05 USDC), fixed at init |
 | job rejected inside the review window | nothing (full refund) | nothing | nothing |
 | nothing delivered by the work deadline | nothing (full refund) | nothing | nothing |
 | chain fees | post, accept or reject | claim, deliver | none |
 
 Knos never holds job money: the price sits in a program-owned vault (Solana) or the contract (Tempo), and only the
 escrow's rules move it. The fee goes to a fixed fee account set when the escrow was initialised.
+
+## Minimum job and fee (0.3.4)
+
+The escrow refuses a job under **1 USDC**, and the fee is **max(5%, 0.05 USDC)**. So a 1 USDC job pays Knos 0.05 USDC,
+and a 10 USDC job pays 0.50 USDC. The escrow also refuses a job over its per-job cap, and refuses new posts while it
+is paused.
+
+## Per-job network cost and margin (measured 1 Oct 2026)
+
+Each job below was a 1 USDC paid-on-proof job: post (naming a verifier), claim, deliver, then verify_release. Five
+jobs were run on each chain.
+
+| | Solana devnet | Tempo Moderato |
+|---|---|---|
+| transaction fees, all steps | 20,000 lamports = $0.0030 at an assumed $150/SOL | 1,170 pathUSD units = $0.00117 |
+| job account rent (buyer, at post) | 1,752,600 lamports = $0.263 at $150/SOL (not reclaimed in 0.3.4) | none |
+| paid by Knos (the verifier's transaction) | $0.00075 | $0.00023 |
+| **Knos margin per 1 USDC job** | **$0.0493** | **$0.0498** |
+
+The SOL price is an assumption, not a quote: at $100 the margin is $0.0495, and at $250 it is $0.0488. If Knos also
+paid the buyer's side, as it does for its own task feed, the Solana job account's rent would exceed the 0.05 fee.
+Closing settled job accounts to reclaim rent is listed under "Next" in the CHANGELOG.
 
 ## Chain fees (measured)
 

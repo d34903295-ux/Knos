@@ -381,7 +381,7 @@ def test_installing_twice_does_not_stack_up_hooks(knos_home):
         guard.install_claude()
         guard.install_cursor()
     claude = json.loads(guard.claude_settings().read_text(encoding="utf-8"))
-    assert len(claude["hooks"]["PreToolUse"]) == 1
+    assert len(claude["hooks"]["PreToolUse"]) == 2
     assert len(claude["hooks"]["SessionStart"]) == 1
     cursor = json.loads(guard.cursor_hooks().read_text(encoding="utf-8"))
     assert len(cursor["hooks"]["preToolUse"]) == 1

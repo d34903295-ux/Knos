@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.3.4 (1 Oct 2026)
+
+AI agent work counts only when Knos proves it: your coding agent cannot say done, and a hired agent cannot get paid,
+until the proof is real.
+
+- **Proof hook.** `knos init` adds a Stop hook to Claude Code and Codex. It reads the agent's last message, and when
+  that message claims something Knos cannot prove, the agent is not allowed to finish. Knos runs every check itself:
+  - tests in a fresh venv;
+  - every job of every CI run for HEAD (`gh run view`);
+  - the PyPI version live;
+  - each URL answering 200;
+  - deleted files gone;
+  - the commit author, with no AI trailers;
+  - anything in `.knos/proof.toml`.
+
+  After 3 blocks on unchanged evidence it lets the agent stop, with a warning. A PreToolUse guard refuses overwriting
+  a file the agent never read, and deleting outside the repo.
+- **Sibyl keeps each repo's proof history.** `knos proof learn` turns a past false "done" into a check that is
+  required from then on, and `knos proof lint` flags claims the evidence contradicts. Replaying releases 0.3.0 to
+  0.3.3:
+  - with Sibyl, Knos blocks 0.3.1 and 0.3.2, whose CI failed, and passes 0.3.0 and 0.3.3;
+  - with a null store and local pytest alone, it passes all four.
+- **Paid on proof.** A job can name a verifier key. When the proof passes, the escrow releases with no human step;
+  when it fails, the escrow refunds after the deadline; a dispute re-runs the checks. Every proven "done" can get a
+  devnet SAS receipt (the Merkle root of its evidence) and a receipt page (`web/receipt.html`).
+- **Guarded launch.** The escrow has a per-job cap and a pause switch. Mainnet stays locked.
+- **Economics.** The minimum job is 1 USDC, and the fee is max(5%, 0.05 USDC). Measured margin per 1 USDC job: $0.049 on devnet and $0.050 on Moderato ([docs/ECONOMICS.md](docs/ECONOMICS.md)).
+- **Security.** A threat model ([docs/SECURITY.md](docs/SECURITY.md)) and a nightly fuzz of 10,000 escrow steps in LiteSVM checking conservation, no double payout and no stuck funds.
+- **Market number.** 18.2% of agent PRs that say tests pass had failing CI at that commit ([docs/BENCH.md](docs/BENCH.md)).
+- **One benchmark source.** Every benchmark number in the docs is generated from `docs/bench.json`, and a test fails
+  on drift. This fixes the 14→22 and 19/24 figures that disagreed between pages. Modelled baselines are labelled as
+  models.
+- **Licence.** Everything that can be judged is MIT: the hooks, the proof engine, the escrow, the SDKs, the receipts
+  and the web app. Only the paid conveniences in `src/knos/pro/` are FSL-1.1-MIT.
+- **Next** (not in 0.3.4):
+  - `knos mainnet-check`, a solana-verify verified build, and moving the devnet upgrade authority to the Squads
+    multisig (the multisig exists; the transfer has only been simulated).
+  - Publish the Claude Code plugin marketplace and MCP registry listings, and fix the plugin's silent failure when
+    `knos` is not on PATH.
+  - A close instruction so settled job accounts return their rent.
+- **Disclosure.**
+  - Knos 0.1.0–0.1.8 (shared local memory for coding agents, with topic claims) was written and released 1–7 Sep
+    2026, before 14 Sep, and won the Sibyl Labs hackathon.
+  - Everything from 0.2.0 on was built from 29 Sep 2026.
+  - Scope freezes on 8 Oct 2026.
+
 ## 0.3.3 (Oct 2026)
 
 - **Installs everywhere again.** x402 payments on Solana are built in with solders (the same `exact` transaction the

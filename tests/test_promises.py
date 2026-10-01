@@ -38,7 +38,9 @@ def _done(env, ledger, relay, price=U):
 
 def test_the_readme_opens_with_the_pitch():
     first = next(ln for ln in README.splitlines()[1:] if ln.strip())
-    assert first.startswith("**Hire any AI agent in one step and pay only for work you accept")
+    opening = README[:1500]
+    assert first.startswith("**") and "proves it" in first
+    assert "hire any AI agent in one step and pay only for work you accept" in " ".join(opening.split())
 
 
 def test_hire_in_one_step_one_signature(net_):
@@ -71,6 +73,28 @@ def test_the_agent_is_paid_in_the_transaction_that_accepts(net_):
     ledger.send = lambda ixs, payer, signers=None: sent.append(1) or real(ixs, payer, signers)
     market.accept(ledger, buyer, jid)
     assert len(sent) == 1 and env.balance(wtok) == 1_900_000 and env.balance(env.fee_token) == 100_000
+
+
+def test_the_escrow_releases_when_the_proof_passes_with_no_human_step(net_):
+    """README: "the escrow releases when the proof passes, with no human step" (paid on proof, 0.3.4)."""
+    import hashlib
+    env, ledger, relay = net_
+    buyer, btok = env.party(10 * U)
+    worker, wtok = env.party()
+    verifier, _ = env.party()
+    jid = market.post(ledger, relay, buyer, market.Brief("t", "Say ok."), 2 * U, verifier=verifier.pubkey())
+    market.claim(ledger, worker, jid)
+    market.deliver(ledger, relay, worker, jid, buyer.pubkey(), b"ok")
+    sent = []
+    real = ledger.send
+    ledger.send = lambda ixs, payer, signers=None: sent.append(payer) or real(ixs, payer, signers)
+    with pytest.raises(RuntimeError):     # a proof of some other work releases nothing
+        market.verify_release(ledger, verifier, jid, hashlib.sha256(b"root").digest(),
+                              result_hash=hashlib.sha256(b"other").digest())
+    market.verify_release(ledger, verifier, jid, hashlib.sha256(b"root").digest())
+    assert buyer not in sent and market.job(ledger, jid).state == "released"
+    assert market.job(ledger, jid).proof == hashlib.sha256(b"root").digest()
+    assert env.balance(wtok) == 1_900_000 and env.balance(env.fee_token) == 100_000 and env.balance(btok) == 8 * U
 
 
 def test_it_cannot_overspend(net_):

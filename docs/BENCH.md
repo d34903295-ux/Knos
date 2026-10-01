@@ -3,6 +3,23 @@
 Re-run it to check every number. `knos bench` measures the single-machine bars; `knos bench --chain URL` measures the
 team bars on a local validator. The methods are in `src/knos/bench.py` and `src/knos/bench_chain.py`.
 
+## How often agents say "tests pass" when CI failed (0.3.4)
+
+<!-- bench:market -->
+Of 303 pull requests by AI coding agents (GitHub Copilot, Devin, OpenAI Codex, Claude) whose description says tests or CI pass, and whose CI had finished at the PR's head commit, **55 (18.2%) had a failing check at that commit** (95% interval 14.2%–22.9%); counting only test and build checks, 34 (11.2%). 30 of the 55 were merged anyway. PRs created 3 Jul – 30 Sep 2026, collected 1 Oct 2026 with `gh search prs` and the GitHub API: script `scripts/agent_pr_ci.py`, every PR in `docs/agent_pr_ci.json`.
+
+| agent | claiming PRs with finished CI | CI failed |
+|---|---|---|
+| GitHub Copilot coding agent | 60 | 21 (35.0%) |
+| Devin | 68 | 15 (22.1%) |
+| OpenAI Codex | 55 | 9 (16.4%) |
+| Claude GitHub app | 96 | 8 (8.3%) |
+| Claude Code | 24 | 2 (8.3%) |
+| **all** | **303** | **55 (18.2%)** |
+
+Small per-agent samples are directional only. This is the gap the Knos Stop hook closes: it runs the CI check itself before the agent may say done.
+<!-- /bench:market -->
+
 ## Team bars (0.3): `knos bench --chain http://127.0.0.1:8899`
 
 On a local validator running the devnet-deployed Solana Attestation Service and Lighthouse (`scripts/devchain.sh
@@ -43,7 +60,9 @@ budget = 32 cells):
 limit (measured on the local validator; `knos team status` prints it).
 
 **Limits, said plainly:**
-- The advisory arm is a model of Agent Mail's reservations and commit guard, not Agent Mail itself.
+- <!-- bench:models -->
+Modelled, not measured: The 'advisory' arm of `knos bench --chain` is a model: each agent reserves before writing with probability 0.9 (compliance), the commit guard then refuses others' commits. It is not a measurement of any shipping tool.
+<!-- /bench:models -->
 - The chain numbers come from a local validator on a busy laptop; devnet adds network latency to the first claim of
   each file (the recorded devnet run is in [network/demo.md](network/demo.md)).
 - When the guard cannot get the chain's word within its 1-second budget, it lets the edit go ahead with a warning
@@ -94,11 +113,26 @@ Limits, said plainly: the advisory arm simulates a check-then-write lease; the h
 
 Measured 1 Oct 2026. The live rows include every RPC round trip the client makes, from a home connection in Lagos.
 
-Acceptance with buyer memory (24 real jobs, 4 buyers with standing preferences said once among 27 unrelated
-requests, Claude Sonnet as the worker in both runs): 14/24 accepted when memory was a Sibyl search on the brief
-(54/72 preferences found), **22/24** with 0.3.1's preference capture (72/72 found; both misses were task errors,
-preferences were honoured 24/24). Capture on a held-out set written before it was run: 21/24 preferences, 0 of 30
-ordinary requests mistaken for one (`tests/data/preferences_heldout.json`).
+Acceptance with buyer memory: 24 real jobs, 4 buyers with standing preferences said once among 27 unrelated
+requests. Every number below comes from `docs/bench.json` (`python scripts/bench_docs.py`).
+
+<!-- bench:acceptance-headline -->
+On a 24-job benchmark (measured 2026-10-01), buyers accepted 22 of 24 jobs with Knos's buyer memory and 0 without it (Claude Sonnet); with a live Gemini worker (gemini-3.5-flash-lite), 19 and 1.
+<!-- /bench:acceptance-headline -->
+
+<!-- bench:acceptance-table -->
+| worker | buyer memory | preferences recalled | task correct | accepted |
+|---|---|---|---|---|
+| Claude Sonnet | Sibyl search on the brief (0.3.0 method) | 54/72 | 23/24 | **14/24** |
+| Claude Sonnet | preferences captured when said (0.3.1+) | 72/72 | 22/24 | **22/24** |
+| Claude Sonnet | none | 0/72 | 23/24 | **0/24** |
+| Gemini gemini-3.5-flash-lite (live) | preferences captured when said (0.3.1+) | 72/72 | 19/24 | **19/24** |
+| Gemini gemini-3.5-flash-lite (live) | none | 0/72 | 16/24 | **1/24** |
+<!-- /bench:acceptance-table -->
+
+The 0.3.0 method (a Sibyl search on the brief) found 54 of 72 preferences; capturing them when said (0.3.1) finds 72
+of 72. Capture on a held-out set written before it was run: 21/24 preferences, 0 of 30 ordinary requests mistaken for
+one (`tests/data/preferences_heldout.json`).
 
 ## Recall (0.3.2): `knos.recall` on LongMemEval_s
 
@@ -107,15 +141,18 @@ over the whole round, the user part and the assistant part), Sibyl's own search,
 by reciprocal rank per session. Scored like the 0.3.1 baseline: the answer-bearing past session is in the top 10.
 Tuned on a fixed 100-question dev split (seed 0); the other 370 questions are held out.
 
-| | baseline (0.3.1) | dev (100) | **held-out (370)** |
+<!-- bench:recall-table -->
+LongMemEval_s (cleaned), 470 questions with evidence; tuned on 100, held out 370, measured 2026-10-01.
+
+| | baseline (0.3.1) | dev | **held-out** |
 |---|---|---|---|
 | overall, top 10 | 81.5% | 97.0% | **96.8%** |
 | the assistant said | 51.8% | 100% | **88.4%** |
 | preferences | 50.0% | 100% | **83.3%** |
-| median tokens retrieved | 5,338 | 5,554 | 5,656 |
+| median tokens retrieved | 5,338 | 5,554 | **5,656** |
+<!-- /bench:recall-table -->
 
-Measured 1 Oct 2026 on LongMemEval_s (cleaned), 470 questions with evidence. The eval script lives with the private
-measurements; the strategy is `src/knos/recall.py`.
+The strategy is `src/knos/recall.py`.
 
 ## Web app (0.3.2): Lighthouse
 
@@ -127,14 +164,8 @@ serve`) on the same loaded machine, mobile performance was 55, all of it the ser
 ## Acceptance with a live model (0.3.3)
 
 The same 24 jobs, buyers, histories and grader, with the reference worker's prompt (`Worker.prompt`) answered live by
-Gemini through its native API on 1 Oct 2026. One attempt per job, temperature 0.2.
-
-| worker model | buyer memory | preferences recalled | task correct | accepted |
-|---|---|---|---|---|
-| **gemini-3.5-flash-lite** (all 48 answers; gemini-3.8-flash was out of free-tier quota) | captured when said (Sibyl) | 72/72 | 19/24 | **19/24** |
-| **gemini-3.5-flash-lite** | none | 0 | 16/24 | **1/24** |
-| Claude Sonnet (0.3.1) | captured when said | 72/72 | 22/24 | 22/24 |
-| Claude Sonnet (0.3.1) | none | 0 | 23/24 | 0/24 |
+Gemini through its native API on 1 Oct 2026 (gemini-3.8-flash was out of free-tier quota, so every answer came from
+gemini-3.5-flash-lite). One attempt per job, temperature 0.2. The table is the one above.
 
 With memory every rejection was a task error (dates read month-first, "twenty percent" for "20%", two wrong JSON
 keys or values); no buyer preference was broken. Without memory 23 of 24 broke a preference the buyer had stated once.

@@ -41,16 +41,23 @@ export async function rpc(method, params) {
 const u64 = (dv, o) => Number(dv.getBigUint64(o, true));
 const i64 = (dv, o) => Number(dv.getBigInt64(o, true));
 
+// Job account (src/knos/jobs/sol.py): state buyer worker amount deadline review brief result verifier proof (217 bytes);
+// jobs posted before 0.3.4 are 153 bytes (no verifier, no proof).
+export const JOB_LEN = 217, LEGACY_JOB_LEN = 153;
+const zero = (u8) => u8.every((b) => b === 0);
 export function parseJob(address, raw) {
   const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
   const worker = raw.slice(33, 65), result = raw.slice(121, 153);
+  const full = raw.length >= JOB_LEN, verifier = full ? raw.slice(153, 185) : null, proof = full ? raw.slice(185, 217) : null;
   return { address, state: STATES[raw[0]] || "none", buyer: b58(raw.slice(1, 33)),
-    worker: worker.every((b) => b === 0) ? null : b58(worker), amount: u64(dv, 65) / 1e6, deadline: i64(dv, 73),
-    review: i64(dv, 81), brief: hex(raw.slice(89, 121)), result: result.every((b) => b === 0) ? null : hex(result) };
+    worker: zero(worker) ? null : b58(worker), amount: u64(dv, 65) / 1e6, deadline: i64(dv, 73),
+    review: i64(dv, 81), brief: hex(raw.slice(89, 121)), result: zero(result) ? null : hex(result),
+    verifier: verifier && !zero(verifier) ? b58(verifier) : null, proof: proof && !zero(proof) ? hex(proof) : null };
 }
 
 export async function jobs() {
-  const got = await rpc("getProgramAccounts", [PROGRAM, { encoding: "base64", filters: [{ dataSize: 153 }] }]);
+  const sized = (n) => rpc("getProgramAccounts", [PROGRAM, { encoding: "base64", filters: [{ dataSize: n }] }]);
+  const got = (await Promise.all([sized(JOB_LEN), sized(LEGACY_JOB_LEN)])).flat();
   return got.map((a) => parseJob(a.pubkey, Uint8Array.from(atob(a.account.data[0]), (c) => c.charCodeAt(0))));
 }
 
@@ -100,12 +107,16 @@ export async function apiUrl() {
 let web3P;
 const web3 = () => (web3P ||= import("https://cdn.jsdelivr.net/npm/@solana/web3.js@1.98.0/+esm"));
 
+// Config PDA ["config2"]: admin mint fee_token fee_bps(u16) min_fee(u64) min_amount(u64) max_amount(u64) paused(u8) bump
 export async function config() {
   const { PublicKey } = await web3();
-  const [cfg] = PublicKey.findProgramAddressSync([new TextEncoder().encode("config")], new PublicKey(PROGRAM));
+  const [cfg] = PublicKey.findProgramAddressSync([new TextEncoder().encode("config2")], new PublicKey(PROGRAM));
   const got = await rpc("getAccountInfo", [cfg.toBase58(), { encoding: "base64" }]);
   const raw = Uint8Array.from(atob(got.value.data[0]), (c) => c.charCodeAt(0));
-  return { address: cfg, mint: new PublicKey(raw.slice(32, 64)), feeToken: new PublicKey(raw.slice(64, 96)) };
+  const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  return { address: cfg, mint: new PublicKey(raw.slice(32, 64)), feeToken: new PublicKey(raw.slice(64, 96)),
+    feeBps: dv.getUint16(96, true), minFee: u64(dv, 98), minAmount: u64(dv, 106), maxAmount: u64(dv, 114),
+    paused: raw[122] !== 0 };
 }
 
 async function pdas(jobId) {
@@ -128,14 +139,19 @@ async function serialize(ixs, payer) {
   return tx.serialize({ requireAllSignatures: false, verifySignatures: false });
 }
 
-/** The post transaction (src/knos/jobs/sol.py `post`): the price into the program's vault, the brief's hash on chain. */
-export async function postTx(buyerB58, jobId, units, briefHash, workS = 3600, reviewS = 86400) {
+/** The post transaction (src/knos/jobs/sol.py `post`): the price into the program's vault, the brief's hash on chain,
+ * and optionally a verifier (base58) who may release the delivered work on proof. */
+export async function postTx(buyerB58, jobId, units, briefHash, workS = 3600, reviewS = 86400, verifierB58 = null) {
   const { PublicKey, TransactionInstruction } = await web3();
   const buyer = new PublicKey(buyerB58), cfg = await config(), p = await pdas(jobId);
-  const data = new Uint8Array(1 + 32 + 24 + 32), dv = new DataView(data.buffer);
+  if (cfg.paused) throw new Error("The escrow is paused for new jobs right now; existing jobs still settle.");
+  if (units < cfg.minAmount) throw new Error(`The minimum job is ${cfg.minAmount / 1e6} USDC.`);
+  if (cfg.maxAmount && units > cfg.maxAmount) throw new Error(`Jobs are capped at ${cfg.maxAmount / 1e6} USDC for now.`);
+  const data = new Uint8Array(1 + 32 + 24 + 32 + 32), dv = new DataView(data.buffer);
   data[0] = 1; data.set(jobId, 1);
   dv.setBigUint64(33, BigInt(units), true); dv.setBigInt64(41, BigInt(workS), true); dv.setBigInt64(49, BigInt(reviewS), true);
   data.set(briefHash, 57);
+  if (verifierB58) data.set(new PublicKey(verifierB58).toBytes(), 89);
   const keys = [[buyer, true, true], [p.job, false, true], [await ata(buyer, cfg.mint), false, true],
     [await ata(p.vaultAuth, cfg.mint), false, true], [cfg.address, false, false], [new PublicKey(TOKEN), false, false],
     [new PublicKey(SYSTEM), false, false]].map(([pubkey, isSigner, isWritable]) => ({ pubkey, isSigner, isWritable }));

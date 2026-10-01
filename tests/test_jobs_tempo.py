@@ -70,6 +70,39 @@ def test_attacks_and_guard_rails_revert(dev):
     assert esc.job(jid).state == "released"
 
 
+def test_paid_on_proof_through_the_client(dev):
+    from eth_account import Account
+    chain, esc, token, buyer, worker, fee = dev
+    verifier = Account.create()
+    chain.rpc("eth_sendTransaction", [{"from": chain.rpc("eth_accounts", [])[0], "to": verifier.address,
+                                       "value": hex(10**18)}])
+    jid = _id("proof")
+    esc.post(buyer, jid, 3 * U, 600, verifier=verifier.address)
+    assert esc.job(jid).verifier.lower() == verifier.address.lower()
+    esc.claim(worker, jid)
+    with pytest.raises(TempoError):
+        esc.verify_release(verifier, jid, _id("work"), _id("root"))      # nothing delivered yet
+    esc.deliver(worker, jid, _id("work"))
+    with pytest.raises(TempoError):
+        esc.verify_release(verifier, jid, _id("other"), _id("root"))     # verifier releases unproven work: refused
+    with pytest.raises(TempoError):
+        esc.verify_release(buyer, jid, _id("work"), _id("root"))         # only the named verifier
+    w0, f0 = chain.balance(token, worker.address), chain.balance(token, fee)
+    esc.verify_release(verifier, jid, _id("work"), _id("root"))
+    got = esc.job(jid)
+    assert got.state == "released" and got.proof == _id("root")
+    assert chain.balance(token, worker.address) - w0 == 3 * U * 95 // 100 and chain.balance(token, fee) - f0 == 150_000
+    with pytest.raises(TempoError):
+        esc.verify_release(verifier, jid, _id("work"), _id("root"))      # once
+
+
+def test_minimum_job_and_fee(dev):
+    chain, esc, token, buyer, worker, fee = dev
+    with pytest.raises(TempoError):
+        esc.post(buyer, _id("tiny"), U - 1, 600)
+    assert esc.fee(U) == 50_000 and esc.fee(3 * U) == 150_000
+
+
 def test_reject_and_refund_return_everything(dev):
     chain, esc, token, buyer, worker, fee = dev
     a, b = _id("reject"), _id("refund")

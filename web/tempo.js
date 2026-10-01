@@ -3,19 +3,25 @@
 // Jobs go to the Knos escrow contract on Moderato; on Tempo a job id is the sha256 of its brief, so the brief on
 // the relay is checked against the id itself.
 const V = "2.57.2";
-export const ESCROW = "0x888d39bB186cC718481E98080Bdb5fd8Df27Ab49";   // KnosEscrow on Moderato (testnet)
+export const ESCROW = "0x70043F5c1A3db0Fb243Fd1270176557cCA1dE584";   // KnosEscrow 0.3.4 on Moderato (testnet): paid on proof, 1 USDC minimum
+export const ESCROW_V031 = "0x888d39bB186cC718481E98080Bdb5fd8Df27Ab49";   // the 0.3.1 contract: its jobs settle there
 export const PATH_USD = "0x20C0000000000000000000000000000000000000";
 const STORE = "knos-tempo-passkey";
 const STATES = ["none", "open", "claimed", "delivered", "released", "refunded"];
 
 const ESCROW_ABI = [
   { type: "function", name: "post", stateMutability: "nonpayable", inputs: [{ name: "id", type: "bytes32" }, { name: "amount", type: "uint128" }, { name: "work", type: "uint64" }], outputs: [] },
+  { type: "function", name: "postWithVerifier", stateMutability: "nonpayable", inputs: [{ name: "id", type: "bytes32" }, { name: "amount", type: "uint128" }, { name: "work", type: "uint64" }, { name: "verifier", type: "address" }], outputs: [] },
   { type: "function", name: "accept", stateMutability: "nonpayable", inputs: [{ name: "id", type: "bytes32" }], outputs: [] },
   { type: "function", name: "reject", stateMutability: "nonpayable", inputs: [{ name: "id", type: "bytes32" }], outputs: [] },
   { type: "function", name: "jobs", stateMutability: "view", inputs: [{ name: "", type: "bytes32" }], outputs: [
     { name: "buyer", type: "address" }, { name: "worker", type: "address" }, { name: "amount", type: "uint128" },
-    { name: "deadline", type: "uint64" }, { name: "state", type: "uint8" }, { name: "result", type: "bytes32" }] },
+    { name: "deadline", type: "uint64" }, { name: "state", type: "uint8" }, { name: "result", type: "bytes32" },
+    { name: "verifier", type: "address" }, { name: "proof", type: "bytes32" }] },
 ];
+const ESCROW_V031_ABI = [...ESCROW_ABI.filter((f) => f.name !== "jobs" && f.name !== "postWithVerifier"),
+  { ...ESCROW_ABI.find((f) => f.name === "jobs"), outputs: ESCROW_ABI.find((f) => f.name === "jobs").outputs.slice(0, 6) }];
+const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 const TOKEN_ABI = [
   { type: "function", name: "approve", stateMutability: "nonpayable", inputs: [{ name: "s", type: "address" }, { name: "v", type: "uint256" }], outputs: [{ type: "bool" }] },
   { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "a", type: "address" }], outputs: [{ type: "uint256" }] },
@@ -65,7 +71,7 @@ export async function fund(address) {
 }
 
 /** Post a job: brief to the relay, then approve + post on the escrow. Returns the job id. */
-export async function postJob(account, relay, { task, kind, priceUsd, workSeconds = 3600, sealTo = null }) {
+export async function postJob(account, relay, { task, kind, priceUsd, workSeconds = 3600, sealTo = null, verifier = null }) {
   const { pub, wallet, viem } = await clients(account);
   const brief = new TextEncoder().encode(JSON.stringify({ title: task.split("\n")[0].slice(0, 80), task, kind,
     buyer: account.address, price_units: Math.round(priceUsd * 1e6), created: Math.floor(Date.now() / 1000), chain: "tempo-moderato",
@@ -76,22 +82,33 @@ export async function postJob(account, relay, { task, kind, priceUsd, workSecond
   const id = `0x${hash}`;
   if (viem.sha256(brief) !== id) throw new Error("The relay stored something else.");
   const amount = BigInt(Math.round(priceUsd * 1e6));
+  if (amount < 1000000n) throw new Error("The minimum job is 1 USDC.");
   const a = await wallet.writeContract({ address: PATH_USD, abi: TOKEN_ABI, functionName: "approve", args: [ESCROW, amount] });
   await pub.waitForTransactionReceipt({ hash: a });
-  const p = await wallet.writeContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "post", args: [id, amount, BigInt(workSeconds)] });
+  const p = verifier
+    ? await wallet.writeContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "postWithVerifier", args: [id, amount, BigInt(workSeconds), verifier] })
+    : await wallet.writeContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "post", args: [id, amount, BigInt(workSeconds)] });
   const r = await pub.waitForTransactionReceipt({ hash: p });
   if (r.status !== "success") throw new Error("The escrow refused the post.");
   return id;
 }
 
+/** A job from the 0.3.4 contract, or (if it is not there) from the 0.3.1 one; `contract` says which. */
 export async function job(id) {
   const { pub } = await clients();
-  const [buyer, worker, amount, deadline, state, result] = await pub.readContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "jobs", args: [id] });
-  return { id, buyer, worker, amount: Number(amount) / 1e6, deadline: Number(deadline), state: STATES[state], result };
+  const [buyer, worker, amount, deadline, state, result, verifier, proof] = await pub.readContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "jobs", args: [id] });
+  if (state === 0) {
+    const old = await pub.readContract({ address: ESCROW_V031, abi: ESCROW_V031_ABI, functionName: "jobs", args: [id] });
+    if (old[4] !== 0) return { id, buyer: old[0], worker: old[1], amount: Number(old[2]) / 1e6, deadline: Number(old[3]),
+      state: STATES[old[4]], result: old[5], verifier: null, proof: null, contract: ESCROW_V031 };
+  }
+  return { id, buyer, worker, amount: Number(amount) / 1e6, deadline: Number(deadline), state: STATES[state], result,
+    verifier: verifier === ZERO_ADDR ? null : verifier, proof: /^0x0+$/.test(proof) ? null : proof, contract: ESCROW };
 }
 
 export async function settle(account, id, verb) {
   const { pub, wallet } = await clients(account);
-  const h = await wallet.writeContract({ address: ESCROW, abi: ESCROW_ABI, functionName: verb, args: [id] });
+  const where = (await job(id)).contract;
+  const h = await wallet.writeContract({ address: where, abi: where === ESCROW ? ESCROW_ABI : ESCROW_V031_ABI, functionName: verb, args: [id] });
   return pub.waitForTransactionReceipt({ hash: h });
 }

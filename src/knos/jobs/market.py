@@ -1,4 +1,4 @@
-"""The job market on top of the escrow: post, find, claim, deliver, accept, reject, release, refund.
+"""The job market on top of the escrow: post, find, claim, deliver, accept, verify_release, reject, release, refund.
 
 A brief is JSON: {"title", "task", "kind", "checks", "buyer", "price_units", "created"}. Its sha256 is on chain; the
 bytes are on a relay. `checks` is how the buyer's acceptance is automated where it can be (a Python test file, an
@@ -78,8 +78,10 @@ def _ensure_ata(ledger, payer: Keypair, owner: Pubkey, mint: Pubkey) -> list:
 # ---- the lifecycle ---------------------------------------------------------------------------------------------------
 
 def post(ledger, relay, buyer: Keypair, brief: Brief, price_units: int, work_s: int = 3600,
-         review_s: int = 86_400, job_id: bytes | None = None) -> bytes:
-    """The buyer's one signature: the price moves into escrow; the brief's hash goes on chain, the brief to a relay."""
+         review_s: int = 86_400, job_id: bytes | None = None, verifier: Pubkey | None = None) -> bytes:
+    """The buyer's one signature: the price moves into escrow; the brief's hash goes on chain, the brief to a relay.
+    `verifier` (default none): a key that may release the delivered work on proof (`verify_release`), no buyer step.
+    The escrow refuses a price under its minimum job (1 USDC) and over its per-job cap, and new posts while paused."""
     cfg = ledger.config()
     mint = cfg["mint"]
     brief.buyer = str(buyer.pubkey())
@@ -90,7 +92,7 @@ def post(ledger, relay, buyer: Keypair, brief: Brief, price_units: int, work_s: 
     raw = brief.encode()
     h = relay.put_brief(raw)
     ix = sol.post(ledger.program, buyer.pubkey(), job_id, price_units, work_s, review_s, bytes.fromhex(h),
-                  token_account_for(ledger, buyer.pubkey(), mint), vault_for(ledger, mint))
+                  token_account_for(ledger, buyer.pubkey(), mint), vault_for(ledger, mint), verifier)
     ledger.send([ix], buyer)
     if getattr(ledger, "env", None) is not None:
         ledger.env.known_jobs.append(job_id)
@@ -99,7 +101,8 @@ def post(ledger, relay, buyer: Keypair, brief: Brief, price_units: int, work_s: 
 
 def job(ledger, job_id: bytes) -> sol.Job | None:
     raw = ledger.account(sol.job_pda(ledger.program, job_id))
-    return sol.parse_job(sol.job_pda(ledger.program, job_id), raw) if raw and len(raw) >= sol.JOB_LEN else None
+    ok = raw and len(raw) in (sol.JOB_LEN, sol.LEGACY_JOB_LEN)
+    return sol.parse_job(sol.job_pda(ledger.program, job_id), raw) if ok else None
 
 
 def open_jobs(ledger, relay) -> list[tuple[sol.Job, Brief]]:
@@ -195,6 +198,24 @@ def release(ledger, anyone: Keypair, job_id: bytes) -> None:
     pre = _ensure_ata(ledger, anyone, j.worker, cfg["mint"])
     ledger.send(pre + [sol.release(ledger.program, anyone.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
                                    token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"])], anyone)
+    _sibyl_pro(ledger, j)
+
+
+def verify_release(ledger, verifier: Keypair, job_id: bytes, proof_root: bytes,
+                   result_hash: bytes | None = None) -> None:
+    """Paid on proof: the job's verifier releases the delivered work and records `proof_root` on chain. Pass the
+    `result_hash` the proof actually covers; the escrow refuses it unless it is exactly the hash the worker committed
+    ("verifier releases unproven work"). Without one, the job's committed hash is used (the verifier checked the
+    delivery fetched under that hash)."""
+    j = _need(ledger, job_id, "delivered")
+    if j.verifier is None or j.verifier != verifier.pubkey():
+        raise LookupError("This job does not name you as its verifier.")
+    cfg = ledger.config()
+    pre = _ensure_ata(ledger, verifier, j.worker, cfg["mint"])
+    ledger.send(pre + [sol.verify_release(ledger.program, verifier.pubkey(), job_id, result_hash or j.result,
+                                          proof_root, vault_for(ledger, cfg["mint"]),
+                                          token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"])],
+                verifier)
     _sibyl_pro(ledger, j)
 
 

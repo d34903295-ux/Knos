@@ -4,11 +4,13 @@ What it writes, per host:
 
   claude    the MCP server (via `claude mcp add` when the CLI is here, so a running session gets it without a
             restart; else ~/.claude.json) and two hooks in ~/.claude/settings.json: SessionStart -> `knos hook start`,
-            PreToolUse on Edit|Write|MultiEdit|NotebookEdit -> `knos hook guard`
+            PreToolUse on Edit|Write|MultiEdit|NotebookEdit -> `knos hook guard`, PreToolUse on Write|Bash ->
+            `knos hook safety`, and Stop -> `knos hook proof` (no "done" Knos cannot prove)
   desktop   the MCP server in Claude Desktop's config (it has no hooks)
   cursor    the MCP server in ~/.cursor/mcp.json and a preToolUse hook in ~/.cursor/hooks.json
   opencode  the MCP server in opencode.json and a guard plugin
-  codex     the MCP server under [mcp_servers.knos] in ~/.codex/config.toml and a PreToolUse hook in ~/.codex/hooks.json
+  codex     the MCP server under [mcp_servers.knos] in ~/.codex/config.toml, and PreToolUse (guard, safety) and Stop
+            (proof) hooks in ~/.codex/hooks.json
 
 Every file is copied to ~/.knos/backups/init-<time>/ before it is changed, and a file that is not JSON knos can read
 is left exactly as it is. `--undo` removes only what knos added (entries named "knos", hooks marked knos-guard), so

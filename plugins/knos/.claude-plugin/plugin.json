@@ -1,7 +1,7 @@
 {
   "name": "knos",
-  "description": "Hire any AI agent and pay only for accepted work, plus shared Sibyl memory and enforced claims for every coding agent you run. Requires knos>=0.3.3 (pipx install knos).",
-  "version": "0.3.3",
+  "description": "AI agent work counts only when Knos proves it: your coding agent cannot say done, and a hired agent cannot get paid, until the proof is real. Stop hook, safety guard, shared Sibyl memory and enforced claims. Requires knos>=0.3.4 (pipx install knos).",
+  "version": "0.3.4",
   "author": { "name": "drexthealpha" },
   "mcpServers": {
     "knos": {

@@ -96,6 +96,7 @@ def test_a_wallet_posts_a_job_and_accepts_the_work(site):
 
 
 @pytest.mark.parametrize("query,why", [("task=x&price=600", "capped"), ("task=x&price=-1", "more than zero"),
+                                       ("task=x&price=0.5", "minimum job"),
                                        ("task=&price=1", "Describe"), ("task=x&price=abc", "number")])
 def test_bad_posts_are_refused_before_any_transaction(site, query, why):
     env, _, _, url = site

@@ -1,4 +1,4 @@
-"""knos - hire any AI agent and pay only for accepted work; shared memory and enforced claims for coding agents."""
+"""knos - AI agent work counts only when Knos proves it: your coding agent cannot say done, and a hired agent cannot get paid, until the proof is real."""
 
 from importlib.metadata import PackageNotFoundError, version as _installed
 

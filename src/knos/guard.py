@@ -570,10 +570,15 @@ def install_claude() -> Path:
     pre = [h for h in (hooks.get("PreToolUse") or []) if MARK not in json.dumps(h)]
     pre.append({"matcher": "Edit|Write|MultiEdit|NotebookEdit",
                 "hooks": [{"type": "command", "command": hook_cmd("guard", "claude") + f" #{MARK}"}]})
+    pre.append({"matcher": "Write|Bash",
+                "hooks": [{"type": "command", "command": hook_cmd("safety", "claude") + f" #{MARK}"}]})
     hooks["PreToolUse"] = pre
     start = [h for h in (hooks.get("SessionStart") or []) if MARK not in json.dumps(h)]
     start.append({"hooks": [{"type": "command", "command": hook_cmd("start", "claude") + f" #{MARK}"}]})
     hooks["SessionStart"] = start
+    stop = [h for h in (hooks.get("Stop") or []) if MARK not in json.dumps(h)]
+    stop.append({"hooks": [{"type": "command", "command": hook_cmd("proof", "claude") + f" #{MARK}", "timeout": 600}]})
+    hooks["Stop"] = stop
     _save(path, data)
     return path
 
@@ -608,8 +613,13 @@ def install_codex() -> Path:
     pre = [h for h in (hooks.get("PreToolUse") or []) if MARK not in json.dumps(h)]
     pre.append({"matcher": "apply_patch|Bash",
                 "hooks": [{"type": "command", "command": hook_cmd("guard", "codex") + f" #{MARK}", "timeout": 30,
-                           "statusMessage": "Knos: checking claims"}]})
+                           "statusMessage": "Knos: checking claims"},
+                          {"type": "command", "command": hook_cmd("safety", "codex") + f" #{MARK}", "timeout": 30}]})
     hooks["PreToolUse"] = pre
+    stop = [h for h in (hooks.get("Stop") or []) if MARK not in json.dumps(h)]
+    stop.append({"hooks": [{"type": "command", "command": hook_cmd("proof", "codex") + f" #{MARK}", "timeout": 600,
+                            "statusMessage": "Knos: proving what you said is done"}]})
+    hooks["Stop"] = stop
     _save(path, data)
     return path
 
@@ -618,13 +628,17 @@ def uninstall_codex() -> bool:
     path = codex_hooks()
     data = _peek(path)
     hooks = data.get("hooks") or {}
-    kept = [h for h in (hooks.get("PreToolUse") or []) if MARK not in json.dumps(h)]
-    if len(kept) == len(hooks.get("PreToolUse") or []):
+    took = False
+    for event in ("PreToolUse", "Stop"):
+        kept = [h for h in (hooks.get(event) or []) if MARK not in json.dumps(h)]
+        if len(kept) != len(hooks.get(event) or []):
+            took = True
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
+    if not took:
         return False
-    if kept:
-        hooks["PreToolUse"] = kept
-    else:
-        hooks.pop("PreToolUse", None)
     if not hooks:
         data.pop("hooks", None)
     _save(path, data)
@@ -663,7 +677,7 @@ def uninstall_claude() -> bool:
     data = _peek(path)
     hooks = data.get("hooks") or {}
     took = False
-    for event in ("PreToolUse", "SessionStart"):
+    for event in ("PreToolUse", "SessionStart", "Stop"):
         kept = [h for h in (hooks.get(event) or []) if MARK not in json.dumps(h)]
         if len(kept) != len(hooks.get(event) or []):
             took = True

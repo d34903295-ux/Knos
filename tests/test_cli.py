@@ -533,7 +533,7 @@ def test_init_claude_code(capsys):
     assert _json(_home() / ".claude.json")["mcpServers"]["knos"] == _server()
     hooks = _json(_home() / ".claude" / "settings.json")["hooks"]
     pre = hooks["PreToolUse"]
-    assert [h["matcher"] for h in pre] == ["Edit|Write|MultiEdit|NotebookEdit"]
+    assert [h["matcher"] for h in pre] == ["Edit|Write|MultiEdit|NotebookEdit", "Write|Bash"]
     assert "hook guard --client claude" in pre[0]["hooks"][0]["command"]
     start = hooks["SessionStart"]
     assert "hook start --client claude" in start[0]["hooks"][0]["command"]
@@ -631,7 +631,7 @@ def test_init_adds_knos_and_keeps_everything_else(capsys):
     hooks = _json(settings)
     assert hooks["model"] == "opus"
     assert hooks["hooks"]["PreToolUse"][0] == mine
-    assert len(hooks["hooks"]["PreToolUse"]) == 2
+    assert len(hooks["hooks"]["PreToolUse"]) == 3
 
 
 def test_init_backs_up_every_file_it_changes(knos_home, capsys):
@@ -669,7 +669,7 @@ def test_init_twice_changes_nothing(knos_home, capsys):
     assert sorted((knos_home / "backups").glob("init-*/manifest.json")) == runs, "a second run backed something up"
     assert "Copies of every file it changed" not in said
     assert _json(_home() / ".cursor" / "hooks.json")["hooks"]["preToolUse"].__len__() == 1
-    assert len(_json(_home() / ".claude" / "settings.json")["hooks"]["PreToolUse"]) == 1
+    assert len(_json(_home() / ".claude" / "settings.json")["hooks"]["PreToolUse"]) == 2
 
 
 def test_init_skips_an_agent_that_is_not_installed(capsys):

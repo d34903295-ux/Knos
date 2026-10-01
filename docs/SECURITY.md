@@ -1,6 +1,55 @@
 # Security model
 
+AI agent work counts only when Knos proves it: your coding agent cannot say done, and a hired agent cannot get paid,
+until the proof is real. This page says what Knos defends, against whom, and what it does not.
+
 Report a vulnerability privately through GitHub's security advisories on this repository.
+
+## Threat model
+
+### What is protected
+
+- **Job money** in the escrow (the Solana program and the Tempo contract);
+- **the truth of "done"**: a proof verdict, its evidence root and its receipt;
+- **the repo**: files an agent never read, and anything outside it.
+
+### Who attacks, and what stops them
+
+| attacker | wants | what stops it | where it is tested |
+|---|---|---|---|
+| a worker | to be paid for work that was never proven | only the job's own verifier key can release with a proof root; anyone else signing VerifyRelease is refused | escrow attack tests: "verifier releases unproven work: refused" |
+| a worker | to be paid twice, or more than the price | released, refunded and closed are terminal states; payout = price − fee, from the job's own vault | fuzz: no double payout, conservation |
+| a buyer | to keep the work and the money | delivery is on chain before review; verifier release needs no buyer step; silence past the review window pays the worker | escrow tests |
+| a buyer | to lock the worker's money forever | after its deadline a job always settles one way or the other; no state lacks an exit | fuzz: no stuck funds |
+| the verifier | to release work that failed | the evidence root goes on chain with the release and in a SAS receipt, so anyone can re-run the checks; the escrow refuses a release whose result hash is not the one the worker committed | escrow tests |
+| Knos itself | to take more than the fee | the fee is max(5%, 0.05 USDC), set at init; the fee account is fixed; a per-job cap holds; Knos never holds job money | fuzz: conservation |
+| an upgrader | to swap the program | mainnet stays locked (`KNOS_ALLOW_MAINNET`); moving the upgrade authority to a Squads multisig and a verified build are next | not yet |
+| anyone, in an incident | to drain the escrow during an exploit | the pause switch stops new posts and claims; refunds still work while paused | escrow tests |
+| a coding agent | to say "done" when it is not | the Stop hook re-runs each claimed check itself (tests in a fresh venv, every CI job, PyPI, URLs, deletions, author) and blocks; Sibyl turns each past false "done" into a required check | `tests/test_proof.py`, release replay |
+| a coding agent | to overwrite a file it never read, or delete outside the repo | the PreToolUse safety guard refuses (exit 2) | `tests/test_proof.py` |
+
+### Invariants, fuzzed
+
+Each night, `tests/test_escrow_fuzz.py` runs at least 10,000 random sequences of every escrow instruction against the
+real native program in LiteSVM. It runs with random signers, amounts and clock jumps, and after every step it checks:
+
+- **conservation:** vault + paid out + refunded + fees = deposited;
+- **no double payout:** a job pays its worker at most once, and never both pays and refunds;
+- **no stuck funds:** after every deadline passes, every job can settle and every vault drains to zero.
+
+**Why not Trident.** Trident's stable release (0.12.0) supports Anchor programs only. Native support exists only in
+the 0.13 release candidates, and even there it needs a hand-written Anchor-format IDL. The Knos escrow is a native
+program with one-byte instruction tags, so the fuzzing uses LiteSVM with the built `.so` instead. Trident can be
+adopted when 0.13 is final.
+
+### Not defended
+
+- **Bad checks.** A proof is only as strong as its checks. A repo whose tests assert nothing proves nothing, and
+  `.knos/proof.toml` is the place to add stronger checks.
+- **A colluding buyer and verifier.** They can release to a worker the buyer chose; it is their money.
+- **Hooks removed by a person.** The Stop hook is enforced only where it is installed (see below).
+- **The verifier key itself.** It is a hot key on the verifier's machine; a stolen verifier key can release jobs that
+  name it until those jobs settle.
 
 ## Keys
 

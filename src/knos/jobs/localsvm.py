@@ -34,7 +34,8 @@ class Escrow:
 
     DEC = 6
 
-    def __init__(self, fee_bps: int = 500):
+    def __init__(self, fee_bps: int = 500, min_fee: int = sol.MIN_FEE_UNITS, min_amount: int = sol.MIN_JOB_UNITS,
+                 max_amount: int = 0, paused: bool = False):
         from solders.litesvm import LiteSVM
         self.svm = LiteSVM()
         self.accounts: dict[bytes, Pubkey] = {}   # owner -> token account (what an ATA is on a real cluster)
@@ -51,7 +52,8 @@ class Escrow:
         self.vault = self.token_account(sol.vault_authority(self.pid))
         self.fee_token = self.token_account(self.admin.pubkey())
         self.accounts[bytes(self.admin.pubkey())] = self.fee_token
-        assert self.send([sol.init(self.pid, self.admin.pubkey(), self.fee_token, fee_bps)], self.admin, [self.admin])
+        assert self.send([sol.init2(self.pid, self.admin.pubkey(), self.fee_token, fee_bps, min_fee, min_amount,
+                                    max_amount, paused)], self.admin, [self.admin])
 
     # -- runtime -----------------------------------------------------------------------------------------------------
     def keypair(self, lamports: int = 100_000_000_000) -> Keypair:
@@ -99,27 +101,49 @@ class Escrow:
     # -- jobs ----------------------------------------------------------------------------------------------------------
     def job(self, job_id: bytes) -> sol.Job | None:
         acc = self.svm.get_account(sol.job_pda(self.pid, job_id))
-        if acc is None or len(bytes(acc.data)) < sol.JOB_LEN:
+        if acc is None or len(bytes(acc.data)) not in (sol.JOB_LEN, sol.LEGACY_JOB_LEN):
             return None
         return sol.parse_job(sol.job_pda(self.pid, job_id), bytes(acc.data))
 
     def post(self, buyer: Keypair, buyer_token: Pubkey, job_id: bytes, amount: int, work: int = 600,
-             review: int = 40, brief: bytes = b"", vault: Pubkey | None = None) -> bool:
+             review: int = 40, brief: bytes = b"", vault: Pubkey | None = None, verifier: Pubkey | None = None) -> bool:
         return self.send([sol.post(self.pid, buyer.pubkey(), job_id, amount, work, review,
                                    hashlib.sha256(b"brief" + brief + job_id).digest(), buyer_token,
-                                   vault or self.vault)], buyer, [buyer])
+                                   vault or self.vault, verifier)], buyer, [buyer])
 
     def claim(self, worker: Keypair, job_id: bytes) -> bool:
         return self.send([sol.claim(self.pid, worker.pubkey(), job_id)], worker, [worker])
 
+    @staticmethod
+    def result_hash(job_id: bytes, result: bytes = b"result") -> bytes:
+        return hashlib.sha256(result + job_id).digest()
+
     def deliver(self, worker: Keypair, job_id: bytes, result: bytes = b"result") -> bool:
-        return self.send([sol.deliver(self.pid, worker.pubkey(), job_id, hashlib.sha256(result + job_id).digest())],
+        return self.send([sol.deliver(self.pid, worker.pubkey(), job_id, self.result_hash(job_id, result))],
                          worker, [worker])
 
     def accept(self, who: Keypair, job_id: bytes, worker_token: Pubkey, fee_token: Pubkey | None = None,
                release: bool = False) -> bool:
         return self.send([sol.settle(self.pid, who.pubkey(), job_id, self.vault, worker_token,
                                      fee_token or self.fee_token, release)], who, [who])
+
+    def verify_release(self, verifier: Keypair, job_id: bytes, worker_token: Pubkey, result_hash: bytes | None = None,
+                       proof_root: bytes = b"" * 32, fee_token: Pubkey | None = None) -> bool:
+        """Paid on proof. `result_hash` defaults to the hash `deliver()` commits for the default result."""
+        return self.send([sol.verify_release(self.pid, verifier.pubkey(), job_id,
+                                             result_hash or self.result_hash(job_id), proof_root, self.vault,
+                                             worker_token, fee_token or self.fee_token)], verifier, [verifier])
+
+    def set_pause(self, paused: bool, admin: Keypair | None = None) -> bool:
+        a = admin or self.admin
+        return self.send([sol.set_pause(self.pid, a.pubkey(), paused)], a, [a])
+
+    def lower_cap(self, max_amount: int, admin: Keypair | None = None) -> bool:
+        a = admin or self.admin
+        return self.send([sol.lower_cap(self.pid, a.pubkey(), max_amount)], a, [a])
+
+    def config(self) -> dict:
+        return sol.parse_config(bytes(self.svm.get_account(sol.config_pda(self.pid)).data))
 
     def reject(self, who: Keypair, job_id: bytes, buyer_token: Pubkey) -> bool:
         return self.send([sol.reject(self.pid, who.pubkey(), job_id, self.vault, buyer_token)], who, [who])

@@ -19,7 +19,7 @@ from . import version
 from .memory import TOPIC, Fact, Memory, StoreGone
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False,
-                  help="hire any AI agent and pay only for work you accept; memory and claims for coding agents")
+                  help="AI agent work counts only when Knos proves it: no unproven done, no unproven payout")
 
 # Answers quote other people's writing, which on Windows routinely contains characters the console's code page cannot
 # encode. Ask for UTF-8 and replace what will not fit rather than fail on an em dash.
@@ -776,6 +776,14 @@ def hook_cmd(ctx: typer.Context, which: str = typer.Argument(..., help="guard or
             from . import start_hook
 
             raise typer.Exit(start_hook.main(list(ctx.args)))
+        if which == "proof":  # Stop: no finishing while the last message claims what Knos cannot prove
+            from .proof import hook as proof_hook
+
+            raise typer.Exit(proof_hook.main_proof(list(ctx.args)))
+        if which == "safety":  # PreToolUse: no overwriting unread files, no deleting outside the repo
+            from .proof import hook as proof_hook
+
+            raise typer.Exit(proof_hook.main_safety(list(ctx.args)))
         if which == "commit":  # git pre-commit / pre-push: exit 1 stops the commit
             from . import commit_guard
 
@@ -828,6 +836,14 @@ def _register_jobs() -> None:
 
 
 _register_jobs()
+
+
+def _register_proof() -> None:
+    from .proof.cli import register
+    register(app, out, Stop, _repo)
+
+
+_register_proof()
 
 
 def main(argv: list[str] | None = None) -> int:

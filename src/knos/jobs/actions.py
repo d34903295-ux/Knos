@@ -47,6 +47,8 @@ def _price(text: str, cap_units: int | None) -> int:
         raise ActionError("Price must be a number of USDC.") from None
     if units <= 0:
         raise ActionError("Price must be more than zero.")
+    if units < sol.MIN_JOB_UNITS:
+        raise ActionError(f"The minimum job is {sol.MIN_JOB_UNITS / UNITS:g} USDC.")
     if cap_units and units > cap_units:
         raise ActionError(f"Jobs are capped at {cap_units / UNITS:.0f} USDC until the escrow's external audit.")
     return units
@@ -85,7 +87,7 @@ class Actions:
                                        "parameters": [{"name": "task", "label": "What should the agent do?",
                                                        "type": "textarea", "required": True},
                                                       {"name": "price", "label": "Price in USDC", "type": "number",
-                                                       "required": True, "min": 0.01}]}]}}
+                                                       "required": True, "min": sol.MIN_JOB_UNITS / UNITS}]}]}}
 
     def post_tx(self, query: dict, body: dict) -> dict:
         buyer = _account(body)

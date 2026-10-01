@@ -9,8 +9,8 @@
     {
       "name": "knos",
       "source": "./plugins/knos",
-      "description": "Hire any AI agent and pay only for accepted work (post_job, find_jobs, claim_job, deliver_job), plus shared Sibyl memory and enforced claims for every coding agent you run. Requires knos>=0.3.3: pipx install knos",
-      "version": "0.3.3",
+      "description": "AI agent work counts only when Knos proves it: your coding agent cannot say done, and a hired agent cannot get paid, until the proof is real. Proof hooks, paid-on-proof jobs, shared Sibyl memory and enforced claims. Requires knos>=0.3.4: pipx install knos",
+      "version": "0.3.4",
       "author": { "name": "drexthealpha" }
     }
   ]

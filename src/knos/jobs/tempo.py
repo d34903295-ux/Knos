@@ -1,4 +1,5 @@
-"""The Tempo escrow (contracts/KnosEscrow.sol) from Python: deploy, post, claim, deliver, accept, reject, release, refund.
+"""The Tempo escrow (contracts/KnosEscrow.sol) from Python: deploy, post, claim, deliver, accept, verify_release, reject,
+release, refund.
 
 Plain JSON-RPC and signed legacy transactions (eth_account), so the same code runs on Tempo Moderato, Tempo mainnet
 (locked until the audit, capped at $500 per job in the contract itself), and a local anvil for tests and the bench.
@@ -18,6 +19,8 @@ TEST_TOKEN = Path(__file__).with_name("TestToken.json")
 MODERATO = "https://rpc.moderato.tempo.xyz"
 PATH_USD = "0x20C0000000000000000000000000000000000000"
 STATES = {0: "none", 1: "open", 2: "claimed", 3: "delivered", 4: "released", 5: "refunded"}
+MIN_JOB_UNITS = 1_000_000     # 1 USDC (pathUSD has 6 decimals)
+MIN_FEE_UNITS = 50_000        # fee = max(5%, 0.05)
 
 
 class TempoError(Exception):
@@ -38,6 +41,8 @@ class TempoJob:
     deadline: int
     state: str
     result: bytes | None
+    verifier: str | None = None    # may release on proof (0.3.4 contracts); None = none, or a pre-0.3.4 contract
+    proof: bytes | None = None
 
 
 class Chain:
@@ -121,21 +126,44 @@ class Escrow:
 
     @classmethod
     def deploy(cls, chain: Chain, key, token: str, fee_to: str, fee_bps: int = 500, review_s: int = 86_400,
-               guardian: str | None = None, cap_units: int = 0) -> "Escrow":
-        addr = chain.deploy(key, ARTIFACT, ["address", "address", "uint16", "uint64", "address", "uint128"],
-                            [token, fee_to, fee_bps, review_s, guardian or key.address, cap_units])
+               guardian: str | None = None, cap_units: int = 0, min_fee_units: int = MIN_FEE_UNITS,
+               min_job_units: int = MIN_JOB_UNITS) -> "Escrow":
+        addr = chain.deploy(key, ARTIFACT, ["address", "address", "uint16", "uint128", "uint128", "uint64", "address",
+                                            "uint128"],
+                            [token, fee_to, fee_bps, min_fee_units, min_job_units, review_s, guardian or key.address,
+                             cap_units])
         return cls(chain, addr, token)
 
     def _tx(self, key, sig: str, types: list, args: list) -> dict:
         from eth_abi import encode
         return self.chain.send(key, self.address, _sel(sig) + encode(types, args))
 
-    def post(self, buyer, job_id: bytes, amount: int, work_s: int) -> dict:
+    def post(self, buyer, job_id: bytes, amount: int, work_s: int, verifier: str | None = None) -> dict:
+        """Approve, then post. `verifier` (an address; default none) may release the delivered work on proof."""
         from eth_abi import encode
         self.chain.send(buyer, self.token, _sel("approve(address,uint256)") + encode(["address", "uint256"],
                                                                                      [self.address, amount]))
+        if verifier:
+            return self._tx(buyer, "postWithVerifier(bytes32,uint128,uint64,address)",
+                            ["bytes32", "uint128", "uint64", "address"], [job_id, amount, work_s, verifier])
         return self._tx(buyer, "post(bytes32,uint128,uint64)", ["bytes32", "uint128", "uint64"],
                         [job_id, amount, work_s])
+
+    def verify_release(self, verifier, job_id: bytes, result_hash: bytes, proof_root: bytes) -> dict:
+        """Paid on proof: the job's verifier releases it, naming the exact result hash the worker committed (the
+        contract refuses any other: "verifier releases unproven work") and recording `proof_root`."""
+        return self._tx(verifier, "verifyRelease(bytes32,bytes32,bytes32)", ["bytes32", "bytes32", "bytes32"],
+                        [job_id, result_hash, proof_root])
+
+    def set_paused(self, guardian, on: bool) -> dict:
+        return self._tx(guardian, "setPaused(bool)", ["bool"], [on])
+
+    def lower_cap(self, guardian, cap_units: int) -> dict:
+        return self._tx(guardian, "lowerCap(uint128)", ["uint128"], [cap_units])
+
+    def fee(self, amount: int) -> int:
+        from eth_abi import decode
+        return decode(["uint256"], self.chain.call(self.address, "fee(uint256)", ["uint256"], [amount]))[0]
 
     def claim(self, worker, job_id: bytes) -> dict:
         return self._tx(worker, "claim(bytes32)", ["bytes32"], [job_id])
@@ -156,17 +184,25 @@ class Escrow:
         return self._tx(buyer, "refund(bytes32)", ["bytes32"], [job_id])
 
     def job(self, job_id: bytes) -> TempoJob:
+        """A job, from a 0.3.4 contract (8 fields) or a pre-0.3.4 one (6 fields: no verifier, no proof)."""
         from eth_abi import decode
-        b, w, amount, deadline, state, result = decode(
-            ["address", "address", "uint128", "uint64", "uint8", "bytes32"],
-            self.chain.call(self.address, "jobs(bytes32)", ["bytes32"], [job_id]))
+        raw = self.chain.call(self.address, "jobs(bytes32)", ["bytes32"], [job_id])
+        types = ["address", "address", "uint128", "uint64", "uint8", "bytes32"]
+        verifier, proof = None, None
+        if len(raw) >= 8 * 32:
+            b, w, amount, deadline, state, result, v, p = decode(types + ["address", "bytes32"], raw)
+            verifier, proof = (None if int(v, 16) == 0 else v), (None if p == bytes(32) else p)
+        else:
+            b, w, amount, deadline, state, result = decode(types, raw)
         zero = "0x" + "0" * 40
         return TempoJob(job_id, b, None if w == zero else w, amount, deadline, STATES[state],
-                        None if result == bytes(32) else result)
+                        None if result == bytes(32) else result, verifier, proof)
 
 
-ESCROW_MODERATO = "0x888d39bB186cC718481E98080Bdb5fd8Df27Ab49"
-DEPLOY_BLOCK_MODERATO = 37_671_589
+ESCROW_MODERATO = "0x70043F5c1A3db0Fb243Fd1270176557cCA1dE584"   # 0.3.4: paid on proof, 1 USDC minimum
+DEPLOY_BLOCK_MODERATO = 37_714_000          # at or before the deployment (a log-scan start)
+ESCROW_MODERATO_V031 = "0x888d39bB186cC718481E98080Bdb5fd8Df27Ab49"   # pre-0.3.4 (immutable): its jobs still settle there
+DEPLOY_BLOCK_MODERATO_V031 = 37_671_589
 
 
 def _posted_topic() -> str:

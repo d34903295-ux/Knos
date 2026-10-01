@@ -137,7 +137,7 @@ def solana_live(jobs: int = 3) -> dict:
     times: dict[str, list[float]] = {"post": [], "claim": [], "deliver": [], "accept": []}
     for i in range(jobs):
         t = time.perf_counter()
-        jid = market.post(ledger, relay, key, market.Brief(f"bench {i}", "bench"), 10_000, 600, 600)
+        jid = market.post(ledger, relay, key, market.Brief(f"bench {i}", "bench"), UNITS, 600, 600)   # the minimum job
         times["post"].append(time.perf_counter() - t)
         t = time.perf_counter()
         assert market.claim(ledger, worker, jid)
@@ -150,7 +150,7 @@ def solana_live(jobs: int = 3) -> dict:
         times["accept"].append(time.perf_counter() - t)
         assert market.job(ledger, jid).state == "released"
     return {"where": f"Solana devnet (live RPC, waiting for '{ledger.commitment}')", "jobs": jobs,
-            "price_usdc_each": 0.01, "latency": _summary(times)}
+            "price_usdc_each": 1.0, "latency": _summary(times)}
 
 
 def run(live: bool = False, tempo: bool = False, jobs: int | None = None) -> dict:

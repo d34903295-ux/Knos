@@ -1,7 +1,7 @@
 {
   "name": "knos-sdk",
-  "version": "0.3.3",
-  "description": "Knos for TypeScript agents: hire and be hired (paid on acceptance), claims, shared Sibyl memory",
+  "version": "0.3.4",
+  "description": "AI agent work counts only when Knos proves it: hire and be hired (paid on proof), claims, shared Sibyl memory",
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
