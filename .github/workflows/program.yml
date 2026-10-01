@@ -52,6 +52,11 @@ jobs:
         with:
           name: knos_escrow.so
           path: programs/knos_escrow/target/deploy/knos_escrow.so
+      - name: a non-devnet build (no faucet), for the refusal test only
+        run: |
+          cd programs/knos_escrow && cargo build-sbf --no-default-features
+          cp target/deploy/knos_escrow.so "$RUNNER_TEMP/knos_escrow_nodevnet.so"
+          echo "KNOS_ESCROW_NODEVNET_SO=$RUNNER_TEMP/knos_escrow_nodevnet.so" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -62,7 +67,7 @@ jobs:
       - run: uv pip install --system -e ".[dev]"
       - run: git config --global user.email ci@example.invalid && git config --global user.name ci
       - name: attack tests, rules, market, verifier (against the built program)
-        run: pytest -q -n auto tests/test_escrow_sol.py tests/test_jobs_market.py tests/test_promises.py tests/test_jobs_actions.py tests/test_verify.py
+        run: pytest -q -n auto tests/test_escrow_sol.py tests/test_escrow_bounty.py tests/test_escrow_idl.py tests/test_jobs_market.py tests/test_promises.py tests/test_jobs_actions.py tests/test_verify.py
       - name: fuzz, 10,000 steps
         run: KNOS_FUZZ_SEED=$GITHUB_RUN_ID python -m pytest -q -m slow tests/test_escrow_fuzz.py -s
         env:

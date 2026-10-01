@@ -33,6 +33,10 @@ CALLS = {
     "refund": lambda: sol.refund(PID, K[0], H, K[1], K[2]),
     "verify_reject": lambda: sol.verify_reject(PID, K[0], H, H, K[1], K[2], K[3]),
     "crank": lambda: sol.crank(PID, K[0], H, K[1], K[2], K[3], K[4], K[5]),
+    "post_bounty": lambda: sol.post_bounty(PID, K[0], H, 0, 60, 60, H, K[1], K[2], verifier=K[3]),
+    "faucet": lambda: sol.faucet(PID, K[0], K[1], K[2], 100_000_000),
+    "init_faucet_mint": lambda: sol.init_faucet_mint(PID, K[0], K[1], 100_000_000),
+    "add_mint": lambda: sol.add_mint(PID, K[0], K[1], K[2]),
 }
 BY_TAG = {ix["discriminator"][0]: ix for ix in IDL["instructions"]}
 SIZES = {"u8": 1, "u16": 2, "u64": 8, "i64": 8, "pubkey": 32}
@@ -70,7 +74,7 @@ def test_builders_match_idl():
                 assert str(meta.pubkey) == acc["address"], (name, acc["name"])
         arg_len = sum(_size(a["type"]) for a in entry["args"])
         assert len(ix.data) == 1 + arg_len, name
-    assert seen == set(BY_TAG) == set(range(1, 15))
+    assert seen == set(BY_TAG) == set(range(1, 15)) | {20, 21, 22, 23}
 
 
 def _layout(name):
