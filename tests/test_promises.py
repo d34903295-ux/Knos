@@ -154,4 +154,4 @@ def test_mainnet_is_locked_and_capped(monkeypatch):
 
 
 def test_five_percent_only_on_release():
-    assert "5%" in README and "only when the agent is paid" in README
+    assert "2.5%" in README and "only when the agent is paid" in README

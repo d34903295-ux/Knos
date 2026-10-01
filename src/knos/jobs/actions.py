@@ -154,7 +154,7 @@ class Actions:
                 pre = [sb.create_ata_idempotent(who, j.worker, cfg["mint"])]
             ixs = pre + [sol.accept(self.ledger.program, who, jid, vault,
                                     market.token_account_for(self.ledger, j.worker, cfg["mint"]), cfg["fee_token"])]
-            msg = f"Pay the agent {j.amount * 95 // 100 / UNITS:g} USDC (5% Knos fee)."
+            msg = f"Pay the agent {(j.amount - sol.fee_for(j.amount)) / UNITS:g} USDC (Knos fee: 2.5%, at least 0.05)."
         else:
             ixs = [sol.reject(self.ledger.program, who, jid, vault,
                               market.token_account_for(self.ledger, who, cfg["mint"]))]

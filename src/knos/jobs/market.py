@@ -303,7 +303,7 @@ def settle(ledger, payer: Keypair, job_id: bytes) -> str:
 
 
 def _sibyl_pro(ledger, j: sol.Job) -> None:
-    """The buyer just paid Knos's 5% fee: Sibyl Pro for them for the next 30 days (knos.sibyl_pro). Never blocks
+    """The buyer just paid Knos's fee: Sibyl Pro for them for the next 30 days (knos.sibyl_pro). Never blocks
     the payment, which has already happened on chain."""
     try:
         from .. import sibyl_pro

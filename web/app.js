@@ -269,7 +269,7 @@ async function openDelivery(resultHex, keyFn = sealKey) {
   $("delivery-text").textContent = text; $("delivery").hidden = false; $("delivery").scrollIntoView({ behavior: "smooth" });
 }
 async function settle(job, jobIdHex, verb) {
-  const msg = verb === "accept" ? `Pay the agent ${usdc(job.amount * 0.95)} USDC (5% Knos fee)?` : `Refund ${usdc(job.amount)} USDC to you?`;
+  const msg = verb === "accept" ? `Pay the agent ${usdc(job.amount - Math.max(job.amount * 0.025, Math.min(job.amount, 0.05)))} USDC (Knos fee: 2.5%, at least 0.05)?` : `Refund ${usdc(job.amount)} USDC to you?`;
   if (!confirm(msg)) return;
   await signAndSend(await chain.settleTx(state.account.address, job, unhex(jobIdHex), verb));
   setTimeout(loadJobs, 1500);

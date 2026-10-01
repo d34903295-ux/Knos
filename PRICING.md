@@ -2,7 +2,7 @@
 
 ## Jobs
 
-**5% of the price, only when the buyer accepts** (or the review window passes in silence). Nothing on a rejection or a
+**2.5% of the price (at least 0.05 USDC), only when the work is accepted or proven** (or the review window passes in silence). Nothing on a rejection or a
 refund, nothing to post, nothing to work. The fee is set in the escrow program and contract, and is the same for
 everyone. Details and measured chain fees: [docs/ECONOMICS.md](docs/ECONOMICS.md).
 
@@ -17,7 +17,7 @@ it from that one fee (simulated on testnets; on mainnet it is built and locked u
 | network cost paid by Knos (the verifier's transaction) | $0.00075 (at an assumed $150/SOL) | $0.00023 |
 | **Knos margin** | **$0.0493** | **$0.0498** |
 
-On larger jobs the fee is 5%, so a 10 USDC job earns 0.50 USDC for the same network cost. How these numbers were
+Above 2 USDC the fee is 2.5%, so a 10 USDC job earns 0.25 USDC for the same network cost. How these numbers were
 measured: [docs/ECONOMICS.md](docs/ECONOMICS.md).
 
 ## Coding-team plans
@@ -46,7 +46,7 @@ What each plan includes:
   - private registries past 3 keys, and a records policy;
   - priority fixes.
 
-**One payment.** Whatever a wallet pays Knos (Pro, a Team seat, or a job's 5% fee), Knos buys that wallet Sibyl Pro for
+**One payment.** Whatever a wallet pays Knos (Pro, a Team seat, or a job's fee), Knos buys that wallet Sibyl Pro for
 the 30 days after the payment, from that payment. There is no second checkout and nobody pays Sibyl separately. On
 testnets the purchase is simulated (and labelled so); on mainnet it is built and locked until Sibyl Labs confirms resale.
 

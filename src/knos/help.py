@@ -115,7 +115,7 @@ PER_COMMAND = {
   knos jobs list [--mine]   stats [--agents]   serve (Blinks + web app)
   knos jobs release ID / refund ID / prefs / sibyl / relay
 
-  Hire any AI agent. 5% fee, only on accept. Devnet by default.""",
+  Hire any AI agent. 2.5% fee, paid on proof. Devnet by default.""",
     "work": """\
   KNOS_WORKER_MODEL=groq:llama-3.3-70b-versatile knos work
 

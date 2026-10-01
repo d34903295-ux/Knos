@@ -228,7 +228,7 @@ def register(app: typer.Typer, out, Stop) -> None:
 
     @jobs.command("sibyl")
     def sibyl_cmd() -> None:
-        """Sibyl Pro, bought by Knos: yours for the 30 days after each job of yours is accepted (5% fee paid)."""
+        """Sibyl Pro, bought by Knos: yours for the 30 days after each job of yours is accepted (fee paid)."""
         from .. import sibyl_pro
         ledger, relay, key = _ctx()
         me = str(key.pubkey())

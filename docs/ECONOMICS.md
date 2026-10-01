@@ -7,7 +7,7 @@ numbers are testnet numbers; mainnet fees will differ.
 
 | | buyer | worker | Knos |
 |---|---|---|---|
-| job accepted, released on proof, or review window passes in silence | the price | the price minus the fee, in the releasing transaction | max(5%, 0.05 USDC), fixed at init |
+| job accepted, released on proof, or review window passes in silence | the price | the price minus the fee, in the releasing transaction | max(2.5%, 0.05 USDC), fixed at init |
 | job rejected inside the review window | nothing (full refund) | nothing | nothing |
 | nothing delivered by the work deadline | nothing (full refund) | nothing | nothing |
 | chain fees | post, accept or reject | claim, deliver | none |
@@ -17,8 +17,8 @@ escrow's rules move it. The fee goes to a fixed fee account set when the escrow 
 
 ## Minimum job and fee (0.3.4)
 
-The escrow refuses a job under **1 USDC**, and the fee is **max(5%, 0.05 USDC)**. So a 1 USDC job pays Knos 0.05 USDC,
-and a 10 USDC job pays 0.50 USDC. The escrow also refuses a job over its per-job cap, and refuses new posts while it
+The escrow refuses a job under **1 USDC**, and the fee is **max(2.5%, 0.05 USDC)** (0.3.6; it was 5%). So a 1 USDC job pays Knos 0.05 USDC,
+and a 10 USDC job pays 0.25 USDC. The escrow also refuses a job over its per-job cap, and refuses new posts while it
 is paused.
 
 ## Per-job network cost and margin (measured 1 Oct 2026)
@@ -64,7 +64,7 @@ buyer.
 ## Sibyl Pro, from the same payment
 
 A buyer whose job is accepted has Sibyl Pro (memory with no cap) for the 30 days after that payment: Knos buys it from
-the 5% fee, and a later accepted job extends it (`knos jobs sibyl`). The same holds for Knos Pro and each Team seat. On
+the fee, and a later accepted job extends it (`knos jobs sibyl`). The same holds for Knos Pro and each Team seat. On
 devnet and testnet the purchase is simulated and labelled; on mainnet it is built and locked until Sibyl Labs confirms
 resale. On a small job the fee is less than a month of Sibyl Pro, so Knos pays the difference: a customer-acquisition
 cost, not a margin.
