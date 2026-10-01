@@ -117,6 +117,20 @@ async function sealKey() {
 }
 
 // ---- hire (Solana): the brief goes to the relay, the post transaction is built here ------------------------------
+// The key that may pay the worker on proof (`knos verify`); keep in sync with src/knos/jobs/verify.py.
+const KNOS_VERIFIER = "";
+$("verifier").onchange = () => { $("verifier-key").hidden = $("verifier").value !== "custom"; };
+function chosenVerifier() {
+  const v = $("verifier").value;
+  if (v === "none") return null;
+  if (v === "custom") {
+    const k = $("verifier-key").value.trim();
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(k)) throw new Error("Enter the verifier's public key (base58).");
+    return k;
+  }
+  if (!KNOS_VERIFIER) throw new Error("The Knos reference verifier is not set up yet: choose None or a custom key.");
+  return KNOS_VERIFIER;
+}
 $("hire-form").onsubmit = async (e) => {
   e.preventDefault();
   const st = $("hire-status"); const btn = $("post"); btn.disabled = true;
@@ -126,6 +140,7 @@ $("hire-form").onsubmit = async (e) => {
     const { pk } = await sealKey();
     const task = $("task").value.trim(), kind = $("kind").value, units = Math.round(Number($("price").value) * 1e6);
     if (!task || !(units > 0)) throw new Error("Describe the task and set a price.");
+    const verifier = chosenVerifier();
     const jobId = crypto.getRandomValues(new Uint8Array(32));
     const brief = new TextEncoder().encode(JSON.stringify({ title: task.split("\n")[0].slice(0, 80), task, kind,
       checks: null, buyer: state.account.address, price_units: units, created: Math.floor(Date.now() / 1000),
@@ -139,7 +154,7 @@ $("hire-form").onsubmit = async (e) => {
     } else held = true;
     if (held) store.set("knos-pending-briefs", [...store.get("knos-pending-briefs", []), b64.enc(brief)]);
     say(st, "Approve in your wallet…");
-    const sig = await signAndSend(await chain.postTx(state.account.address, jobId, units, briefHash));
+    const sig = await signAndSend(await chain.postTx(state.account.address, jobId, units, briefHash, 3600, 86400, verifier));
     const addr = await chain.jobAddress(jobId);
     store.set("knos-job-ids", { ...store.get("knos-job-ids", {}), [addr]: hex(jobId) });
     say(st, `Posted: ${usdc(units / 1e6)} USDC in escrow (${typeof sig === "string" ? sig.slice(0, 10) : "signed"}…).`
