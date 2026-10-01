@@ -4,6 +4,9 @@
                                author -> author, release -> author (+ whatever history requires: usually ci)
     .knos/proof.toml           tests / install / author, and [[check]] name, run, when (a regex on the claim)
     history.required(...)      checks earlier false "done"s in this repo made required (knos.proof.history)
+    repo-rules, rule:<id>      the PR (base to working tree, and its commits) against CONTRIBUTING.md and the rules past
+                               rejections taught (history.lint_pr). Run FIRST: a violation fails the verdict citing
+                               the line, and nothing else runs, so nothing is attested or minted for it.
 
 Results are cached per check and per state of the tree, so a second stop on unchanged work does not re-run the suite.
 """
@@ -77,8 +80,10 @@ def _cache_path() -> Path:
     return paths.home() / "proof-cache.json"
 
 
-def needed(claim: claims.Claim, cfg: dict, store) -> tuple[list[str], set[str]]:
+def needed(claim: claims.Claim, cfg: dict, store, repo: Path | None = None) -> tuple[list[str], set[str]]:
     names = {KIND_CHECKS[k] for k in claim.kinds if k in KIND_CHECKS}
+    if repo is not None and any(r.get("origin") == "contributing" for r in history.repo_rules(store, repo)):
+        names.add("repo-rules")
     learned = history.required(store, claim.kinds | ({"release"} if "pypi" in claim.kinds else set()))
     for c in cfg.get("check", []) or []:
         if c.get("name") and (not c.get("when") or re.search(c["when"], claim.text, re.I)):
@@ -86,10 +91,57 @@ def needed(claim: claims.Claim, cfg: dict, store) -> tuple[list[str], set[str]]:
     return sorted(names | learned), learned - names
 
 
-def run_check(name: str, repo: Path, claim: claims.Claim, cfg: dict, runners: dict | None = None) -> checks.Result:
+def _git(repo: Path, *a) -> tuple[int, str]:
+    try:
+        got = subprocess.run(["git", *a], cwd=str(repo), capture_output=True, text=True, timeout=30,
+                             encoding="utf-8", errors="replace")
+        return got.returncode, got.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+
+
+def pr(repo: Path, cfg: dict) -> tuple[str, list[dict]]:
+    """The PR as Knos sees it: the diff from the base (proof.toml `base`, else the merge-base with origin/HEAD,
+    origin/main, main or master) to the working tree, and the commits since the base. On the base itself: the
+    uncommitted changes."""
+    head = _git(repo, "rev-parse", "HEAD")[1].strip()
+    base = ""
+    for ref in [cfg.get("base"), "origin/HEAD", "origin/main", "main", "master"]:
+        if not ref:
+            continue
+        code, got = _git(repo, "merge-base", "HEAD", ref)
+        if code == 0 and got.strip() and got.strip() != head:
+            base = got.strip()
+            break
+    if not base:
+        return _git(repo, "diff", "HEAD")[1], []
+    log = _git(repo, "log", "--format=%H%x00%B%x01", f"{base}..HEAD")[1]
+    commits = [{"sha": c.split("\0", 1)[0].strip(), "message": c.split("\0", 1)[1].strip()}
+               for c in log.split("\x01") if "\0" in c]
+    return _git(repo, "diff", base)[1], commits
+
+
+def repo_rules_check(repo: Path, cfg: dict, store, only: set[str], name: str = "repo-rules") -> checks.Result:
+    """The PR against the repo's rules (`only`: their ids), each violation citing the rule's line and the PR's."""
+    diff, commits = pr(repo, cfg)
+    got = history.lint_pr(store, repo, diff, commits, only)
+    if not got:
+        return checks.Result(name, True, "the PR keeps every repo rule", {"violations": []})
+    more = f" (+{len(got) - 6} more)" if len(got) > 6 else ""
+    return checks.Result(name, False, "; ".join(map(str, got[:6])) + more, {"violations": [str(v) for v in got]})
+
+
+def run_check(name: str, repo: Path, claim: claims.Claim, cfg: dict, runners: dict | None = None,
+              store=None) -> checks.Result:
     runners = runners or {}
     if name in runners:
         return runners[name](repo, claim, cfg)
+    store = store if store is not None else history.NullStore()
+    if name == "repo-rules":
+        return repo_rules_check(repo, cfg, store, {r["id"] for r in history.repo_rules(store, repo)
+                                                   if r.get("origin") == "contributing"})
+    if name.startswith("rule:"):
+        return repo_rules_check(repo, cfg, store, {name[5:]}, name)
     if name == "tests":
         return checks.tests(repo, cfg.get("tests"), cfg.get("install"))
     if name == "ci":
@@ -115,7 +167,9 @@ def evaluate(repo: Path, text: str, store=None, runners: dict | None = None, use
     if not claim.says_done:
         return Verdict(True, claim)
     cfg = config(repo)
-    names, learned = needed(claim, cfg, store)
+    names, learned = needed(claim, cfg, store, repo)
+    gate = [n for n in names if n == "repo-rules" or n.startswith("rule:")]
+    names = gate + [n for n in names if n not in gate]   # the repo's rules first: nothing runs past a violation
     state = _tree_state(repo)
     cache = {}
     if use_cache:
@@ -130,8 +184,10 @@ def evaluate(repo: Path, text: str, store=None, runners: dict | None = None, use
         if hit:
             results.append(checks.Result(**hit))
             continue
-        r = run_check(n, repo, claim, cfg, runners)
+        r = run_check(n, repo, claim, cfg, runners, store)
         results.append(r)
+        if gate and n == gate[-1] and not all(x.ok for x in results):
+            break   # the PR breaks a repo rule: the verdict fails here, before any other check or attestation
         if n == "tests" and use_cache:
             cache[key] = r.__dict__
     if use_cache and cache:

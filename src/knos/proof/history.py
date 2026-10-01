@@ -6,7 +6,11 @@ that history makes required.
     lint()        claims the evidence contradicts: "shipped" at a commit whose CI failed
     learn()       each contradiction becomes a required check (entity `proof_rule`): from then on, a claim of that kind
                   runs that check whatever the message says. Sibyl's own MemoryClient.learn() runs too when the
-                  account has Sibyl Pro (playbooks across the journal); the rules here need no tier.
+                  account has Sibyl Pro (playbooks across the journal); the rules here need no tier. Each flagged PR
+                  (a repo-rule violation) becomes a `repo_rule`, required as `rule:<id>` on every claim after.
+    repo_rules()  the repo's own rules: CONTRIBUTING.md parsed into machine-checkable rules (stored in Sibyl the first
+                  time, recalled from Sibyl after) plus the rules past rejections taught it (entity `repo_rule`)
+    lint_pr()     every place a PR's diff or commits break one of those rules, citing the rule's line and the PR's
 
 `NullStore` keeps nothing: the same engine with no memory, which is what a plain hook amounts to.
 """
@@ -99,8 +103,16 @@ def lint(store) -> list[Contradiction]:
     return out
 
 
-def learn(store) -> list[dict]:
-    """Turn every contradiction into a required check for that kind of claim. Returns the rules now in force."""
+def learn(store, flagged: list["RuleViolation"] | None = None) -> list[dict]:
+    """Turn every contradiction into a required check for that kind of claim, and every flagged PR (repo-rule
+    violations) into a `repo_rule` every later claim must pass as `rule:<id>`. Returns the rules now in force."""
+    for v in flagged or []:
+        r = v.rule
+        rid = _id("learned", r["kind"], r.get("param"))
+        store.put("repo_rule", rid, {**r, "id": rid, "origin": "learned",
+                                     "because": f"a PR was flagged: {v.where}: {v.offending.strip()[:160]}"})
+        store.put("proof_rule", _id("*", rid), {"when": "*", "require": f"rule:{rid}",
+                                                "because": f"a PR broke {r['source']} ({r['text'][:80]})"})
     for x in lint(store):
         for kind in x.claimed or ["done"]:
             store.put("proof_rule", _id(kind, x.failed), {"when": kind, "require": x.failed,
@@ -118,7 +130,7 @@ def rules(store) -> list[dict]:
 
 
 def required(store, kinds: set[str]) -> set[str]:
-    return {r["require"] for r in rules(store) if r.get("when") in kinds}
+    return {r["require"] for r in rules(store) if r.get("when") in kinds or r.get("when") == "*"}
 
 
 # ---- a delivery against what the buyer told us before (Sibyl) ---------------------------------------------------
@@ -189,4 +201,215 @@ def lint_preferences(store_or_memory, buyer: str | None, delivery_text: str) -> 
                     out.append(PreferenceViolation(pref, i, ln, f"{len(delivery_text.split())} words; the limit is "
                                                                 f"passed on this line"))
                     break
+    return out
+
+
+# ---- a PR against the repo's own rules: CONTRIBUTING.md and past rejections (Sibyl) ------------------------------
+
+CONTRIBUTING = ("CONTRIBUTING.md", ".github/CONTRIBUTING.md", "docs/CONTRIBUTING.md")
+_NEG = r"\b(no|not|never|avoid|don'?t|do not|without|must not|shouldn'?t|should not)\b"
+_DEP_FILES = re.compile(r"(^|/)(pyproject\.toml|setup\.py|setup\.cfg|requirements[\w.-]*\.txt|package\.json|"
+                        r"Cargo\.toml|go\.mod|Gemfile)$")
+_CONVENTIONAL = re.compile(r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([\w./ -]+\))?!?: \S")
+_TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]*$|_test\.\w+$|\.(test|spec)\.\w+$")
+_CODE = re.compile(r"\.(py|js|jsx|ts|tsx|go|rs|rb|java|kt|c|cc|cpp|h|cs|php|swift)$")
+
+
+@dataclass
+class RuleViolation:
+    rule: dict         # the repo_rule: kind, param, source ("CONTRIBUTING.md:7"), text, origin
+    where: str         # file:line in the PR's diff, or "commit <sha>"
+    offending: str     # the offending diff line or commit subject
+    why: str
+
+    def __str__(self) -> str:
+        return (f"{self.where}: {self.offending.strip()!r} breaks {self.rule['source']} "
+                f"({self.rule['text'].strip()!r}): {self.why}")
+
+
+def parse_contributing(text: str, source: str = "CONTRIBUTING.md") -> list[dict]:
+    """The machine-checkable rules in a CONTRIBUTING file, each citing its line. Deterministic patterns, no model."""
+    out: list[dict] = []
+
+    def add(kind, i, line, param=None):
+        if not any(r["kind"] == kind and r.get("param") == param for r in out):
+            out.append({"kind": kind, "param": param, "source": f"{source}:{i}", "text": line.strip()[:300]})
+
+    for i, line in enumerate(text.splitlines(), 1):
+        p = line.lower()
+        if re.search(_NEG + r".*\b(new |additional |extra )?(dependenc|deps\b|packages?\b)", p):
+            add("no_new_deps", i, line)
+        if re.search(r"\btests? (are |is )?(required|mandatory)|\b(add|include|write|with|must (have|add|include)|"
+                     r"needs?|requires?)\s+(new |unit |accompanying )?tests?\b", p) and \
+                not re.search(_NEG + r"\s+(\w+\s+)?tests?\b", p):
+            add("tests_required", i, line)
+        m = re.search(r"\b(under|fewer than|less than|at most|max(?:imum)?(?: of)?|no more than|up to)\s+(\d+)\s+"
+                      r"(changed |modified )?lines?\b", p)
+        if m:
+            n = int(m.group(2)) - (1 if m.group(1) in ("under", "fewer than", "less than") else 0)
+            add("max_lines", i, line, n)
+        elif re.search(r"\bkeep (your )?(prs?|pull requests?|changes|diffs?) (small|focused|short)", p):
+            add("max_lines", i, line, 400)
+        if re.search(r"conventional commits?", p):
+            add("conventional_commits", i, line)
+        if re.search(r"console\.log|\bprint\(|\bdebug (prints?|statements?|output|logging)", p) and re.search(_NEG, p):
+            add("no_debug", i, line)
+        if re.search(r"signed-off-by|\bsign[- ]?off\b|\bdco\b", p):
+            add("signoff", i, line)
+        if re.search(r"\b(do not|don'?t|never|must not)\s+(edit|modify|change|touch|update)\b", p):
+            files = re.findall(r"`([^`]+)`", line) or re.findall(r"\b([\w.-]*CHANGELOG[\w.-]*|[\w./-]+\.(?:lock|md|json|"
+                                                                r"ya?ml|txt|toml))\b", line, re.I)
+            if "generated" in p and not files:
+                files = ["generated"]
+            for f in files:
+                add("no_edit", i, line, f)
+    return out
+
+
+def repo_rules(store, repo_path) -> list[dict]:
+    """The repo's rules, recalled from Sibyl: its CONTRIBUTING file parsed (stored the first time it is seen, so
+    later reads come from Sibyl) plus the rules past rejections taught it (`learn(store, flagged)`)."""
+    from pathlib import Path
+    repo_path = Path(repo_path)
+    have = store.all("repo_rule")
+    current: set[str] = set()
+    for rel in CONTRIBUTING:
+        f = repo_path / rel
+        if not f.is_file():
+            continue
+        text = f.read_text(encoding="utf-8", errors="ignore")
+        digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+        current.add(digest)
+        if any(r.get("contributing") == digest for r in have):
+            continue   # already in Sibyl: recalled, not re-parsed
+        for r in parse_contributing(text, rel):
+            rid = _id("contributing", digest, r["kind"], r.get("param"))
+            row = {**r, "id": rid, "origin": "contributing", "contributing": digest}
+            store.put("repo_rule", rid, row)
+            have.append(row)   # a NullStore keeps nothing: the rules still apply to this read
+    seen, out = set(), []
+    for r in have:
+        if r.get("origin") == "contributing" and r.get("contributing") not in current:
+            continue   # a CONTRIBUTING file that has since changed or gone
+        if r.get("id") and r["id"] not in seen:
+            seen.add(r["id"])
+            out.append(r)
+    return out
+
+
+def _added(diff_text: str) -> tuple[list[tuple[str, int, str]], dict[str, int], int]:
+    """(file, new line number, text) of every added line, each changed file's first changed line, and lines changed."""
+    added: list[tuple[str, int, str]] = []
+    files: dict[str, int] = {}
+    changed, path, n = 0, None, 0
+    for ln in diff_text.splitlines():
+        if ln.startswith("diff --git "):
+            m = re.match(r"diff --git a/(\S+) b/(\S+)", ln)
+            path = m.group(2) if m else None
+            if path:
+                files.setdefault(path, 1)
+            continue
+        if ln.startswith("+++ "):
+            t = ln[4:].strip()
+            if t != "/dev/null":
+                path = t[2:] if t.startswith("b/") else t
+                files.setdefault(path, 1)
+            continue
+        if ln.startswith("--- "):
+            continue
+        m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", ln)
+        if m:
+            n = int(m.group(1))
+            if path and files.get(path, 1) == 1:
+                files[path] = max(n, 1)
+            continue
+        if path is None:
+            continue
+        if ln.startswith("+"):
+            added.append((path, n, ln[1:]))
+            changed += 1
+            n += 1
+        elif ln.startswith("-"):
+            changed += 1
+        elif ln.startswith(" "):
+            n += 1
+    return added, files, changed
+
+
+def _is_dep_line(path: str, text: str) -> bool:
+    t = text.strip()
+    if not t or t.startswith(("#", "//")):
+        return False
+    name = path.rsplit("/", 1)[-1]
+    if name.startswith("requirements"):
+        return not t.startswith("-")
+    if name == "package.json":
+        m = re.match(r'"([^"]+)"\s*:\s*"([^"]*)"', t)
+        return bool(m) and m.group(1) not in ("version", "name", "main", "description", "license") and \
+            bool(re.match(r"[~^<>=*]|\d|latest|workspace:|file:|git", m.group(2)))
+    if name == "go.mod":
+        return bool(re.match(r"(require\s+)?[\w.-]+\.\w+/\S+\s+v\d", t))
+    if name == "Cargo.toml":
+        return bool(re.match(r'^[\w-]+\s*=\s*("|\{)', t))
+    return bool(re.match(r'^"[A-Za-z0-9][\w.\-\[\],]*\s*([<>=!~^;]|")', t))
+
+
+def _commits(commits) -> list[tuple[str, str]]:
+    out = []
+    for c in commits or []:
+        if isinstance(c, dict):
+            out.append((str(c.get("sha", ""))[:8], str(c.get("message", ""))))
+        else:
+            out.append(("", str(c)))
+    return out
+
+
+def lint_pr(store, repo_path, diff_text: str, commits=(), only: set[str] | None = None) -> list[RuleViolation]:
+    """Every place a PR (its unified diff, and its commits as messages or {"sha", "message"}) breaks one of the repo's
+    rules, citing the rule's line and the PR's file:line or commit. Empty when the PR keeps them all."""
+    added, files, changed = _added(diff_text)
+    msgs = _commits(commits)
+    out: list[RuleViolation] = []
+    for r in repo_rules(store, repo_path):
+        if only is not None and r["id"] not in only:
+            continue
+        k = r["kind"]
+        if k == "no_new_deps":
+            out += [RuleViolation(r, f"{f}:{n}", t, "a new dependency") for f, n, t in added
+                    if _DEP_FILES.search(f) and _is_dep_line(f, t)]
+        elif k == "tests_required":
+            code = [f for f in files if _CODE.search(f) and not _TEST_PATH.search(f)]
+            if code and not any(_TEST_PATH.search(f) for f in files):
+                f = code[0]
+                line = next((t for g, _n, t in added if g == f), "")
+                out.append(RuleViolation(r, f"{f}:{files[f]}", line, "code changed and no test changed"))
+        elif k == "max_lines":
+            limit = int(r.get("param") or 400)
+            if changed > limit:
+                f, n, t = added[min(limit, len(added) - 1)] if added else ("(diff)", 0, "")
+                out.append(RuleViolation(r, f"{f}:{n}", t, f"{changed} lines changed; the limit is {limit}"))
+        elif k == "conventional_commits":
+            for sha, m in msgs:
+                subject = (m.splitlines() or [""])[0]
+                if not _CONVENTIONAL.match(subject):
+                    out.append(RuleViolation(r, f"commit {sha or '?'}", subject,
+                                             "not a conventional commit subject (type(scope): summary)"))
+        elif k == "no_debug":
+            for f, n, t in added:
+                if not _TEST_PATH.search(f) and ((f.endswith((".js", ".jsx", ".ts", ".tsx")) and "console.log(" in t)
+                                                 or (f.endswith(".py") and re.match(r"\s*print\(", t))):
+                    out.append(RuleViolation(r, f"{f}:{n}", t, "a debug print"))
+        elif k == "signoff":
+            for sha, m in msgs:
+                if "signed-off-by:" not in m.lower():
+                    out.append(RuleViolation(r, f"commit {sha or '?'}", (m.splitlines() or [""])[0],
+                                             "no Signed-off-by trailer"))
+        elif k == "no_edit":
+            pat = str(r.get("param") or "")
+            for f, first in files.items():
+                hit = ("generated" in f.lower() or f.endswith(".lock")) if pat == "generated" else \
+                    pat.lower() in f.lower()
+                if hit:
+                    line = next((t for g, _n, t in added if g == f), "")
+                    out.append(RuleViolation(r, f"{f}:{first}", line, f"{pat} must not be edited"))
     return out
