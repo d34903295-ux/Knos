@@ -1,0 +1,1212 @@
+{
+ "address": "GwmbMFvyHHwHug5em9dv26oXz2zTgXKGsNdrBxPayRPq",
+ "metadata": {
+  "name": "knos_escrow",
+  "version": "0.3.6",
+  "spec": "0.1.0",
+  "description": "Knos escrow: pay-on-acceptance or pay-on-proof escrow for AI agent jobs (SPL tokens)",
+  "repository": "https://github.com/drexthealpha/Knos"
+ },
+ "docs": [
+  "A native program, not Anchor: each instruction's discriminator is its one-byte tag, accounts carry no discriminator and are told apart by size (Job 225 bytes, 217 for 0.3.4 jobs, 153 before; Config2 124). Layouts are packed little-endian. Every settlement closes the job and returns its rent to the buyer."
+ ],
+ "instructions": [
+  {
+   "name": "post",
+   "docs": [
+    "Post a job and escrow its price. verifier is optional (absent or zero = no verifier)."
+   ],
+   "discriminator": [
+    1
+   ],
+   "accounts": [
+    {
+     "name": "buyer",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         106,
+         111,
+         98
+        ]
+       },
+       {
+        "kind": "arg",
+        "path": "id"
+       }
+      ]
+     }
+    },
+    {
+     "name": "buyer_token",
+     "writable": true
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": [
+    {
+     "name": "id",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "amount",
+     "type": "u64"
+    },
+    {
+     "name": "work",
+     "type": "i64"
+    },
+    {
+     "name": "review",
+     "type": "i64"
+    },
+    {
+     "name": "brief",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "verifier",
+     "type": "pubkey"
+    }
+   ]
+  },
+  {
+   "name": "claim",
+   "docs": [
+    "Claim an open job; the worker stakes max(10% of the price, 0.1 USDC). Never the buyer."
+   ],
+   "discriminator": [
+    2
+   ],
+   "accounts": [
+    {
+     "name": "worker",
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id]"
+     ]
+    },
+    {
+     "name": "worker_token",
+     "writable": true
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+   ],
+   "args": []
+  },
+  {
+   "name": "deliver",
+   "docs": [
+    "Commit the result hash before the claim times out; the stake goes back to the worker."
+   ],
+   "discriminator": [
+    3
+   ],
+   "accounts": [
+    {
+     "name": "worker",
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id]"
+     ]
+    },
+    {
+     "name": "worker_token",
+     "writable": true
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "vault_authority",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         118,
+         97,
+         117,
+         108,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+   ],
+   "args": [
+    {
+     "name": "result",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "accept",
+   "docs": [
+    "The buyer accepts delivered work: worker paid, fee taken, job closed."
+   ],
+   "discriminator": [
+    4
+   ],
+   "accounts": [
+    {
+     "name": "buyer_signer",
+     "writable": true,
+     "signer": true,
+     "docs": [
+      "the job's buyer (also passed again as buyer)"
+     ]
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id]"
+     ]
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "vault_authority",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         118,
+         97,
+         117,
+         108,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "worker_token",
+     "writable": true
+    },
+    {
+     "name": "fee_token",
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "buyer",
+     "writable": true,
+     "docs": [
+      "the job's buyer: receives the closed job's rent"
+     ]
+    }
+   ],
+   "args": []
+  },
+  {
+   "name": "release",
+   "docs": [
+    "Anyone releases delivered work after the review window."
+   ],
+   "discriminator": [
+    5
+   ],
+   "accounts": [
+    {
+     "name": "anyone",
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id]"
+     ]
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "vault_authority",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         118,
+         97,
+         117,
+         108,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "worker_token",
+     "writable": true
+    },
+    {
+     "name": "fee_token",
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "buyer",
+     "writable": true,
+     "docs": [
+      "the job's buyer: receives the closed job's rent"
+     ]
+    }
+   ],
+   "args": []
+  },
+  {
+   "name": "reject",
+   "docs": [
+    "The buyer rejects delivered work inside the review window (not on a job that names a verifier)."
+   ],
+   "discriminator": [
+    6
+   ],
+   "accounts": [
+    {
+     "name": "buyer",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id]"
+     ]
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "vault_authority",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         118,
+         97,
+         117,
+         108,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "buyer_token",
+     "writable": true
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+   ],
+   "args": []
+  },
+  {
+   "name": "refund",
+   "docs": [
+    "The buyer is refunded an open or claimed job past the work deadline (with a timed-out claim's stake)."
+   ],
+   "discriminator": [
+    7
+   ],
+   "accounts": [
+    {
+     "name": "buyer",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id]"
+     ]
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "vault_authority",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         118,
+         97,
+         117,
+         108,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "buyer_token",
+     "writable": true
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+   ],
+   "args": []
+  },
+  {
+   "name": "init2",
+   "docs": [
+    "Create the config2 PDA. If the legacy config exists, only its admin may run this."
+   ],
+   "discriminator": [
+    8
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "config",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "fee_token"
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    },
+    {
+     "name": "legacy_config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "args": [
+    {
+     "name": "fee_bps",
+     "type": "u16"
+    },
+    {
+     "name": "min_fee",
+     "type": "u64"
+    },
+    {
+     "name": "min_amount",
+     "type": "u64"
+    },
+    {
+     "name": "max_amount",
+     "type": "u64"
+    },
+    {
+     "name": "paused",
+     "type": "u8"
+    }
+   ]
+  },
+  {
+   "name": "set_pause",
+   "docs": [
+    "Admin: stop or resume new posts."
+   ],
+   "discriminator": [
+    9
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "signer": true
+    },
+    {
+     "name": "config",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "args": [
+    {
+     "name": "paused",
+     "type": "u8"
+    }
+   ]
+  },
+  {
+   "name": "lower_cap",
+   "docs": [
+    "Admin: lower the per-job cap (never raise it)."
+   ],
+   "discriminator": [
+    10
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "signer": true
+    },
+    {
+     "name": "config",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "args": [
+    {
+     "name": "max_amount",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "verify_release",
+   "docs": [
+    "The job's verifier releases delivered work whose committed result is result_hash, recording proof_root."
+   ],
+   "discriminator": [
+    11
+   ],
+   "accounts": [
+    {
+     "name": "verifier",
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id]"
+     ]
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "vault_authority",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         118,
+         97,
+         117,
+         108,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "worker_token",
+     "writable": true
+    },
+    {
+     "name": "fee_token",
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "buyer",
+     "writable": true,
+     "docs": [
+      "the job's buyer: receives the closed job's rent"
+     ]
+    }
+   ],
+   "args": [
+    {
+     "name": "result_hash",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "proof_root",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "verify_reject",
+   "docs": [
+    "The job's verifier fails delivered work inside the review window: buyer refunded, job closed."
+   ],
+   "discriminator": [
+    12
+   ],
+   "accounts": [
+    {
+     "name": "verifier",
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id]"
+     ]
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "vault_authority",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         118,
+         97,
+         117,
+         108,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "buyer_token",
+     "writable": true
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "buyer",
+     "writable": true,
+     "docs": [
+      "the job's buyer: receives the closed job's rent"
+     ]
+    }
+   ],
+   "args": [
+    {
+     "name": "proof_root",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "settle",
+   "docs": [
+    "The deadline crank, anyone: delivered past review -> worker paid; open or claimed past the work deadline -> buyer refunded."
+   ],
+   "discriminator": [
+    13
+   ],
+   "accounts": [
+    {
+     "name": "anyone",
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "docs": [
+      "PDA [\"job\", id]"
+     ]
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "vault_authority",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         118,
+         97,
+         117,
+         108,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "worker_token",
+     "writable": true,
+     "docs": [
+      "unused for an unclaimed job: pass any token account"
+     ]
+    },
+    {
+     "name": "fee_token",
+     "writable": true
+    },
+    {
+     "name": "buyer_token",
+     "writable": true
+    },
+    {
+     "name": "buyer",
+     "writable": true,
+     "docs": [
+      "the job's buyer: receives the closed job's rent"
+     ]
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+   ],
+   "args": []
+  }
+ ],
+ "accounts": [
+  {
+   "name": "Config2",
+   "discriminator": []
+  },
+  {
+   "name": "Job",
+   "discriminator": []
+  }
+ ],
+ "errors": [
+  {
+   "code": 13,
+   "name": "NotAJob",
+   "msg": "not a job account"
+  },
+  {
+   "code": 17,
+   "name": "Paused",
+   "msg": "paused: no new jobs"
+  },
+  {
+   "code": 18,
+   "name": "BelowMinimum",
+   "msg": "below the minimum job"
+  },
+  {
+   "code": 19,
+   "name": "OverCap",
+   "msg": "over the per-job cap"
+  },
+  {
+   "code": 20,
+   "name": "NotOpen",
+   "msg": "not open"
+  },
+  {
+   "code": 21,
+   "name": "NotWorker",
+   "msg": "not worker"
+  },
+  {
+   "code": 22,
+   "name": "BuyerCannotClaim",
+   "msg": "a buyer cannot claim its own job"
+  },
+  {
+   "code": 23,
+   "name": "ClaimTimedOut",
+   "msg": "the claim timed out"
+  },
+  {
+   "code": 30,
+   "name": "NotDelivered",
+   "msg": "not delivered"
+  },
+  {
+   "code": 31,
+   "name": "NotBuyer",
+   "msg": "not buyer"
+  },
+  {
+   "code": 32,
+   "name": "NotPastDeadline",
+   "msg": "in review / not past the deadline"
+  },
+  {
+   "code": 34,
+   "name": "NotVerifier",
+   "msg": "not the job's verifier"
+  },
+  {
+   "code": 35,
+   "name": "UnprovenWork",
+   "msg": "verifier releases unproven work"
+  },
+  {
+   "code": 36,
+   "name": "SelfVerify",
+   "msg": "a worker cannot verify its own work"
+  },
+  {
+   "code": 41,
+   "name": "NotRefundable",
+   "msg": "not refundable"
+  },
+  {
+   "code": 43,
+   "name": "VerifiedJob",
+   "msg": "a verified job: only its verifier can reject"
+  },
+  {
+   "code": 44,
+   "name": "RentToBuyer",
+   "msg": "rent back to the buyer only"
+  }
+ ],
+ "types": [
+  {
+   "name": "Config2",
+   "docs": [
+    "PDA [\"config2\"]; size 124 bytes"
+   ],
+   "type": {
+    "kind": "struct",
+    "fields": [
+     {
+      "name": "admin",
+      "docs": [
+       "offset 0, 32 bytes"
+      ],
+      "type": "pubkey"
+     },
+     {
+      "name": "mint",
+      "docs": [
+       "offset 32, 32 bytes"
+      ],
+      "type": "pubkey"
+     },
+     {
+      "name": "fee_token",
+      "docs": [
+       "offset 64, 32 bytes"
+      ],
+      "type": "pubkey"
+     },
+     {
+      "name": "fee_bps",
+      "docs": [
+       "offset 96, 2 bytes"
+      ],
+      "type": "u16"
+     },
+     {
+      "name": "min_fee",
+      "docs": [
+       "offset 98, 8 bytes"
+      ],
+      "type": "u64"
+     },
+     {
+      "name": "min_amount",
+      "docs": [
+       "offset 106, 8 bytes"
+      ],
+      "type": "u64"
+     },
+     {
+      "name": "max_amount",
+      "docs": [
+       "offset 114, 8 bytes; 0 = no cap"
+      ],
+      "type": "u64"
+     },
+     {
+      "name": "paused",
+      "docs": [
+       "offset 122, 1 bytes"
+      ],
+      "type": "u8"
+     },
+     {
+      "name": "bump",
+      "docs": [
+       "offset 123, 1 bytes"
+      ],
+      "type": "u8"
+     }
+    ]
+   }
+  },
+  {
+   "name": "Job",
+   "docs": [
+    "PDA [\"job\", id]; size 225 bytes"
+   ],
+   "type": {
+    "kind": "struct",
+    "fields": [
+     {
+      "name": "state",
+      "docs": [
+       "offset 0, 1 bytes; 0 none, 1 open, 2 claimed, 3 delivered, 4 released, 5 refunded"
+      ],
+      "type": "u8"
+     },
+     {
+      "name": "buyer",
+      "docs": [
+       "offset 1, 32 bytes"
+      ],
+      "type": "pubkey"
+     },
+     {
+      "name": "worker",
+      "docs": [
+       "offset 33, 32 bytes; zero until claimed"
+      ],
+      "type": "pubkey"
+     },
+     {
+      "name": "amount",
+      "docs": [
+       "offset 65, 8 bytes"
+      ],
+      "type": "u64"
+     },
+     {
+      "name": "deadline",
+      "docs": [
+       "offset 73, 8 bytes; the work deadline; the review deadline once delivered"
+      ],
+      "type": "i64"
+     },
+     {
+      "name": "review",
+      "docs": [
+       "offset 81, 8 bytes; the review window, seconds"
+      ],
+      "type": "i64"
+     },
+     {
+      "name": "brief",
+      "docs": [
+       "offset 89, 32 bytes"
+      ],
+      "type": {
+       "array": [
+        "u8",
+        32
+       ]
+      }
+     },
+     {
+      "name": "result",
+      "docs": [
+       "offset 121, 32 bytes; zero until delivered"
+      ],
+      "type": {
+       "array": [
+        "u8",
+        32
+       ]
+      }
+     },
+     {
+      "name": "verifier",
+      "docs": [
+       "offset 153, 32 bytes; zero = none; absent on 153-byte pre-0.3.4 jobs"
+      ],
+      "type": "pubkey"
+     },
+     {
+      "name": "proof",
+      "docs": [
+       "offset 185, 32 bytes; absent on 153-byte jobs"
+      ],
+      "type": {
+       "array": [
+        "u8",
+        32
+       ]
+      }
+     },
+     {
+      "name": "stake",
+      "docs": [
+       "offset 217, 8 bytes; absent on 217-byte 0.3.4 jobs"
+      ],
+      "type": "u64"
+     }
+    ]
+   }
+  }
+ ]
+}
