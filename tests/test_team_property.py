@@ -12,7 +12,7 @@ After every round:
     overlapping claim is pending or its claimer has crashed;
   - every other holder that overlaps a winner is refused.
 
-Rounds: KNOSTEST_PROPERTY_N (default 10 in the normal suite; the ship runs 1,000 locally and 200 in CI).
+Rounds: KNOSTEST_PROPERTY_N (default 10 in the normal suite; the ship runs 1,000 locally, PRs 10 and the nightly 200).
 """
 
 from __future__ import annotations
