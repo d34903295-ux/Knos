@@ -703,6 +703,10 @@ def board(
 
 @app.command()
 def bench(
+    what: str = typer.Argument(None, help="jobs: full hire-to-payment jobs on the escrow"),
+    live: bool = typer.Option(False, "--live", help="jobs: on devnet instead of the in-process runtime"),
+    tempo: bool = typer.Option(False, "--tempo", help="jobs: the Tempo escrow (on a local anvil)"),
+    jobs: int = typer.Option(None, "--jobs", help="jobs: how many"),
     out_file: str = typer.Option(None, "--out", help="also write the results as markdown here"),
     quick: bool = typer.Option(False, "--quick", help="fewer rounds"),
     chain: str = typer.Option(None, "--chain", metavar="URL",
@@ -710,6 +714,21 @@ def bench(
     rounds: int = typer.Option(200, "--rounds", help="with --chain: security rounds"),
 ) -> None:
     """Measure knos on this machine: collisions, friction, recall, speed. Every number is re-runnable."""
+    if what == "jobs":
+        import json as _json
+
+        from .jobs import bench as jobs_bench
+
+        try:
+            got = jobs_bench.run(live=live, tempo=tempo, jobs=jobs)
+        except (FileNotFoundError, NotImplementedError, LookupError) as why:
+            raise Stop(str(why)) from None
+        _quote(_json.dumps(got, indent=1))
+        if out_file:
+            Path(out_file).write_text(_json.dumps(got, indent=1), encoding="utf-8")
+        return
+    if what:
+        raise Stop(f"Unknown bench {what!r}.", "Try:  knos bench   or   knos bench jobs")
     if chain:
         import json as _json
 
@@ -789,6 +808,17 @@ def _register_team() -> None:
 
 
 _register_team()
+
+
+def _register_jobs() -> None:
+    try:
+        from .jobs.cli import register
+    except ImportError:  # solders or PyNaCl missing: no jobs commands, everything else works
+        return
+    register(app, out, Stop)
+
+
+_register_jobs()
 
 
 def main(argv: list[str] | None = None) -> int:

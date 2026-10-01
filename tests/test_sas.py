@@ -100,7 +100,8 @@ def _up() -> bool:
         return False
 
 
-devchain = pytest.mark.skipif(not _up(), reason="no local validator: scripts/devchain.sh start")
+def devchain(fn):
+    return pytest.mark.chain(pytest.mark.skipif(not _up(), reason="no local validator: scripts/devchain.sh start")(fn))
 
 CLAIM_LAYOUT = [sas.VEC_U8, sas.VEC_U8, sas.VEC_U8, sas.I64, sas.U8]
 CLAIM_FIELDS = ["unit_hash", "ancestors", "holder_hash", "lease_until", "kind"]

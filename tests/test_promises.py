@@ -1,0 +1,133 @@
+"""The promise suite: one fast test for every promise the README makes about jobs, in the order the README makes them.
+If a promise stops being true, this file says which one."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("solders.litesvm")
+
+from knos.jobs import api, market, models, net, stats  # noqa: E402
+from knos.jobs.ledger import LocalLedger  # noqa: E402
+from knos.jobs.localsvm import Escrow  # noqa: E402
+from knos.jobs.relay import DirRelay  # noqa: E402
+from knos.jobs.worker import Worker  # noqa: E402
+
+U = 1_000_000
+README = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def net_(tmp_path):
+    env = Escrow()
+    return env, LocalLedger(env), DirRelay(tmp_path / "relay")
+
+
+def _done(env, ledger, relay, price=U):
+    buyer, btok = env.party(10 * U)
+    worker, wtok = env.party()
+    jid = market.post(ledger, relay, buyer, market.Brief("t", "Say ok.", kind="copy", checks={"must_include": ["ok"]}),
+                      price)
+    market.claim(ledger, worker, jid)
+    market.deliver(ledger, relay, worker, jid, buyer.pubkey(), b"ok")
+    return buyer, btok, worker, wtok, jid
+
+
+def test_the_readme_opens_with_the_pitch():
+    first = next(ln for ln in README.splitlines()[1:] if ln.strip())
+    assert first.startswith("**Hire any AI agent in one step and pay only for work you accept")
+
+
+def test_hire_in_one_step_one_signature(net_):
+    env, ledger, relay = net_
+    buyer, btok = env.party(5 * U)
+    sent = []
+    real = ledger.send
+    ledger.send = lambda ixs, payer, signers=None: sent.append((payer, signers)) or real(ixs, payer, signers)
+    market.post(ledger, relay, buyer, market.Brief("t", "x"), 2 * U)
+    assert len(sent) == 1 and sent[0][0] == buyer and not sent[0][1]
+    assert env.balance(btok) == 3 * U and env.balance(env.vault) == 2 * U
+
+
+def test_pay_only_for_work_you_accept(net_):
+    env, ledger, relay = net_
+    buyer, btok, worker, wtok, jid = _done(env, ledger, relay)
+    market.reject(ledger, buyer, jid)
+    assert env.balance(btok) == 10 * U and env.balance(wtok) == 0 and env.balance(env.fee_token) == 0
+    jid2 = market.post(ledger, relay, buyer, market.Brief("t", "x"), U, work_s=60)
+    env.warp(61)
+    market.refund(ledger, buyer, jid2)                 # nobody delivered: everything back
+    assert env.balance(btok) == 10 * U
+
+
+def test_the_agent_is_paid_in_the_transaction_that_accepts(net_):
+    env, ledger, relay = net_
+    buyer, _, worker, wtok, jid = _done(env, ledger, relay, 2 * U)
+    sent = []
+    real = ledger.send
+    ledger.send = lambda ixs, payer, signers=None: sent.append(1) or real(ixs, payer, signers)
+    market.accept(ledger, buyer, jid)
+    assert len(sent) == 1 and env.balance(wtok) == 1_900_000 and env.balance(env.fee_token) == 100_000
+
+
+def test_it_cannot_overspend(net_):
+    env, ledger, relay = net_
+    buyer, btok, worker, wtok, jid = _done(env, ledger, relay, U)
+    market.accept(ledger, buyer, jid)
+    with pytest.raises(LookupError):
+        market.accept(ledger, buyer, jid)              # paid once, never twice
+    assert env.balance(btok) == 9 * U and env.balance(wtok) + env.balance(env.fee_token) == U
+
+
+def test_reputation_is_on_chain_for_anyone_to_check(net_):
+    env, ledger, relay = net_
+    buyer, _, worker, _, jid = _done(env, ledger, relay)
+    market.accept(ledger, buyer, jid)
+    fresh = LocalLedger(env)                            # a stranger, reading only job accounts
+    row = next(r for r in stats.agents(fresh.jobs()) if r["agent"] == str(worker.pubkey()))
+    assert row["paid"] == 1 and row["acceptance"] == 1.0
+
+
+def test_delivered_sealed_so_only_the_buyer_can_read_it(net_):
+    env, ledger, relay = net_
+    buyer, _, worker, _, jid = _done(env, ledger, relay)
+    stranger, _ = env.party()
+    blob = relay.get_delivery(market.job(ledger, jid).result.hex())
+    assert b"ok" != blob and market.fetch_delivery(ledger, relay, buyer, jid) == b"ok"
+    with pytest.raises(Exception):
+        market.open_sealed(stranger, blob)
+
+
+def test_the_worker_only_delivers_work_that_passes_the_checks(net_):
+    env, ledger, relay = net_
+    buyer, _ = env.party(5 * U)
+    worker, _ = env.party()
+    market.post(ledger, relay, buyer, market.Brief("t", "x", kind="copy", checks={"must_include": ["Leeds"]},
+                                                   scripted_answer="Manchester"), U)
+    assert [o.delivered for o in Worker(ledger, relay, worker, models.scripted).once()] == [False]
+
+
+def test_bring_any_agent_in_ten_lines():
+    root = Path(__file__).resolve().parents[1] / "examples"
+    for name in ("worker.py", "worker.mjs"):
+        assert len([ln for ln in (root / name).read_text(encoding="utf-8").splitlines() if ln.strip()]) <= 10
+    for tool in ("post_job", "find_jobs", "claim_job", "deliver_job"):
+        assert hasattr(api, tool) and re.search(rf"\bdef {tool}\(", (Path(api.__file__).parents[1] / "mcp.py")
+                                                 .read_text(encoding="utf-8"))
+
+
+def test_mainnet_is_locked_and_capped(monkeypatch):
+    monkeypatch.setenv("KNOS_JOBS_CLUSTER", "mainnet")
+    monkeypatch.delenv("KNOS_ALLOW_MAINNET", raising=False)
+    with pytest.raises(net.Refused):
+        net.cluster()
+    monkeypatch.setenv("KNOS_ALLOW_MAINNET", "1")
+    assert "capped" in api.post_job("t", "x", 501.0)
+    assert net.MAINNET_CAP_UNITS == 500 * U
+
+
+def test_five_percent_only_on_release():
+    assert "5%" in README and "only when you accept" in README

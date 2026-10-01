@@ -1,0 +1,134 @@
+"""The escrow program in-process: LiteSVM (solders) with the real SPL Token program and `knos_escrow.so`.
+
+Used by the test suite, the promise suite and `knos bench jobs`: every job path runs in the Solana runtime in
+milliseconds, with no validator and no network. `expire_blockhash()` after each transaction instead of sleeping.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import struct
+from pathlib import Path
+
+from solders.instruction import AccountMeta, Instruction
+from solders.keypair import Keypair
+from solders.message import MessageV0
+from solders.pubkey import Pubkey
+from solders.system_program import CreateAccountParams, create_account
+from solders.transaction import VersionedTransaction
+
+from . import sol
+
+SO_CANDIDATES = [Path(__file__).resolve().parents[3] / "programs" / "knos_escrow" / "knos_escrow.so",
+                 Path(__file__).resolve().parent / "knos_escrow.so"]
+
+
+def program_so() -> Path:
+    for p in SO_CANDIDATES:
+        if p.exists():
+            return p
+    raise FileNotFoundError("knos_escrow.so not found (programs/knos_escrow/knos_escrow.so)")
+
+
+class Escrow:
+    """A fresh runtime with the escrow deployed, a USDC-like mint (6 decimals), the vault, and funded parties."""
+
+    DEC = 6
+
+    def __init__(self, fee_bps: int = 500):
+        from solders.litesvm import LiteSVM
+        self.svm = LiteSVM()
+        self.accounts: dict[bytes, Pubkey] = {}   # owner -> token account (what an ATA is on a real cluster)
+        self.known_jobs: list[bytes] = []         # LiteSVM has no getProgramAccounts; the market records ids here
+        self.pid = Keypair().pubkey()
+        self.svm.add_program_from_file(self.pid, str(program_so()))
+        self.admin = self.keypair()
+        self.mint = Keypair()
+        assert self.send([create_account(CreateAccountParams(
+            from_pubkey=self.admin.pubkey(), to_pubkey=self.mint.pubkey(),
+            lamports=self.svm.minimum_balance_for_rent_exemption(82), space=82, owner=sol.TOKEN)),
+            self._tix([20, self.DEC] + list(bytes(self.admin.pubkey())) + [0], [(self.mint.pubkey(), False, True)])],
+            self.admin, [self.admin, self.mint])
+        self.vault = self.token_account(sol.vault_authority(self.pid))
+        self.fee_token = self.token_account(self.admin.pubkey())
+        self.accounts[bytes(self.admin.pubkey())] = self.fee_token
+        assert self.send([sol.init(self.pid, self.admin.pubkey(), self.fee_token, fee_bps)], self.admin, [self.admin])
+
+    # -- runtime -----------------------------------------------------------------------------------------------------
+    def keypair(self, lamports: int = 100_000_000_000) -> Keypair:
+        k = Keypair()
+        self.svm.airdrop(k.pubkey(), lamports)
+        return k
+
+    def send(self, ixs, payer: Keypair, signers) -> bool:
+        msg = MessageV0.try_compile(payer.pubkey(), ixs, [], self.svm.latest_blockhash())
+        r = self.svm.send_transaction(VersionedTransaction(msg, signers))
+        self.svm.expire_blockhash()
+        return type(r).__name__ == "TransactionMetadata"
+
+    def warp(self, seconds: int) -> None:
+        c = self.svm.get_clock()
+        c.unix_timestamp = c.unix_timestamp + seconds
+        self.svm.set_clock(c)
+
+    # -- tokens --------------------------------------------------------------------------------------------------------
+    def _tix(self, data, metas) -> Instruction:
+        return Instruction(sol.TOKEN, bytes(data), [AccountMeta(k, is_signer=s, is_writable=w) for k, s, w in metas])
+
+    def token_account(self, owner: Pubkey, mint: Pubkey | None = None) -> Pubkey:
+        a = Keypair()
+        m = mint or self.mint.pubkey()
+        assert self.send([create_account(CreateAccountParams(
+            from_pubkey=self.admin.pubkey(), to_pubkey=a.pubkey(),
+            lamports=self.svm.minimum_balance_for_rent_exemption(165), space=165, owner=sol.TOKEN)),
+            self._tix([18] + list(bytes(owner)), [(a.pubkey(), False, True), (m, False, False)])],
+            self.admin, [self.admin, a])
+        return a.pubkey()
+
+    def mint_to(self, account: Pubkey, units: int) -> None:
+        assert self.send([self._tix([7] + list(struct.pack("<Q", units)),
+                                    [(self.mint.pubkey(), False, True), (account, False, True),
+                                     (self.admin.pubkey(), True, False)])], self.admin, [self.admin])
+
+    def balance(self, account: Pubkey) -> int:
+        acc = self.svm.get_account(account)
+        return struct.unpack("<Q", bytes(acc.data)[64:72])[0] if acc else 0
+
+    def party(self, units: int = 0) -> tuple[Keypair, Pubkey]:
+        k = self.keypair()
+        t = self.token_account(k.pubkey())
+        self.accounts[bytes(k.pubkey())] = t
+        if units:
+            self.mint_to(t, units)
+        return k, t
+
+    # -- jobs ----------------------------------------------------------------------------------------------------------
+    def job(self, job_id: bytes) -> sol.Job | None:
+        acc = self.svm.get_account(sol.job_pda(self.pid, job_id))
+        if acc is None or len(bytes(acc.data)) < sol.JOB_LEN:
+            return None
+        return sol.parse_job(sol.job_pda(self.pid, job_id), bytes(acc.data))
+
+    def post(self, buyer: Keypair, buyer_token: Pubkey, job_id: bytes, amount: int, work: int = 600,
+             review: int = 40, brief: bytes = b"", vault: Pubkey | None = None) -> bool:
+        return self.send([sol.post(self.pid, buyer.pubkey(), job_id, amount, work, review,
+                                   hashlib.sha256(b"brief" + brief + job_id).digest(), buyer_token,
+                                   vault or self.vault)], buyer, [buyer])
+
+    def claim(self, worker: Keypair, job_id: bytes) -> bool:
+        return self.send([sol.claim(self.pid, worker.pubkey(), job_id)], worker, [worker])
+
+    def deliver(self, worker: Keypair, job_id: bytes, result: bytes = b"result") -> bool:
+        return self.send([sol.deliver(self.pid, worker.pubkey(), job_id, hashlib.sha256(result + job_id).digest())],
+                         worker, [worker])
+
+    def accept(self, who: Keypair, job_id: bytes, worker_token: Pubkey, fee_token: Pubkey | None = None,
+               release: bool = False) -> bool:
+        return self.send([sol.settle(self.pid, who.pubkey(), job_id, self.vault, worker_token,
+                                     fee_token or self.fee_token, release)], who, [who])
+
+    def reject(self, who: Keypair, job_id: bytes, buyer_token: Pubkey) -> bool:
+        return self.send([sol.reject(self.pid, who.pubkey(), job_id, self.vault, buyer_token)], who, [who])
+
+    def refund(self, who: Keypair, job_id: bytes, buyer_token: Pubkey) -> bool:
+        return self.send([sol.refund(self.pid, who.pubkey(), job_id, self.vault, buyer_token)], who, [who])

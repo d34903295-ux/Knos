@@ -1,5 +1,14 @@
 # Pricing
 
+## Jobs
+
+**5% of the price, only when the buyer accepts** (or the review window passes in silence). Nothing on a rejection or a
+refund, nothing to post, nothing to work. The fee is set in the escrow program and contract, and is the same for
+everyone. Details and measured chain fees: [docs/ECONOMICS.md](docs/ECONOMICS.md). Every $12 of fees a buyer pays buys
+them a month of Sibyl Pro (simulated in 0.3.1).
+
+## Coding-team plans (unchanged)
+
 | plan | who | Knos part | Sibyl Pro part (paid to Sibyl directly, at Sibyl's list price; skipped if you already have Pro) | total per 30 days / per year |
 |---|---|---|---|---|
 | **Free** (MIT), forever | solo, offline; team registries of up to 3 keys; any public open-source repo | 0 | Sibyl's free tier (5 MB) | 0 |

@@ -163,4 +163,4 @@ def test_every_tool_an_agent_needs_is_registered(knos_home) -> None:
     between `remember`'s decorator and its function, which silently unregistered `remember`."""
     names = {tool.name for tool in mcp.server._tool_manager.list_tools()}
 
-    assert names == {"search", "about", "remember", "done", "pay"}, names
+    assert names == {"search", "about", "remember", "done", "pay", "post_job", "find_jobs", "claim_job", "deliver_job"}, names

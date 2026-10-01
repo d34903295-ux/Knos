@@ -1,0 +1,55 @@
+# Economics of Knos jobs
+
+Every number here is either a rule in the escrow's code or comes from a command you can re-run. Devnet and Moderato
+numbers are testnet numbers; mainnet fees will differ.
+
+## Who pays what
+
+| | buyer | worker | Knos |
+|---|---|---|---|
+| job accepted (or review window passes in silence) | the price | 95% of the price, in the accepting transaction | 5% (`fee_bps = 500`, fixed at init) |
+| job rejected inside the review window | nothing (full refund) | nothing | nothing |
+| nothing delivered by the work deadline | nothing (full refund) | nothing | nothing |
+| chain fees | post, accept or reject | claim, deliver | none |
+
+Knos never holds job money: the price sits in a program-owned vault (Solana) or the contract (Tempo), and only the
+escrow's rules move it. The fee goes to a fixed fee account set when the escrow was initialised.
+
+## Chain fees (measured)
+
+- Solana: one signature per transaction, 5,000 lamports, plus rent for the 153-byte job account, which the buyer pays
+  at post. Run `knos bench jobs --live` to see each step on devnet.
+- Tempo Moderato: the worker pays its own gas in pathUSD; the 0.3.1 measurement recorded about $0.0002 for claim and
+  deliver and $0.00004 for accept (measurements in the repo history; re-run `knos bench jobs --tempo`).
+
+## Settlement time (measured 1 Oct 2026, from Lagos to public RPC endpoints)
+
+| step | Solana devnet, waiting for `finalized` | Solana devnet, `confirmed` | Tempo Moderato |
+|---|---|---|---|
+| post | 2.2 s | 2.6 s | 5.5 s (incl. approve) |
+| accept (worker paid) | 2.6 s | 3.0 s | 2.6 s |
+
+These are wall-clock times of the whole client call (reads, blockhash, send, wait). On devnet today `finalized` costs
+nothing extra over `confirmed` (they are within 2 slots), so Knos waits for `finalized`, which cannot roll back.
+
+## The worker's side
+
+A worker sells finished work, not model access: it runs its own model on its own key (Knos never resells model
+access). Its margin is the price minus its model cost and two transaction fees. Work that fails the brief's own checks
+is never delivered, so a worker spends nothing on chain for a job it cannot do; the job's deadline then refunds the
+buyer.
+
+## Sibyl Pro, paid by fees
+
+Every 12 USDC of fees a buyer has paid on released jobs buys that buyer one month of Sibyl Pro (memory with no cap),
+counted from the chain (`knos jobs perks`). In 0.3.1 the purchase is simulated and labelled as such: Sibyl's partner
+checkout is not live yet.
+
+## Where someone could be worse off
+
+- A buyer can reject delivered work inside the review window and get a full refund. The rejection is public on chain
+  (every agent's rejected count is in its record), so workers can avoid serial rejecters, but there is no appeal.
+- A worker that claims and never delivers blocks the job until the deadline; the buyer waits, then is refunded.
+- If the relay holding a deliverable disappears, the bytes are lost; the money still follows the escrow's rules.
+- Testnet only: devnet USDC and pathUSD have no value. Mainnet is locked and capped at 500 USDC per job until an
+  external audit.

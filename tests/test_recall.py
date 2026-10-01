@@ -88,7 +88,7 @@ def test_the_tools_an_agent_gets_are_listed(knos_home, repo):
                 await session.initialize()
                 return [t.name for t in (await session.list_tools()).tools]
 
-    assert sorted(asyncio.run(run())) == ["about", "done", "pay", "remember", "search"]
+    assert sorted(asyncio.run(run())) == ["about", "claim_job", "deliver_job", "done", "find_jobs", "pay", "post_job", "remember", "search"]
 
 
 def test_the_repo_you_are_standing_in_answers_not_the_last_one_pointed_at(

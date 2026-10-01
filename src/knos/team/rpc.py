@@ -84,16 +84,20 @@ def send(url: str, instructions: list[Instruction], payer: Keypair, signers: lis
     return sig
 
 
-def wait(url: str, signature: str, within: float = 30.0, timeout: float = 10.0) -> dict:
-    """Wait until `signature` is confirmed; raise RpcError if it failed on chain, TimeoutError if it never landed."""
+def wait(url: str, signature: str, within: float = 30.0, timeout: float = 10.0, commitment: str = "confirmed") -> dict:
+    """Wait until `signature` reaches `commitment`; raise RpcError if it failed on chain, TimeoutError if it never
+    landed."""
     end = time.monotonic() + within
+    good = ("finalized",) if commitment == "finalized" else ("confirmed", "finalized")
     while time.monotonic() < end:
         got = call(url, "getSignatureStatuses", [[signature]], timeout)["value"][0]
-        if got and got.get("confirmationStatus") in ("confirmed", "finalized"):
+        if got and got.get("err"):
+            raise RpcError(f"transaction failed: {got['err']}", got)
+        if got and got.get("confirmationStatus") in good:
             if got.get("err"):
                 raise RpcError(f"transaction failed: {got['err']}", got)
             return got
-        time.sleep(0.25)
+        time.sleep(0.1)
     raise TimeoutError(f"{signature} not confirmed within {within:.0f}s")
 
 

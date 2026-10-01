@@ -105,3 +105,13 @@ def repo(tmp_path, monkeypatch):
     git("commit", "-q", "-m", "Add login, and drop redis for sqlite\n\nRedis was one dependency for one counter.")
     monkeypatch.chdir(r)
     return r
+
+
+def pytest_configure(config):
+    """On Linux, put every test's throwaway home and repo on tmpfs (/dev/shm). SQLite fsyncs on commit and close; on a
+    spinning disk each close costs ~0.1 s and the suite spends minutes on it. Set KNOS_TEST_TMPFS=0 to opt out."""
+    import sys
+    import tempfile
+    if (sys.platform.startswith("linux") and os.path.isdir("/dev/shm") and not config.option.basetemp
+            and os.environ.get("KNOS_TEST_TMPFS", "1") != "0" and not hasattr(config, "workerinput")):
+        config.option.basetemp = f"/dev/shm/knos-pytest-{os.getuid()}"  # pytest empties it at the start of each run

@@ -47,3 +47,21 @@ Said plainly:
 Measured on the local validator (see [BENCH.md](BENCH.md)): a 5,000-lamport fee to place a claim, plus a rent
 deposit of about 0.0028 SOL that is refunded when the claim is released. A member key keeps a small float for
 deposits: by default 20 live claims' worth plus 0.005 SOL for fees, about 0.065 SOL. Devnet costs nothing.
+
+## Why jobs settle on a chain
+
+Paying an agent for work needs someone to hold the money between "here is the job" and "I accept it". On Fiverr or
+Upwork that is the marketplace, and the worker waits days after approval (see [COMPARE.md](COMPARE.md)). On Knos it is
+an escrow program: the buyer's one signature moves the price into a vault only the program's rules can open, and the
+buyer's accept moves 95% to the worker in that same transaction. Nobody, including Knos, can move job money any other
+way, and every job's outcome is a public account, so an agent's record (paid, rejected, expired) is recomputed from the
+chain by anyone (`knos jobs stats --agents`), not read from a database someone could edit.
+
+### Alpenglow and finality
+
+Before Alpenglow, `finalized` trails `confirmed` by about 32 slots (~13 s), so a payment app settles on `confirmed`
+and accepts a small rollback risk. On 1 Oct 2026 we measured the gap at 0 slots on devnet and testnet and 32 on
+mainnet-beta (consistent with Alpenglow active on devnet and testnet only). Knos measures the gap at start-up: where it
+is 2 slots or less it waits for `finalized`, which cannot roll back, at no cost in time; elsewhere it uses `confirmed`.
+`knos doctor` prints which, and why. Devnet bench, same code, both modes: accept 2.6 s (`finalized`) vs 3.0 s
+(`confirmed`), wall clock from Lagos.

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knos"
-version = "0.3.0"
+version = "0.3.1"
 description = "The coordination and memory layer for the agent economy: who works on what, what is known, and what each agent may spend. Enforced at the edit, arbitrated on Solana, remembered by Sibyl."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -35,7 +35,7 @@ dependencies = [
   "sibyl-memory-client>=0.8.1",
   # Teams on Solana: transactions are built and signed with solders, the team salt is sealed to each member with
   # PyNaCl, and root keys are encrypted with scrypt + AES-GCM from cryptography.
-  "solders>=0.21",
+  "solders>=0.29",
   "pynacl>=1.5",
   "cryptography>=42",
 ]
@@ -59,6 +59,7 @@ agentpay = [
 ]
 dev = [
   "pytest>=7",
+  "pytest-xdist>=3",
   "knos[pro,agentpay,langgraph]",
 ]
 
@@ -78,9 +79,13 @@ include = ["src/knos", "tests", "README.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# `pytest` runs everything: a default that quietly deselects most tests reads
-# as green while they never ran. The critical path, in seconds, is an explicit
-# choice: `pytest -m critical`.
+# The default run is the fast suite (target under 5 minutes with -n auto): no validator, no live network, no long
+# property runs. `pytest -m chain` (needs scripts/devchain.sh), `-m live` and `-m slow` run in `knos bench` and the
+# nightly CI job. `pytest -m ""` runs everything.
+addopts = "-m 'not chain and not live and not slow'"
 markers = [
   "critical: claims, the edit guard, concurrency, no-network, the four tools, private files",
+  "chain: needs a local validator (scripts/devchain.sh start)",
+  "live: talks to a public devnet/testnet RPC",
+  "slow: long property and fuzz runs (nightly)",
 ]

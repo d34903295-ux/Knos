@@ -75,4 +75,24 @@ def run(repo: Path | None) -> list[tuple[str, bool, str]]:
             rows += team(repo)
         except ImportError as why:
             rows.append(("team extras installed", False, f"missing {why.name}: pip install -U knos"))
+    rows += jobs()
     return rows
+
+
+def jobs() -> list[tuple[str, bool, str]]:
+    """The escrow this machine hires and works through, and how it waits for settlement (Alpenglow-aware)."""
+    try:
+        from .jobs import finality, net
+        cluster = net.cluster()
+        url = net.ledger().url
+    except ImportError as why:
+        return [("jobs extras installed", False, f"missing {why.name}: pip install -U knos")]
+    except Exception as why:  # noqa: BLE001 - net.Refused, a bad setting
+        return [("jobs network", False, str(why))]
+    try:
+        mode, gap = finality.mode(url, timeout=3.0)
+    except Exception:  # noqa: BLE001 - offline: say so, it is not a failure of this machine
+        return [("jobs settlement", True, f"{cluster}: RPC unreachable now; will settle at 'confirmed'")]
+    why = (f"finalized is {gap} slot(s) behind confirmed, measured now" if mode == "finalized"
+           else f"finalized trails confirmed by {gap} slots")
+    return [("jobs settlement", True, f"{cluster}: waits for '{mode}' ({why})")]

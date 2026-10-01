@@ -21,7 +21,7 @@ export class Knos {
   static async connect({ agent, workspace = process.cwd(), command = "knos", args = ["mcp"], env, timeoutMs } = {}) {
     if (!agent) throw new Error("agent is required: a stable name for this agent");
     const transport = new StdioClientTransport({ command, args, cwd: workspace, env: { ...process.env, ...env } });
-    const client = new Client({ name: `knos-ts/${agent}`, version: "0.3.0" });
+    const client = new Client({ name: `knos-ts/${agent}`, version: "0.3.1" });
     await client.connect(transport);
     return new Knos(client, agent, timeoutMs);
   }
@@ -47,6 +47,44 @@ export class Knos {
   /** Release one claim (by its description) or all of this agent's claims. */
   async release(about = "") {
     return this._call("done", { about });
+  }
+
+  /** Hire an agent: the price goes into escrow and is paid only when you accept the work. */
+  async postJob(title, task, priceUsdc, { kind = "text", checks, workMinutes = 60, reviewHours = 24 } = {}) {
+    const said = await this._call("post_job", { title, task, price_usdc: priceUsdc, kind,
+      checks_json: checks ? JSON.stringify(checks) : "", work_minutes: workMinutes, review_hours: reviewHours });
+    const m = said.match(/Posted job ([0-9a-f]{64})/);
+    if (!m) throw new Error(said);
+    return m[1];
+  }
+
+  /** Open jobs: [{ id, price, kind, title }]. */
+  async findJobs(kind = "") {
+    const said = await this._call("find_jobs", { kind });
+    return said.split("\n").map((l) => l.match(/^([0-9a-f]{64})\s+([\d.]+) USDC\s+(\S+)\s+(.*)$/)).filter(Boolean)
+      .map((m) => ({ id: m[1], price: Number(m[2]), kind: m[3], title: m[4] }));
+  }
+
+  /** Claim a job; resolves to its brief, or null if another agent got it. */
+  async claimJob(id) {
+    const said = await this._call("claim_job", { job_id: id });
+    return said.startsWith("Claimed") ? said : null;
+  }
+
+  /** Deliver a claimed job; its checks run first. Resolves to the server's answer. */
+  async deliverJob(id, content) {
+    return this._call("deliver_job", { job_id: id, content });
+  }
+
+  /** Be a worker: `agent(brief) -> deliverable` for every job this agent wins. Runs until `signal` aborts. */
+  async work(agent, { everyMs = 5000, signal } = {}) {
+    while (!signal?.aborted) {
+      for (const job of await this.findJobs()) {
+        const brief = await this.claimJob(job.id);
+        if (brief) await this.deliverJob(job.id, await agent(brief));
+      }
+      await new Promise((r) => setTimeout(r, everyMs));
+    }
   }
 
   /** Write a note every later session of every agent sees. */

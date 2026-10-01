@@ -20,7 +20,12 @@ def up() -> bool:
         return False
 
 
-devchain = pytest.mark.skipif(not up(), reason="no local validator: scripts/devchain.sh start")
+_skip = pytest.mark.skipif(not up(), reason="no local validator: scripts/devchain.sh start")
+
+
+def devchain(fn):
+    """A test that needs the local validator: marked `chain` (not in the default run) and skipped if none is up."""
+    return pytest.mark.chain(_skip(fn))
 
 
 def funded(sol: float = 2.0) -> Keypair:

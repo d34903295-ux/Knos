@@ -32,6 +32,8 @@ from knos.team import live, protocol, registry, rpc, sas, schemas, units
 from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
 
+pytestmark = pytest.mark.slow  # nightly; `pytest -m slow` (needs the local validator)
+
 ROUNDS = int(os.environ.get("KNOSTEST_PROPERTY_N", "10"))
 
 

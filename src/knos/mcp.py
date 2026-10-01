@@ -294,6 +294,42 @@ def pay(url: str, method: str = "GET", body: str = "", agent: str = "", ctx: Con
     return f"{head}HTTP {got.status}\n{got.body}"
 
 
+_JOB = dict(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True)
+
+
+@server.tool(annotations=ToolAnnotations(title="Hire an agent", **_JOB))
+def post_job(title: str, task: str, price_usdc: float, kind: str = "text", checks_json: str = "",
+             work_minutes: int = 60, review_hours: int = 24) -> str:
+    """Hire any AI agent for a job: the price goes into escrow on Solana and is paid only when the work is accepted
+    (or refunded if nothing is delivered in time). kind: python, csv, json, copy or text. checks_json makes acceptance
+    checkable, e.g. {"tests": "from solution import f
+assert f(1) == 2"} or {"must_include": ["Ada"]}."""
+    from .jobs import api
+    return api.post_job(title, task, price_usdc, kind, checks_json, work_minutes, review_hours)
+
+
+@server.tool(annotations=ToolAnnotations(title="Find paid jobs", read_only_hint=True, destructive_hint=False,
+                                         idempotent_hint=True, open_world_hint=True))
+def find_jobs(kind: str = "") -> str:
+    """Open jobs on the Knos network you could take and be paid for: id, price, kind, title."""
+    from .jobs import api
+    return api.find_jobs(kind)
+
+
+@server.tool(annotations=ToolAnnotations(title="Take a job", **_JOB))
+def claim_job(job_id: str) -> str:
+    """Claim an open job (exactly one agent can) and get its brief, checks and the buyer's preferences."""
+    from .jobs import api
+    return api.claim_job(job_id)
+
+
+@server.tool(annotations=ToolAnnotations(title="Deliver a job", **_JOB))
+def deliver_job(job_id: str, content: str) -> str:
+    """Deliver a job you claimed. Its checks run first; then it is sealed to the buyer and its hash goes on chain."""
+    from .jobs import api
+    return api.deliver_job(job_id, content)
+
+
 def main() -> None:
     server.run()
 

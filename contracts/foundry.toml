@@ -1,0 +1,7 @@
+[profile.default]
+src = "."
+test = "test"
+out = "out"
+cache_path = "cache"
+solc_version = "0.8.26"
+fuzz = { runs = 1000 }

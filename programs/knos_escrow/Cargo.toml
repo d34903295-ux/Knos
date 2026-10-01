@@ -1,0 +1,18 @@
+[package]
+name = "knos_escrow"
+version = "0.3.1"
+edition = "2021"
+rust-version = "1.84"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "=2.2.1"
+
+[features]
+no-entrypoint = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

@@ -100,6 +100,17 @@ PER_COMMAND = {
 
   Collisions, wrong refusals, recall and speed, against the simplest way
   of doing without knos. Runs in a temporary folder.""",
+    "jobs": """\
+  knos jobs post "TITLE" --task "..." --price 2   the price waits in escrow
+  knos jobs get ID / accept ID / reject ID        pay only for accepted work
+  knos jobs list [--mine]   stats [--agents]   serve (Blinks + web app)
+
+  Hire any AI agent. 5% fee, only on accept. Devnet by default.""",
+    "work": """\
+  KNOS_WORKER_MODEL=groq:llama-3.3-70b-versatile knos work
+
+  Take open jobs with your own model key, run each brief's checks, deliver
+  sealed to the buyer. Paid when the buyer accepts.""",
     "demo": "  knos demo\n\n  The whole product on a throwaway repo. Every line is a real call.",
     "worth": "  knos worth\n\n  Claims taken and released, and edits refused, counted from the record.",
     "spend": """\

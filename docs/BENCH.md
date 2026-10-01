@@ -78,3 +78,24 @@ Measured by `knos bench` on 2026-09-29 with 0.2.0. In 0.3 the single-machine pat
 | Sibyl Memory + MCP Agent Mail | 8 | both of the above, to get memory and claims | as above | 2026-09-29 |
 
 Limits, said plainly: the advisory arm simulates a check-then-write lease; the history set is 20 synthetic decisions asked in other words, not a public benchmark; the budget row measures Knos's cap, and the agent wallet's balance is a second, on-chain ceiling this bench does not spend real money to show.
+
+## Jobs (0.3.1)
+
+`knos bench jobs` runs full jobs (post, claim, deliver, accept) and checks the money after every one: the worker got
+95%, the fee account 5%, the vault is empty.
+
+| where | command | jobs | post p50 | accept p50 | label |
+|---|---|---|---|---|---|
+| Solana runtime, in-process (LiteSVM) | `knos bench jobs` | 20 | 0.9 ms | 0.9 ms | code speed, no network |
+| Tempo escrow on a local anvil | `knos bench jobs --tempo` | 20 | — | — | code speed, no network |
+| Solana devnet, `finalized` | `KNOS_COMMITMENT=finalized knos bench jobs --live` | 5 | 2.2 s | 2.6 s | testnet, wall clock from Lagos |
+| Solana devnet, `confirmed` | `KNOS_COMMITMENT=confirmed knos bench jobs --live` | 5 | 2.6 s | 3.0 s | testnet, wall clock from Lagos |
+| Tempo Moderato | `v03` deploy script (5 jobs, 0.01 pathUSD each) | 5 | 5.5 s | 2.6 s | testnet, wall clock from Lagos |
+
+Measured 1 Oct 2026. The live rows include every RPC round trip the client makes, from a home connection in Lagos.
+
+Acceptance with buyer memory (24 real jobs, 4 buyers with standing preferences said once among 27 unrelated
+requests, Claude Sonnet as the worker in both runs): 14/24 accepted when memory was a Sibyl search on the brief
+(54/72 preferences found), **22/24** with 0.3.1's preference capture (72/72 found; both misses were task errors,
+preferences were honoured 24/24). Capture on a held-out set written before it was run: 21/24 preferences, 0 of 30
+ordinary requests mistaken for one (`tests/data/preferences_heldout.json`).
