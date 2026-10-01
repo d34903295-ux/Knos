@@ -6,8 +6,9 @@ Two protocols, both through their reference SDKs (the optional `knos[agentpay]` 
   MPP on Tempo   pympp (github.com/tempoxyz/pympp): the server answers 402 with `WWW-Authenticate: Payment ...`;
                  the client signs a TIP-20 transfer and retries with `Authorization: Payment ...`.
                  Spec: https://mpp.dev/protocol , https://mpp.dev/payment-methods/tempo/charge
-  x402 on Solana x402 (github.com/x402-foundation/x402): the server answers 402 with its payment requirements;
-                 the client signs an SPL TransferChecked (the facilitator pays the fee) and retries.
+  x402 on Solana the x402 v2 `exact` scheme (github.com/x402-foundation/x402), built here with solders exactly as
+                 the reference client builds it: the server answers 402 with its payment requirements; the client
+                 signs an SPL TransferChecked (the facilitator pays the fee) and retries with PAYMENT-SIGNATURE.
 
 Two limits, in this order, before anything is signed:
   1. Knos's cap for this agent (`knos budget fund` sets it): what it has spent, from the ledger in
@@ -151,42 +152,74 @@ async def _pay_tempo(agent: str, url: str, method: str, body: bytes | None, netw
                 resp.headers.get("payment-receipt", ""))
 
 
+def _x402_payment(agent: str, accepted: dict, resource: Any, network: str) -> tuple[dict, float]:
+    """The x402 v2 `exact` scheme on Solana, as the reference client builds it (x402-foundation/x402,
+    mechanisms/svm/exact/client.py): compute-unit limit and price, an SPL TransferChecked from the agent's token account
+    to the payee's, and a memo; the facilitator is the fee payer (signature 0, left empty) and the agent signs as the
+    token owner (signature 1). Built with solders alone, so no `solana` package (and its solders pin) is needed."""
+    import base64
+    import os
+
+    from solders.hash import Hash
+    from solders.instruction import AccountMeta, Instruction
+    from solders.message import MessageV0
+    from solders.pubkey import Pubkey
+    from solders.signature import Signature
+    from solders.transaction import VersionedTransaction
+
+    from . import sol_budget as sb
+    extra = accepted.get("extra") or {}
+    if not extra.get("feePayer"):
+        raise Refused("knos: this x402 API names no fee payer")
+    key = wallets.solana_keypair(agent)
+    mint = Pubkey.from_string(accepted["asset"])
+    units = int(accepted.get("amount") or accepted.get("maxAmountRequired"))
+    budget_ = Pubkey.from_string("ComputeBudget111111111111111111111111111111")
+    memo = (extra.get("memo") or "").encode() or os.urandom(16).hex().encode()
+    ixs = [Instruction(budget_, bytes([2]) + (20_000).to_bytes(4, "little"), []),
+           Instruction(budget_, bytes([3]) + (1).to_bytes(8, "little"), []),
+           Instruction(sb.TOKEN_PROGRAM, bytes([12]) + units.to_bytes(8, "little") + bytes([solana.USDC_DECIMALS]),
+                       [AccountMeta(sb.ata(key.pubkey(), mint), False, True), AccountMeta(mint, False, False),
+                        AccountMeta(sb.ata(Pubkey.from_string(accepted["payTo"]), mint), False, True),
+                        AccountMeta(key.pubkey(), True, False)]),
+           Instruction(sb.MEMO_PROGRAM, memo, [])]
+    if extra.get("recentBlockhash"):
+        blockhash = Hash.from_string(extra["recentBlockhash"])
+    else:
+        from ..team import rpc
+        blockhash = rpc.latest_blockhash(solana.rpc_url(network))
+    msg = MessageV0.try_compile(Pubkey.from_string(extra["feePayer"]), ixs, [], blockhash)
+    tx = VersionedTransaction.populate(msg, [Signature.default(), key.sign_message(bytes([0x80]) + bytes(msg))])
+    payload = {"x402Version": 2, "payload": {"transaction": base64.b64encode(bytes(tx)).decode()},
+               "accepted": accepted}
+    if resource:
+        payload["resource"] = resource
+    return payload, units / 10 ** solana.USDC_DECIMALS
+
+
 async def _pay_x402(agent: str, url: str, method: str, body: bytes | None, network: str) -> Paid:
-    _need("x402")
-    from x402 import x402Client
-    from x402.http.clients import wrapHttpxWithPayment
-    from x402.mechanisms.svm.exact.register import register_exact_svm_client
-    from x402.mechanisms.svm.signers import KeypairSigner
-    from x402.schemas.hooks import AbortResult
+    import base64
+    import json
 
-    client = x402Client()
-    register_exact_svm_client(client, KeypairSigner(wallets.solana_keypair(agent)), networks=[SOLANA_CAIP2[network]],
-                              rpc_url=solana.rpc_url(network))
-    signed: dict[str, Any] = {}
-
-    def before(ctx: Any) -> Any:
-        req = ctx.selected_requirements
-        amount = int(str(req.get_amount())) / 10 ** solana.USDC_DECIMALS
-        if str(req.network) != SOLANA_CAIP2[network]:
-            return AbortResult(reason="network", message=f"knos: this API asks for {req.network}")
-        try:
-            gate(agent, "solana", network, str(req.asset), amount, url)
-        except Refused as why:
-            signed["refused"] = str(why)
-            return AbortResult(reason="knos_cap", message=str(why))
-        signed["amount"] = amount
-        return None
-
-    client.on_before_payment_creation(before)
-    async with wrapHttpxWithPayment(client) as http:
-        try:
-            resp = await http.request(method, url, content=body)
-        except Exception as why:  # the SDK raises when a hook aborts
-            if signed.get("refused"):
-                raise Refused(signed["refused"]) from why
-            raise
-    return Paid(resp.status_code, signed.get("amount", 0.0), "solana", resp.text[:4000],
-                resp.headers.get("payment-response", ""))
+    import httpx
+    async with httpx.AsyncClient(timeout=30) as http:
+        first = await http.request(method, url, content=body)
+        if first.status_code != 402:
+            return Paid(first.status_code, 0.0, "solana", first.text[:4000])
+        header = first.headers.get("payment-required")
+        required = json.loads(base64.b64decode(header)) if header else first.json()
+        offers = [a for a in required.get("accepts", []) if a.get("scheme") == "exact"
+                  and str(a.get("network")) == SOLANA_CAIP2[network]]
+        if not offers:
+            raise Refused(f"knos: this API asks for {[a.get('network') for a in required.get('accepts', [])]}, "
+                          f"not Solana {network}")
+        accepted = offers[0]
+        amount = int(accepted.get("amount") or accepted.get("maxAmountRequired")) / 10 ** solana.USDC_DECIMALS
+        gate(agent, "solana", network, str(accepted["asset"]), amount, url)   # raises Refused before signing
+        payload, amount = _x402_payment(agent, accepted, required.get("resource"), network)
+        sig = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+        resp = await http.request(method, url, content=body, headers={"PAYMENT-SIGNATURE": sig})
+    return Paid(resp.status_code, amount, "solana", resp.text[:4000], resp.headers.get("payment-response", ""))
 
 
 def protocol_of(resp: Any) -> str | None:

@@ -155,12 +155,62 @@ def test_an_mpp_402_over_the_cap_is_refused_before_signing(server) -> None:
 
 
 def test_an_x402_402_over_the_cap_is_refused_before_signing(server) -> None:
-    pytest.importorskip("x402")
     _agent("scout", "solana", "devnet", cap=0.5)
     server["headers"] = {"PAYMENT-REQUIRED": _x402_header(units=1_000_000)}
     with pytest.raises(agentpay.Refused, match="cap"):
         agentpay.pay("scout", server["url"])
     assert agentpay.spent("scout") == 0 and all(not a for a in server["seen_auth"])
+
+
+def test_an_x402_payment_is_the_reference_exact_transaction_signed_by_the_agent() -> None:
+    """A 402 with x402 v2 requirements, then 200 for a PAYMENT-SIGNATURE whose transaction is a TransferChecked of
+    exactly the asked amount, from the agent's token account, signed by the agent, fee payer left to the facilitator."""
+    from solders.hash import Hash
+    from solders.pubkey import Pubkey
+    from solders.signature import Signature
+    from solders.transaction import VersionedTransaction
+    from knos.pro import sol_budget as sb
+    addr = _agent("scout", "solana", "devnet", cap=5)
+    seen = {}
+    req = {"x402Version": 2, "resource": {"url": "http://127.0.0.1/paid"},
+           "accepts": [{"scheme": "exact", "network": agentpay.SOLANA_CAIP2["devnet"], "asset": solana.USDC["devnet"],
+                        "amount": "250000", "payTo": solana.MERCHANT, "maxTimeoutSeconds": 60,
+                        "extra": {"feePayer": solana.MERCHANT, "recentBlockhash": str(Hash.default())}}]}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            sig = self.headers.get("PAYMENT-SIGNATURE")
+            if not sig:
+                self.send_response(402)
+                self.send_header("PAYMENT-REQUIRED", base64.b64encode(json.dumps(req).encode()).decode())
+                self.end_headers()
+                return
+            seen["payload"] = json.loads(base64.b64decode(sig))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"paid content")
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        got = agentpay.pay("scout", f"http://127.0.0.1:{srv.server_address[1]}/paid")
+    finally:
+        srv.shutdown()
+    assert got.status == 200 and got.paid == 0.25 and got.body == "paid content"
+    p = seen["payload"]
+    assert p["x402Version"] == 2 and p["accepted"] == req["accepts"][0]
+    tx = VersionedTransaction.from_bytes(base64.b64decode(p["payload"]["transaction"]))
+    keys = tx.message.account_keys
+    assert keys[0] == Pubkey.from_string(solana.MERCHANT) and tx.signatures[0] == Signature.default()
+    assert keys[1] == Pubkey.from_string(addr)
+    assert tx.signatures[1].verify(Pubkey.from_string(addr), bytes([0x80]) + bytes(tx.message))
+    transfer = next(ix for ix in tx.message.instructions if keys[ix.program_id_index] == sb.TOKEN_PROGRAM)
+    assert bytes(transfer.data) == bytes([12]) + (250_000).to_bytes(8, "little") + bytes([6])
+    assert keys[transfer.accounts[0]] == sb.ata(Pubkey.from_string(addr), Pubkey.from_string(solana.USDC["devnet"]))
+    assert agentpay.spent("scout") == 0.25
 
 
 def test_the_protocol_must_match_the_wallet(server) -> None:

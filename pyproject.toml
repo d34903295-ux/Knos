@@ -47,15 +47,12 @@ pro = ["cryptography>=42", "qrcode>=7",
        "pytempo>=0.5,<0.6"]
 # Framework agents: Sibyl's own LangGraph BaseStore plus LangGraph (examples/langgraph_team.py)
 langgraph = ["sibyl-memory-langgraph>=0.2", "langgraph>=0.3"]
-# Agent budget wallets paying APIs over HTTP 402, through the protocols' reference SDKs:
-# MPP on Tempo (pympp, Python 3.11+) and x402 on Solana.
+# Agent budget wallets paying APIs over HTTP 402: MPP on Tempo through its reference SDK (pympp, Python 3.11+).
+# x402 on Solana is built in with solders (the reference x402 SDK pins solana<0.40, which pins solders<0.28).
 agentpay = [
   "cryptography>=42",
   "httpx>=0.27",
   "pympp[tempo]>=0.11,<0.12; python_version >= '3.11'",
-  "x402[svm]>=2.24,<3",
-  # x402 2.24 imports solana.rpc.api, which solana 0.40 removed
-  "solana>=0.36,<0.40",
 ]
 dev = [
   "pytest>=7",
