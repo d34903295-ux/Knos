@@ -9,117 +9,22 @@
 
 Both are Sibyl Pro features. Knos calls only `MemoryClient.learn()`, `list_skill_proposals()`,
 `accept_skill_proposal()` and `lint()`. It never constructs Sibyl's Learner or Linter, never passes a tier, and never
-touches Sibyl's tier cache or credentials: on the free tier Sibyl's own gate says no, and Knos says how to get Pro.
-
-Tier detection (for `knos pro buy`, so nobody pays Sibyl twice) asks Sibyl: its official CLI (`sibyl status`), or,
-after the person consents, the documented `/api/plugin/access` with their own credentials. Credentials are read only
-from the person's own ~/.sibyl-memory/credentials.json, sent only to api.sibyllabs.org, and never printed.
+touches Sibyl's tier cache or credentials: on the free tier Sibyl's own gate says no, and Knos says how to get Pro
+(`knos pro buy`, which includes Sibyl Pro: see knos.sibyl_pro).
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
-import subprocess
-import urllib.request
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-SIBYL_API = "https://api.sibyllabs.org"
-PAID = {"pro", "sync", "team", "lifetime", "stake", "staker", "enterprise"}
-NEEDS_PRO = "needs Sibyl Pro; get it with `knos pro buy` (Knos and Sibyl Pro in one command)"
+NEEDS_PRO = "needs Sibyl Pro, which Knos Pro includes: knos pro buy"
 
 
 class NeedsPro(Exception):
     pass
-
-
-def credentials_path() -> Path:
-    return Path(os.environ.get("SIBYL_CREDENTIALS") or Path.home() / ".sibyl-memory" / "credentials.json")
-
-
-def credentials() -> dict:
-    try:
-        got = json.loads(credentials_path().read_text(encoding="utf-8"))
-        return got if isinstance(got, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def redacted(value: str) -> str:
-    return (value[:6] + "…") if value else ""
-
-
-# ---- tier ---------------------------------------------------------------------------------------------------------
-
-@dataclass
-class Tier:
-    name: str        # free | pro | staker | ... | unknown
-    source: str      # sibyl-status | access | credentials | none
-    detail: str = ""
-
-    @property
-    def paid(self) -> bool:
-        return self.name in PAID
-
-
-def tier_from_status_output(text: str) -> str | None:
-    """The server tier `sibyl status` printed (its 'server' section), or its local tier if the server was not asked."""
-    server = text.split("server", 1)[1] if "server" in text else ""
-    for block in (server, text):
-        m = re.search(r"Tier\s+([A-Za-z]+)", block)
-        if m:
-            return m.group(1).lower()
-    return None
-
-
-def tier_via_cli(timeout: float = 30.0) -> Tier | None:
-    exe = shutil.which("sibyl")
-    if not exe:
-        return None
-    try:
-        done = subprocess.run([exe, "status"], capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    got = tier_from_status_output(done.stdout)
-    return Tier(got, "sibyl-status") if got else None
-
-
-def tier_via_access(timeout: float = 10.0) -> Tier | None:
-    """POST /api/plugin/access with the person's own account id and session token (what `sibyl status` sends)."""
-    c = credentials()
-    if not c.get("account_id") or not c.get("session_token"):
-        return None
-    body = json.dumps({"account_id": c["account_id"], "session_token": c["session_token"]}).encode()
-    req = urllib.request.Request(SIBYL_API + "/api/plugin/access", data=body,
-                                 headers={"Content-Type": "application/json", "User-Agent": "knos"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - Sibyl's own API only
-            got = json.loads(resp.read())
-    except (OSError, ValueError):
-        return None
-    name = str(got.get("tier") or "free").lower()
-    if got.get("staker", {}).get("qualified"):
-        name = "staker" if name == "free" else name
-    return Tier(name, "access", str(got.get("source") or ""))
-
-
-def detect(consent_to_access: bool = False) -> Tier:
-    """Sibyl's word on this person's tier: its own CLI first, then (only with consent) the access endpoint.
-    Without either, 'unknown': the purchase then asks rather than guesses."""
-    got = tier_via_cli()
-    if got:
-        return got
-    if consent_to_access:
-        got = tier_via_access()
-        if got:
-            return got
-    if not credentials():
-        return Tier("free", "none", "no Sibyl account on this machine")
-    return Tier("unknown", "none")
 
 
 # ---- learn / lint -------------------------------------------------------------------------------------------------
@@ -266,18 +171,3 @@ def _hit_who(hit: dict[str, Any]) -> str:
         except ValueError:
             return ""
     return str((body or {}).get("who") or (body or {}).get("by") or "") if isinstance(body, dict) else ""
-
-
-# ---- Path B: Sibyl Pro through Sibyl's own checkout ---------------------------------------------------------------
-
-def upgrade(run=subprocess.run) -> str:
-    """Run Sibyl's own `sibyl upgrade` for the person's own account: it opens Sibyl's checkout (card, or USDC on
-    Base) and polls until Pro is active. Knos never touches that payment. Returns what happened, in words."""
-    exe = shutil.which("sibyl")
-    if not exe:
-        return "missing-cli"
-    try:
-        done = run([exe, "upgrade"], timeout=60 * 30)
-    except (OSError, subprocess.SubprocessError):
-        return "failed"
-    return "done" if getattr(done, "returncode", 1) == 0 else "not-completed"

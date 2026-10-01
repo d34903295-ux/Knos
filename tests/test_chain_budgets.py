@@ -100,7 +100,7 @@ def test_tempo_remaining_is_read_with_the_documented_selector(monkeypatch):
 
 
 def test_tempo_authorize_encodes_a_periodic_limit_and_one_allowed_call():
-    pytempo = pytest.importorskip("pytempo")
+    pytest.importorskip("pytempo")
     from pytempo import CallScope, KeyRestrictions, SignatureType, TokenLimit
     from pytempo.contracts import AccountKeychain
     token = "0x20c0000000000000000000000000000000000001"

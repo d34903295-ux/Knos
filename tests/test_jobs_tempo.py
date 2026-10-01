@@ -90,3 +90,34 @@ def test_reject_and_refund_return_everything(dev):
 def test_bench_jobs_tempo_conserves_money():
     got = bench.tempo_local(jobs=5, binary=ANVIL)
     assert got["worker_paid_usdc"] == 4.75 and got["fee_usdc"] == 0.25 and "anvil" in got["where"]
+
+
+def test_knos_work_takes_a_passkey_style_tempo_job_and_is_paid(dev, tmp_path):
+    """The web app's passkey buyer: brief on the relay under its own sha256 (the job id), price in the Tempo escrow,
+    a device key to seal to. The reference worker finds it in the Posted logs, claims, delivers sealed; accept pays."""
+    import json
+    pytest.importorskip("solders.litesvm")
+    from nacl.public import PrivateKey, SealedBox
+    from knos.jobs.relay import DirRelay
+    from knos.jobs.tempo import TempoVenue
+    from knos.jobs.worker import Worker
+    from _jobharness import LocalLedger
+    from _jobharness import Escrow as SolEscrow
+    chain, esc, token, buyer, worker, fee = dev
+    relay = DirRelay(tmp_path / "relay")
+    device = PrivateKey.generate()
+    brief = json.dumps({"title": "Tagline", "task": "Write a tagline for a Lagos bakery. Mention Lagos.",
+                        "kind": "copy", "checks": {"must_include": ["Lagos"]}, "buyer": buyer.address,
+                        "seal_to": bytes(device.public_key).hex()}).encode()
+    jid = bytes.fromhex(relay.put_brief(brief))
+    esc.post(buyer, jid, U, 600)
+    venue = TempoVenue(esc, relay, worker, from_block=0)
+    from solders.keypair import Keypair
+    w = Worker(LocalLedger(SolEscrow()), relay, Keypair(), lambda p: "Warm bread, Lagos mornings.", tempo=venue)
+    assert [o.delivered for o in w.once()] == [True]
+    j = esc.job(jid)
+    assert j.state == "delivered" and j.worker.lower() == worker.address.lower()
+    assert SealedBox(device).decrypt(relay.get_delivery(j.result.hex())) == b"Warm bread, Lagos mornings.\n"
+    before = chain.balance(token, worker.address)
+    esc.accept(buyer, jid)
+    assert chain.balance(token, worker.address) - before == U * 95 // 100

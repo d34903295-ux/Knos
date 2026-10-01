@@ -43,8 +43,6 @@ TOKENS = {
 DECIMALS = 6
 # keccak256 of the signatures above (checked in tests/test_tempo.py against the ERC-20 Transfer topic)
 TOPIC_TRANSFER_WITH_MEMO = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
-SELECTOR_TRANSFER_WITH_MEMO = "0x95777d59"
-
 _ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 

@@ -19,15 +19,14 @@ from solders.transaction import VersionedTransaction
 
 from . import sol
 
-SO_CANDIDATES = [Path(__file__).resolve().parents[3] / "programs" / "knos_escrow" / "knos_escrow.so",
-                 Path(__file__).resolve().parent / "knos_escrow.so"]
+SO_CANDIDATES = [Path(__file__).resolve().parent / "knos_escrow.so"]   # built from programs/knos_escrow
 
 
 def program_so() -> Path:
     for p in SO_CANDIDATES:
         if p.exists():
             return p
-    raise FileNotFoundError("knos_escrow.so not found (programs/knos_escrow/knos_escrow.so)")
+    raise FileNotFoundError("knos_escrow.so not found next to knos/jobs/localsvm.py (build programs/knos_escrow)")
 
 
 class Escrow:
@@ -65,11 +64,6 @@ class Escrow:
         r = self.svm.send_transaction(VersionedTransaction(msg, signers))
         self.svm.expire_blockhash()
         return type(r).__name__ == "TransactionMetadata"
-
-    def warp(self, seconds: int) -> None:
-        c = self.svm.get_clock()
-        c.unix_timestamp = c.unix_timestamp + seconds
-        self.svm.set_clock(c)
 
     # -- tokens --------------------------------------------------------------------------------------------------------
     def _tix(self, data, metas) -> Instruction:

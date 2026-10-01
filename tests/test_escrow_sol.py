@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("solders.litesvm")
 
-from knos.jobs.localsvm import Escrow  # noqa: E402
+from _jobharness import Escrow  # noqa: E402
 
 PRICE = 5_000_000  # $5 in 6-decimal units
 

@@ -42,66 +42,10 @@ def nothing_found(repo: Path) -> Problem:
     return Problem("Nothing about that yet.", f"Read more first:  knos point {repo}")
 
 
-def memory_full(repo: Path, kept: int = 0, commits: int = 0) -> Problem:
-    """The store hit its 5 MB ceiling part-way through reading.
-
-    Commits are read first and newest first, then the transcript, so what runs
-    out of room is the older end of the transcript. Nothing already written is
-    lost or overwritten; the read simply stops.
-
-    The remedy used to be "read one folder instead". That is right when the
-    code or the rules filled the store and useless when the transcript did -
-    agent sessions are read per repo, not per folder, so the same turns are
-    read again and the store fills again. A remedy that cannot work costs
-    somebody a second wait and some trust, so this one names the source.
-    """
-    what = (f"Kept {commits} commits and the newest {kept - commits} things "
-            f"said in past sessions." if kept else "Kept the newest and stopped there.")
-    return Problem(
-        f"This repo's memory is full at 5 MB, Sibyl's free tier. {what} The"
-        " older end of the transcript was not read. What is stored is still"
-        " whole - nothing was evicted or truncated, and the commits are read"
-        " before the transcript so the record of why things were done is in"
-        " there.",
-        "That is usually fine: the recent end is what gets asked about. If you"
-        f" need the older sessions, read one folder:  knos point {Path(repo)}/src",
-    )
-
-
 def busy(repo: Path) -> Problem:
     return Problem(
         f"knos is already reading {Path(repo).name} somewhere else.",
         "Wait for that to finish, then try again.",
-    )
-
-
-def not_a_repo(path: str) -> Problem:
-    return Problem(
-        f"{path} has no git history, so knos read the code and sessions only.",
-        "Read a folder with history:  knos point <a git repo>",
-    )
-
-
-def install_ctags() -> str:
-    """The one line that installs a code reader, for this machine.
-
-    One command, for the platform the person is actually on. Offering all
-    three and letting them work out which is theirs is how a one-line fix
-    becomes a five-minute detour.
-    """
-    import sys
-
-    if sys.platform.startswith("win"):
-        return "winget install UniversalCtags.Ctags"
-    if sys.platform == "darwin":
-        return "brew install universal-ctags"
-    return "sudo apt install universal-ctags"
-
-
-def code_engine_missing() -> Problem:
-    return Problem(
-        "No code reader here, so knos answered from sessions and commits only.",
-        f"For answers that name a file and line:  {install_ctags()}",
     )
 
 

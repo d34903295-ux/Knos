@@ -19,7 +19,7 @@ def register(app: typer.Typer, out, Stop) -> None:
         st = licence.status(start_trial=True)
         if not st["active"]:
             raise Stop("Your 14-day Knos Pro trial has ended. Memory, claims and the edit guard stay free.",
-                       "Keep spend and caps:  knos pro buy   (10 USDC / 30 days)")
+                       "Keep spend and caps:  knos pro buy   (22 USDC / 30 days, Sibyl Pro included)")
         if st["why"] == "trial":
             out.print(f"[dim]Knos Pro trial: {st['days_left']:.0f} day(s) left. knos pro buy when you are ready.[/dim]")
         return st
@@ -279,62 +279,6 @@ def register(app: typer.Typer, out, Stop) -> None:
                 else solana.explorer_tx(cfg["network"], got["tx"]))
         out.print(f"Sent {got['amount']:g} back to {to}. {link}")
 
-    srv = typer.Typer(help="Knos Team: a self-hosted server that shares claims, notes and one budget across machines.")
-    app.add_typer(srv, name="serve")
-
-    @srv.callback(invoke_without_command=True)
-    def serve_run(
-        ctx: typer.Context,
-        host: str = typer.Option("127.0.0.1", "--host", help="listen address; anything but loopback is the network"),
-        port: int = typer.Option(8766, "--port"),
-        name: list[str] = typer.Option(None, "--name", help="a host name it answers to (repeatable), e.g. knos.lan"),
-    ) -> None:
-        """Run the team server (Ctrl+C stops it)."""
-        from . import team
-
-        if ctx.invoked_subcommand is not None:
-            return
-        need_pro()
-        team.serve(host, port, tuple(name or ()), say=lambda s: out.print(s, markup=False))
-
-    @srv.command("seat")
-    def serve_seat(
-        action: str = typer.Argument(..., help="add, remove or list"),
-        who: str = typer.Argument(None, help="the seat's name, e.g. alice"),
-    ) -> None:
-        """Manage seats. `add` shows the new seat's token once: hand it to that person."""
-        from . import team
-
-        if action == "list":
-            out.print("\n".join(team.seats()) or "No seats yet. knos serve seat add <name>")
-            return
-        if not who:
-            raise Stop("Name the seat.", "knos serve seat add alice")
-        if action == "add":
-            try:
-                token = team.seat_add(who)
-            except ValueError as why:
-                raise Stop(str(why), "knos serve seat add alice") from None
-            out.print(f"Seat {who} added. Their token (shown once, kept only as a hash):")
-            out.print(token, markup=False)
-            out.print(f"On their machine:  knos init --remote http://<this server>:8766 --token {token[:14]}...")
-            return
-        if action == "remove":
-            out.print(f"Removed {who}." if team.seat_remove(who) else f"No seat called {who}.")
-            return
-        raise Stop(f"No seat action {action}.", "knos serve seat add|remove|list <name>")
-
-    @srv.command("budget")
-    def serve_budget(usd: float = typer.Argument(..., help="the team's cap in dollars"),
-                     per: str = typer.Option("day", "--per", help="day, week or month")) -> None:
-        """Set one pooled cap for the whole team (every machine's spend counts toward it)."""
-        from . import team
-
-        if usd <= 0 or per not in ("day", "week", "month"):
-            raise Stop("A cap is a positive amount per day, week or month.", "knos serve budget 100 --per day")
-        team.set_team_cap(usd, per)
-        out.print(f"Team cap: ${usd:.2f} per {per}, across every machine that has joined.")
-
     @app.command("pay")
     def pay_cmd(
         url: str = typer.Argument(..., help="an API that may answer 402 Payment Required"),
@@ -386,6 +330,7 @@ def register(app: typer.Typer, out, Stop) -> None:
                                     chain=p["chain"], payer=found.get("payer", ""))
         where = licence.write(body)
         licence.mark_used(p["chain"], tx)
+        _sibyl_pro(body)
         try:
             _pending_path().unlink()
         except OSError:
@@ -415,17 +360,15 @@ def register(app: typer.Typer, out, Stop) -> None:
 
     @pro.command("buy")
     def pro_buy(
-        year: bool = typer.Option(False, "--year", help="Pro for a year (100) instead of 30 days (10)"),
-        team: int = typer.Option(0, "--team", min=0, help="Team seats (20 each per 30 days, 3 minimum)"),
+        year: bool = typer.Option(False, "--year", help="Pro for a year (208) instead of 30 days (22)"),
+        team: int = typer.Option(0, "--team", min=0, help="Team seats (32 each per 30 days, 3 minimum)"),
         chain: str = typer.Option("solana", "--chain", help="solana (USDC) or tempo (USDC.e or pathUSD)"),
         network: str = typer.Option("mainnet", "--network", help="mainnet, or devnet (Solana) / testnet (Tempo)"),
         wait: bool = typer.Option(True, "--wait/--no-wait", help="watch the chain for the payment"),
         minutes: float = typer.Option(15, "--minutes", help="how long to wait"),
-        with_sibyl: bool = typer.Option(True, "--with-sibyl/--no-sibyl",
-                                        help="then get Sibyl Pro through Sibyl's own checkout, if you lack it"),
     ) -> None:
         """Pay from any wallet: a Solana Pay link (USDC) or a Tempo transfer with memo. Verified on chain; no account.
-        Then, if Sibyl says you are on its free tier, Sibyl Pro through Sibyl's own checkout (never charged twice)."""
+        Sibyl Pro is included: Knos buys it for the paying wallet from this one payment."""
         if team and team < 3:
             raise Stop("Team starts at 3 seats.", "knos pro buy --team 3")
         plan = "team-seat" if team else ("pro-year" if year else "pro-month")
@@ -464,20 +407,17 @@ def register(app: typer.Typer, out, Stop) -> None:
         _qr(url)
         if wait:
             _wait(p, minutes)
-            if with_sibyl:
-                _sibyl_step("year" if year else "month")
 
-    def _sibyl_step(period: str) -> None:
-        import sys as _sys
-
-        from . import bundle
-
-        def confirm(q: str, default: bool) -> bool:
-            if not _sys.stdin.isatty():
-                return False  # never decide for someone who is not at the terminal
-            return typer.confirm(q, default=default)
-
-        bundle.step(lambda t: out.print(t, markup=False), confirm, period)
+    def _sibyl_pro(body: dict) -> None:
+        from .. import sibyl_pro
+        try:
+            g = sibyl_pro.from_licence(body)
+        except sibyl_pro.Locked as why:
+            out.print(f"[dim]Sibyl Pro: {why}[/dim]")
+            return
+        if g:
+            sim = " (simulated on testnets)" if g.simulated else ""
+            out.print(f"Sibyl Pro is included: active until {g.until[:10]}{sim}.")
 
     def _qr(url: str) -> None:
         """A terminal QR when the optional `qrcode` package is installed; the link above works without it."""

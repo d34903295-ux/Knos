@@ -37,6 +37,14 @@ pytestmark = pytest.mark.slow  # nightly; `pytest -m slow` (needs the local vali
 ROUNDS = int(os.environ.get("KNOSTEST_PROPERTY_N", "10"))
 
 
+def _claim_address(team, unit: str):
+    """Where the protocol puts a unit's claim (protocol.claim's address), to dust it before anyone claims."""
+    from solders.pubkey import Pubkey
+    from knos.team import sas
+    nonce = Pubkey.from_bytes(units.unit_hash(team.salt, team.repo_id, units.unit(unit)))
+    return sas.attestation_pda(team.credential, team.claim_schema, nonce)
+
+
 def _pool(prefix: str) -> list[tuple[str, int]]:
     return [(f"{prefix}/a/x.py", units.FILE), (f"{prefix}/a/y.py", units.FILE), (f"{prefix}/a/", units.DIR),
             (f"{prefix}/a/b/z.py", units.FILE), (f"{prefix}/a/b/", units.DIR), (f"{prefix}/c.py", units.FILE)]
@@ -79,7 +87,7 @@ def test_exactly_one_winner_and_the_winner_is_never_blocked():
             crasher = rng.randrange(len(holders)) if rng.random() < 0.3 else None
             if rng.random() < 0.3:  # dust on one claim address before anyone claims
                 u, k = rng.choice(pool)
-                pda = protocol.claim_address(team, units.unit(u, directory=k == units.DIR))
+                pda = _claim_address(team, units.unit(u, directory=k == units.DIR))
                 _retry(lambda: rpc.send(URL, [transfer(TransferParams(from_pubkey=owner.pubkey(), to_pubkey=pda,
                                                                       lamports=1_000_000))], owner))
                 stats["dust"] += 1

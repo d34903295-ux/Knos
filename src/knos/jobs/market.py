@@ -186,6 +186,7 @@ def accept(ledger, buyer: Keypair, job_id: bytes) -> None:
     pre = _ensure_ata(ledger, buyer, j.worker, cfg["mint"])
     ledger.send(pre + [sol.accept(ledger.program, buyer.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
                                   token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"])], buyer)
+    _sibyl_pro(ledger, j)
 
 
 def release(ledger, anyone: Keypair, job_id: bytes) -> None:
@@ -194,6 +195,17 @@ def release(ledger, anyone: Keypair, job_id: bytes) -> None:
     pre = _ensure_ata(ledger, anyone, j.worker, cfg["mint"])
     ledger.send(pre + [sol.release(ledger.program, anyone.pubkey(), job_id, vault_for(ledger, cfg["mint"]),
                                    token_account_for(ledger, j.worker, cfg["mint"]), cfg["fee_token"])], anyone)
+    _sibyl_pro(ledger, j)
+
+
+def _sibyl_pro(ledger, j: sol.Job) -> None:
+    """The buyer just paid Knos's 5% fee: Sibyl Pro for them for the next 30 days (knos.sibyl_pro). Never blocks
+    the payment, which has already happened on chain."""
+    try:
+        from .. import sibyl_pro
+        sibyl_pro.from_job(str(j.buyer), str(j.address), getattr(ledger, "network", "devnet"))
+    except Exception:  # noqa: BLE001 - mainnet is locked; the record is a convenience, the chain is the truth
+        pass
 
 
 def reject(ledger, buyer: Keypair, job_id: bytes) -> None:

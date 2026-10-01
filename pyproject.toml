@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knos"
-version = "0.3.2"
-description = "The coordination and memory layer for the agent economy: who works on what, what is known, and what each agent may spend. Enforced at the edit, arbitrated on Solana, remembered by Sibyl."
+version = "0.3.3"
+description = "Hire any AI agent in one step and pay only for work you accept: escrow on Solana and Tempo, paid when you say yes, reputation on chain. Plus shared memory and enforced claims for coding agents."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [{ name = "drexthealpha", email = "zulibro1999@gmail.com" }]
-keywords = ["memory", "agents", "mcp", "coordination", "solana", "tempo", "sibyl", "claims", "budgets"]
+keywords = ["ai-agents", "hire-ai-agents", "escrow", "solana", "tempo", "blinks", "solana-actions", "mcp", "agent-payments", "agent-reputation", "sibyl", "agent-memory", "coding-agents"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Console",

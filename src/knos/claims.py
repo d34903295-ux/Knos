@@ -16,7 +16,6 @@ claim is kept as history for `knos board` and `knos worth`.
 from __future__ import annotations
 
 import contextlib
-import fnmatch
 import json
 import re
 import sqlite3
@@ -246,19 +245,6 @@ class Claim:
     def held_by(self, agent: Agent) -> bool:
         return agent.owns(self.host, self.session, self.anchor)
 
-    def to_wire(self) -> dict[str, Any]:
-        """Every field, for the team server and back."""
-        return {"id": self.id, "globs": list(self.globs), "description": self.description, "host": self.host,
-                "session": self.session, "anchor": self.anchor, "label": self.label, "taken_at": self.taken_at,
-                "refreshed_at": self.refreshed_at, "holds_min": self.holds_min, "advisory": self.advisory}
-
-    @classmethod
-    def from_wire(cls, d: dict[str, Any]) -> "Claim":
-        return cls(id=str(d["id"]), globs=tuple(d.get("globs") or ()), description=str(d.get("description", "")),
-                   host=str(d.get("host", "")), session=str(d.get("session", "")), anchor=d.get("anchor"),
-                   label=str(d.get("label", "")), taken_at=str(d["taken_at"]), refreshed_at=str(d["refreshed_at"]),
-                   holds_min=int(d.get("holds_min", HOLDS_MIN)), advisory=bool(d.get("advisory")))
-
     def as_dict(self) -> dict[str, Any]:
         return {"id": self.id, "globs": list(self.globs), "description": self.description, "host": self.host,
                 "session": self.session, "anchor": self.anchor, "who": self.label, "since": self.taken_at,
@@ -273,20 +259,11 @@ class Claims:
     """One repo's claim list. Open it as a context manager."""
 
     def __init__(self, repo: str | Path = ".", db: Path | None = None, local: bool = False) -> None:
-        """`db` names the file directly (the team server keeps one per repo). A machine joined to a team
-        (`knos init --remote`) sends claims to its `knos serve` instead, unless `local` is set: sessions, which map
-        this machine's processes, always stay local."""
+        """`db` names the file directly. Claims across machines are the team registry on Solana (`knos team`), not
+        this file; `local` is kept for callers that say so explicitly."""
         self.repo = Path(repo).resolve()
         self.path = Path(db) if db is not None else claims_db(self.repo)
         self._conn: sqlite3.Connection | None = None
-        self._remote = None
-        if db is None and not local:
-            try:
-                from .pro import team
-            except ImportError:  # the MIT core without Pro: always local
-                team = None
-            if team is not None:
-                self._remote = team.client_for(self.repo)
 
     def __enter__(self) -> "Claims":
         conn = sqlite3.connect(str(self.path), timeout=10, isolation_level=None)
@@ -331,8 +308,6 @@ class Claims:
 
     def live(self) -> list[Claim]:
         """Every claim that has not been released or lapsed, oldest first."""
-        if self._remote is not None:
-            return self._remote.live()
         return sorted(self._live_rows(self.conn), key=lambda c: c.taken_at)
 
     # -- taking ------------------------------------------------------------------
@@ -344,8 +319,6 @@ class Claims:
         own overlapping claim is refreshed rather than duplicated; another agent's overlapping claim refuses it."""
         named = globs if globs else (resolve(self.repo, description) if resolve_names else [])
         wanted = [norm(g) for g in named if norm(g)]
-        if self._remote is not None:  # resolved here, against this checkout; decided on the team server
-            return self._remote.take(agent, description, wanted, holds_min)
         advisory = not wanted
         now = _iso(_now())
         with self._tx() as conn:
@@ -391,9 +364,6 @@ class Claims:
         return out
 
     def note_block(self, agent: Agent, rel: str, claim: Claim) -> None:
-        if self._remote is not None:
-            self._remote.note_block(agent, rel, claim)
-            return
         try:
             self.conn.execute("INSERT INTO events (ts, kind, detail) VALUES (?, 'blocked', ?)",
                               (_iso(_now()), json.dumps({"path": rel, "by": agent.label, "held_by": claim.label, "claim": claim.id})))
@@ -401,8 +371,6 @@ class Claims:
             pass
 
     def events(self, kind: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
-        if self._remote is not None:
-            return self._remote.events(kind, limit)
         sql, params = "SELECT ts, kind, detail FROM events", []
         if kind:
             sql += " WHERE kind=?"
@@ -415,8 +383,6 @@ class Claims:
     def release(self, agent: Agent, description: str = "", everyone: bool = False) -> list[Claim]:
         """Release the agent's own live claims (or one of them, by description or id). `everyone` releases every live
         claim in the repo, which only a person at a terminal should ask for (the CLI confirms first)."""
-        if self._remote is not None:
-            return self._remote.release(agent, description, everyone)
         now = _iso(_now())
         gone: list[Claim] = []
         with self._tx() as conn:
@@ -461,7 +427,3 @@ def lookup_session(repo: Path):
             return c.session_for(host, anchor)
     return find
 
-
-def glob_filter(names: list[str], pattern: str) -> list[str]:
-    """fnmatch for callers that want shell-style matching on plain names (kept for `knos claim --list`)."""
-    return [n for n in names if fnmatch.fnmatch(n, pattern)]

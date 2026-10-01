@@ -115,32 +115,11 @@ def init(
     show: bool = typer.Option(False, "--print", help="show what would be written, change nothing"),
     test: bool = typer.Option(True, "--test/--no-test", help="start the server once to prove it answers"),
     read: bool = typer.Option(True, "--read/--no-read", help="read this repo into memory now (within the budget)"),
-    remote: str = typer.Option(None, "--remote", help="Team: join this knos serve (with --token)"),
-    token: str = typer.Option(None, "--token", help="Team: this machine's seat token"),
-    leave_team: bool = typer.Option(False, "--leave-team", help="Team: stop sharing claims with the team server"),
     team: bool = typer.Option(False, "--team", help="also guard this repo for everyone: repo hooks, plugin, git hooks"),
 ) -> None:
     """Wire knos into every agent on this machine (memory server, edit guard, session notice)."""
     from . import init as setup
 
-    if leave_team:
-        from .pro import team
-
-        out.print("Left the team: claims are local again." if team.leave() else "This machine was not in a team.")
-        return
-    if remote:
-        from .pro import team
-
-        if not token:
-            raise Stop("Joining a team needs this machine's seat token.",
-                       "On the server:  knos serve seat add <name>   then:  knos init --remote <url> --token <token>")
-        try:
-            team._call({"url": remote.rstrip("/"), "token": token}, "GET", "/v1/whoami", timeout=5)
-            team.join(remote, token)
-        except (team.TeamUnreachable, ValueError) as why:
-            raise Stop(f"Not joined: {why}", "Check the address and the token, and that knos serve is running.") \
-                from None
-        out.print(f"Joined the team at {remote.rstrip('/')}: claims, notes and the budget are shared from now on.")
     started = time.perf_counter()
     try:
         chosen = setup.pick(hosts)
@@ -219,7 +198,7 @@ def init(
 @app.command("connect", hidden=True)
 def connect(show: bool = typer.Option(False, "--print"), hosts: str = typer.Option(None, "--hosts")) -> None:
     """Old name for `knos init`."""
-    init(undo=False, hosts=hosts, show=show, test=True, read=True, remote=None, token=None, leave_team=False, team=False)
+    init(undo=False, hosts=hosts, show=show, test=True, read=True, team=False)
 
 
 @app.command("guard", hidden=True)
@@ -228,10 +207,10 @@ def guard_cmd(install: bool = typer.Option(False, "--install"), uninstall: bool 
     from . import guard
 
     if install:
-        init(undo=False, hosts=None, show=False, test=True, read=True, remote=None, token=None, leave_team=False, team=False)
+        init(undo=False, hosts=None, show=False, test=True, read=True, team=False)
         return
     if uninstall:
-        init(undo=True, hosts=None, show=False, test=False, read=False, remote=None, token=None, leave_team=False, team=False)
+        init(undo=True, hosts=None, show=False, test=False, read=False, team=False)
         return
     for name, on in guard.installed().items():
         out.print(f"  {name:<10} {'guarding' if on else 'not wired'}")
@@ -266,7 +245,7 @@ def point(path: str = typer.Argument(".", help="the repo to read")) -> None:
         out.print(skipped)
     if counts.get("full"):
         out.print("[yellow]The Sibyl store is full (5 MB free tier); the oldest part was not read.[/yellow] "
-                  "Make room:  knos compact   or Sibyl Pro, uncapped:  sibyl upgrade")
+                  "Make room:  knos compact   or  knos pro buy (Sibyl Pro, uncapped, is included)")
 
 
 @app.command()
@@ -344,13 +323,13 @@ def remember(
         written = mem.record(Fact(text=fact, source="note", where=f"you said so, {now[:10]}", when=now, about=name))
         if written is None:
             raise Stop("Not remembered: the Sibyl store is full (5 MB free tier) and nothing was written.",
-                       "Make room:  knos compact   or Sibyl Pro, uncapped:  sibyl upgrade")
+                       "Make room:  knos compact   or  knos pro buy (Sibyl Pro, uncapped, is included)")
         mem.note_thing(TOPIC, name, {"note": fact, "when": now[:10]})
         near = mem.near_full()
     out.print(f"Noted, under {name}. Every agent you connect will know. Drop it:  knos forget \"{name}\"")
     if near:
         out.print("[yellow]Sibyl memory is over 80% of its 5 MB free tier.[/yellow] "
-                  "Make room:  knos compact   or Sibyl Pro, uncapped:  sibyl upgrade")
+                  "Make room:  knos compact   or  knos pro buy (Sibyl Pro, uncapped, is included)")
 
 
 @app.command()
@@ -393,7 +372,7 @@ def compact(days: int = typer.Option(30, "--older-than", help="drop notes forgot
         out.print(f"[dim]{got['duplicates']} journal entries were recorded twice; Sibyl's journal is append-only, so "
                   "they stay (answers show each once).[/dim]")
     if capped and got["after"] >= 0.8 * 5 * 1024 * 1024:
-        out.print("Still over 80%. Sibyl Pro has no cap:  sibyl upgrade   (https://docs.sibyllabs.org/memory/tiers)")
+        out.print("Still over 80%. knos pro buy (Sibyl Pro, uncapped, is included)")
 
 
 @app.command("private")
@@ -489,7 +468,7 @@ def status() -> None:
     room = f"{size:.1f} MB" + (" of Sibyl's 5 MB free tier (this repo's store plus your own Sibyl memory)" if capped
                                 else " in Sibyl (your Sibyl account: no cap)")
     if near:
-        room += "  - nearly full: knos compact, or sibyl upgrade"
+        room += "  - nearly full: knos compact, or knos pro buy (Sibyl Pro, uncapped, is included)"
     out.print(f"  {'':<10} {room}")
     out.print(f"  {'':<10} {only_here} notes exist nowhere else; the rest is re-read from your repo")
     if claims_db(repo).exists():
@@ -856,7 +835,6 @@ def main(argv: list[str] | None = None) -> int:
         out.print(f"knos stopped: {type(e).__name__}: {e}", markup=False)
         out.print("If this repeats, please report it with the command you ran.", markup=False)
         return 1
-    return 0
 
 
 def _entry() -> None:

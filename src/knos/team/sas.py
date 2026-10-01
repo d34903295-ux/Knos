@@ -29,7 +29,6 @@ SYSTEM_PROGRAM = Pubkey.from_string("11111111111111111111111111111111")
 # Instruction discriminators (program/src/entrypoint.rs)
 IX_CREATE_CREDENTIAL = 0
 IX_CREATE_SCHEMA = 1
-IX_CHANGE_SCHEMA_STATUS = 2
 IX_CHANGE_AUTHORIZED_SIGNERS = 3
 IX_CREATE_ATTESTATION = 6
 IX_CLOSE_ATTESTATION = 7
@@ -39,10 +38,9 @@ CREDENTIAL = 0
 SCHEMA = 1
 ATTESTATION = 2
 
-# Schema field types (program/src/state/schema.rs, SchemaDataTypes). There is no fixed-size byte type, so a 32-byte
-# hash is a VecU8.
-U8, U16, U32, U64, U128, I8, I16, I32, I64, I128, BOOL, CHAR, STRING, VEC_U8 = range(14)
-VEC_STRING = 25
+# Schema field types Knos uses (program/src/state/schema.rs, SchemaDataTypes, by their numbers there). There is no
+# fixed-size byte type, so a 32-byte hash is a VecU8.
+U8, U32, U64, I64, VEC_U8 = 0, 2, 3, 8, 13
 
 # Lighthouse: the borsh variant index of AssertAccountData (programs/lighthouse/src/instruction.rs), log level Silent,
 # DataValueAssertion::Bytes and EquatableOperator::Equal.

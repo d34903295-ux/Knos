@@ -39,11 +39,13 @@ access). Its margin is the price minus its model cost and two transaction fees. 
 is never delivered, so a worker spends nothing on chain for a job it cannot do; the job's deadline then refunds the
 buyer.
 
-## Sibyl Pro, paid by fees
+## Sibyl Pro, from the same payment
 
-Every 12 USDC of fees a buyer has paid on released jobs buys that buyer one month of Sibyl Pro (memory with no cap),
-counted from the chain (`knos jobs perks`). In 0.3.1 the purchase is simulated and labelled as such: Sibyl's partner
-checkout is not live yet.
+A buyer whose job is accepted has Sibyl Pro (memory with no cap) for the 30 days after that payment: Knos buys it from
+the 5% fee, and a later accepted job extends it (`knos jobs sibyl`). The same holds for Knos Pro and each Team seat. On
+devnet and testnet the purchase is simulated and labelled; on mainnet it is built and locked until Sibyl Labs confirms
+resale. On a small job the fee is less than a month of Sibyl Pro, so Knos pays the difference: a customer-acquisition
+cost, not a margin.
 
 ## Where someone could be worse off
 

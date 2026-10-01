@@ -96,10 +96,18 @@ class Knos:
 
     def recall(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         from .memory import _flatten
+        from . import recall
         with Memory(self.workspace) as mem:
             hits = mem.search(query, limit=limit)
-        return [{"text": h.get("text") or h.get("note") or "", "about": h.get("about", ""),
-                 "where": h.get("where", "")} for h in (_flatten(x) for x in hits)]
+            got = [{"text": h.get("text") or h.get("note") or "", "about": h.get("about", ""),
+                    "where": h.get("where", "")} for h in (_flatten(x) for x in hits)]
+            shown = {g["text"].strip() for g in got}
+            for r in recall.retrieve(mem.client, query, k=limit):
+                text = r["text"].split(": ", 1)[-1].strip()
+                if text and text not in shown:
+                    shown.add(text)
+                    got.append({"text": text, "about": "past session", "where": r.get("where") or r.get("date") or ""})
+        return got[:limit]
 
     def memory_client(self):
         """This workspace's Sibyl MemoryClient (for Sibyl's LangGraph BaseStore or Hermes provider). Close it with

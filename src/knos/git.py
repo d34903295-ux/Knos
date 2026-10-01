@@ -86,12 +86,3 @@ def read_commits(repo: Path, limit: int = 500) -> list[Commit]:
         )
     return commits
 
-
-def last_touched(repo: Path, needle: str, limit: int = 500) -> list[Commit]:
-    """Commits that touched a path or mention a word, newest first."""
-    needle = needle.lower()
-    out = []
-    for c in read_commits(repo, limit):
-        if needle in c.text.lower() or any(needle in f.lower() for f in c.files):
-            out.append(c)
-    return out

@@ -3,7 +3,7 @@
 Every answer knos gives comes out of Sibyl's memory engine (sibyl-memory-client). Sibyl's free tier caps the stores
 an agent on this machine writes to at 5 MB together; knos does not patch or route around that cap. It keeps what can
 be rebuilt out of the store (the code-structure index is a tags file beside it), warns at 80%, and names the two ways
-on: `knos compact`, or Sibyl Pro (`sibyl upgrade`). A Sibyl account already on this machine
+on: `knos compact`, or Knos Pro, which includes Sibyl Pro (`knos pro buy`). A Sibyl account already on this machine
 (~/.sibyl-memory/credentials.json) is passed to Sibyl's own cap gate, so paying Sibyl users are not capped.
 
     WARM entities    one canonical record per thing (schema-unique)
@@ -26,7 +26,7 @@ from typing import Any
 
 from . import paths
 
-from sibyl_memory_client import DEFAULT_TENANT, FREE_TIER_CAP_BYTES, CapExceededError, Storage
+from sibyl_memory_client import FREE_TIER_CAP_BYTES, CapExceededError, Storage
 
 # Warn when a capped store is this full, with the exact choices (WP5).
 WARN_AT = 0.8
@@ -39,21 +39,10 @@ INTERNAL = "knos:"
 # How long one agent's statement of what it is doing stays worth telling
 # another agent. This is the only thing knos stores that expires, because
 # it is the only thing that is about now rather than about what happened.
-INTENT_HOLDS = 30  # minutes
 _CLAIM_TRIES = 5  # attempts before a claim write gives up
 _CLAIM_BACKOFF = 0.05  # seconds, multiplied by the attempt number
 _OPEN_TRIES = 8  # attempts to open a store two agents reached at once
 _OPEN_BACKOFF = 0.05  # seconds, multiplied by the attempt number
-
-
-class StoreFull(Exception):
-    """The 5 MB free tier is used up and this write did not happen.
-
-    Raised rather than swallowed. A claim that silently did not land is
-    worse than no claim at all: the agent believes it holds the work, every
-    other agent is told nothing, and two of them edit the same thing. The
-    caller says so in words instead.
-    """
 
 
 class StoreGone(Exception):
@@ -81,22 +70,6 @@ def sibyl_account() -> dict[str, str]:
         return {}
     return {"account_id": str(got["account_id"]), "session_token": str(got["session_token"])}
 
-
-def born_marker(db_path: Path) -> Path:
-    return Path(db_path).with_name(Path(db_path).name + ".born")
-
-
-def _minutes_since(when: str) -> float:
-    """Age of a timestamp in minutes, or forever if it cannot be read."""
-    from datetime import datetime, timezone
-
-    try:
-        then = datetime.fromisoformat(when.replace("Z", "+00:00"))
-    except ValueError:
-        return float("inf")
-    if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - then).total_seconds() / 60
 
 # WARM categories knos writes.
 FILE = "file"
@@ -174,7 +147,8 @@ class Memory:
         from sibyl_memory_client import MemoryClient
 
         self.storage = _open(self.db_path)
-        self.migrated = migrate_legacy(self.storage, legacy, self.tenant) if legacy.exists() else 0
+        if legacy.exists():
+            migrate_legacy(self.storage, legacy, self.tenant)
         self.client = MemoryClient(self.storage, tenant_id=self.tenant, cap_gate=self._cap_gate())
         if not born.exists():
             born.write_text(
@@ -382,9 +356,6 @@ class Memory:
             self.client.set_state(INTERNAL + "focus", body)
         except CapExceededError:
             pass  # bookkeeping is the first thing to go when there is no room
-
-    def focus(self) -> dict[str, Any] | None:
-        return self.client.get_state(INTERNAL + "focus")
 
     # Claims live in claims.db (claims.py): path globs held by one agent identity, taken in one transaction.
 

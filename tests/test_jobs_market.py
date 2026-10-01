@@ -8,8 +8,8 @@ import pytest
 pytest.importorskip("solders.litesvm")
 
 from knos.jobs import checks, market  # noqa: E402
-from knos.jobs.ledger import LocalLedger  # noqa: E402
-from knos.jobs.localsvm import Escrow  # noqa: E402
+from _jobharness import LocalLedger  # noqa: E402
+from _jobharness import Escrow  # noqa: E402
 from knos.jobs.relay import DirRelay, RelayError  # noqa: E402
 
 USDC = 1_000_000
@@ -246,29 +246,3 @@ def test_brief_lint_says_what_to_fix_before_money_moves():
     assert lint(market.Brief("x", "Write a two line tagline for a lamp shop in Leeds.", kind="copy",
                              checks={"must_include": ["Leeds"]}), USDC) == []
 
-
-def test_sibyl_pro_is_bought_by_knos_at_12_dollars_of_fees(net, tmp_path):
-    from knos.jobs import perks
-    env, ledger, relay = net
-    buyer, _ = env.party(400 * USDC)
-    worker, _ = env.party()
-    checkout = perks.SimulatedCheckout(tmp_path / "perks.json")
-    for price in (100, 100, 39):                                 # fees 5 + 5 + 1.95 = 11.95: not yet
-        jid = market.post(ledger, relay, buyer, market.Brief("j", "x"), price * USDC)
-        market.claim(ledger, worker, jid)
-        market.deliver(ledger, relay, worker, jid, buyer.pubkey(), b"x")
-        market.accept(ledger, buyer, jid)
-    w = str(buyer.pubkey())
-    assert perks.claim(ledger.jobs(), w, checkout) == [] and perks.status(ledger.jobs(), w, checkout)["fees_paid_usdc"] == 11.95
-    jid = market.post(ledger, relay, buyer, market.Brief("j", "x"), USDC)   # + 0.05 = 12.00
-    market.claim(ledger, worker, jid)
-    market.deliver(ledger, relay, worker, jid, buyer.pubkey(), b"x")
-    rejected = market.post(ledger, relay, buyer, market.Brief("r", "x"), 100 * USDC)
-    market.claim(ledger, worker, rejected)
-    market.deliver(ledger, relay, worker, rejected, buyer.pubkey(), b"x")
-    market.reject(ledger, buyer, rejected)                     # refunded jobs pay no fee and count for nothing
-    market.accept(ledger, buyer, jid)
-    got = perks.claim(ledger.jobs(), w, checkout)
-    assert len(got) == 1 and got[0].simulated
-    assert perks.claim(ledger.jobs(), w, checkout) == []       # once per $12
-    assert perks.status(ledger.jobs(), w, checkout)["months_granted"] == 1

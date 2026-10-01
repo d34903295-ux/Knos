@@ -24,5 +24,5 @@ def test_teams_are_counted_and_lookalikes_are_not():
                                      ["x"])], fake)
     got = network_stats.cluster_stats("local", URL, with_history=False)
     assert got["teams"] >= 1 and got["claims_live"] >= 1 and got["rejected_lookalikes"] >= 1, got
-    html = network_stats.render({"updated": "now", "clusters": [got], "github": {}, "licences": {}})
+    html = network_stats.render({"updated": "now", "clusters": [got], "github": {}})
     assert "counts are not proof of distinct teams" in html

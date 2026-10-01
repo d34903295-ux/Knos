@@ -21,6 +21,7 @@ class Ledger:
     url: str
     program: Pubkey
     commitment: str = "confirmed"
+    network: str = "devnet"
     _config: dict | None = field(default=None, repr=False)
 
     def send(self, ixs, payer: Keypair, signers: list[Keypair] | None = None) -> str:
@@ -68,43 +69,6 @@ class Ledger:
                 raise LookupError("the escrow is not initialised on this cluster")
             self._config = sol.parse_config(raw)
         return self._config
-
-
-@dataclass
-class LocalLedger:
-    """The escrow inside LiteSVM (knos.jobs.localsvm.Escrow), behind the same interface."""
-    env: object
-    program: Pubkey = field(init=False)
-
-    def __post_init__(self):
-        self.program = self.env.pid
-
-    def send(self, ixs, payer: Keypair, signers: list[Keypair] | None = None) -> str:
-        everyone = {bytes(k.pubkey()): k for k in [payer, *(signers or [])]}
-        if not self.env.send(list(ixs), payer, list(everyone.values())):
-            raise RuntimeError("transaction failed")
-        return "local"
-
-    def account(self, address: Pubkey) -> bytes | None:
-        acc = self.env.svm.get_account(address)
-        return bytes(acc.data) if acc is not None else None
-
-    def jobs(self, state: str | None = None) -> list[sol.Job]:
-        out = []
-        for jid in getattr(self.env, "known_jobs", []):
-            got = self.env.job(jid)
-            if got and (state is None or got.state == state):
-                out.append(got)
-        return out
-
-    def blockhash(self):
-        return self.env.svm.latest_blockhash()
-
-    def now(self) -> int:
-        return int(self.env.svm.get_clock().unix_timestamp)
-
-    def config(self) -> dict:
-        return sol.parse_config(self.account(sol.config_pda(self.program)))
 
 
 def _b58(raw: bytes) -> str:

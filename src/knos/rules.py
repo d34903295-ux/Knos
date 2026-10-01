@@ -18,7 +18,6 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from . import code
 
 # The names in common use. Anything else is somebody's private convention,
 # and guessing at it would put files in the store nobody asked for.

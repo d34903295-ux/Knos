@@ -1,7 +1,11 @@
-name: network
+name: pages
 
-# The public network page: counted from the chain, deployed to GitHub Pages by this workflow. It never commits.
+# GitHub Pages: the Knos web app at / (it reads the escrow on Solana devnet in the browser, so it works with no Knos
+# server), and the coding-team network page at /network/, counted from the chain. It never commits.
 on:
+  push:
+    branches: [main]
+    paths: ["web/**", "scripts/network_stats.py", ".github/workflows/network.yml"]
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
@@ -27,9 +31,14 @@ jobs:
       - run: python scripts/network_stats.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: site = the web app, plus /network/
+        run: |
+          mkdir -p _site/network
+          cp -r web/. _site/
+          cp -r docs/network/. _site/network/
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/
+          path: _site/
 
   deploy:
     needs: build

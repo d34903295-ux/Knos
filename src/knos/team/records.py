@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from solders.pubkey import Pubkey
 
-from . import protocol, rpc, sas, schemas
+from . import rpc, sas, schemas
 
 DAY = 86_400
 

@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from knos import paths
 
 # Invented for this test. No model could know it, and it appears in no file,
 # so a correct answer can only have come from knos.
@@ -43,7 +42,6 @@ def _env(home: Path, repo: Path) -> dict:
 
 @pytest.mark.critical
 def test_a_fresh_session_recalls_what_another_one_learned(knos_home, repo):
-    paths.remember_pointed(repo)
     env = _env(knos_home, repo)
 
     # Session one: an agent learns something and writes it back.
@@ -58,7 +56,6 @@ def test_a_fresh_session_recalls_what_another_one_learned(knos_home, repo):
 
 def test_the_fresh_session_starts_empty(knos_home, repo, tmp_path):
     """So the recall above is memory, not something ambient in the process."""
-    paths.remember_pointed(repo)
     other = tmp_path / "elsewhere"
     other.mkdir()
     env = _env(other, repo)
@@ -90,33 +87,3 @@ def test_the_tools_an_agent_gets_are_listed(knos_home, repo):
 
     assert sorted(asyncio.run(run())) == ["about", "claim_job", "deliver_job", "done", "find_jobs", "pay", "post_job", "remember", "search"]
 
-
-def test_the_repo_you_are_standing_in_answers_not_the_last_one_pointed_at(
-    knos_home, repo, tmp_path, monkeypatch
-):
-    """Two repos read, and you walk into one of them.
-
-    Answering from whichever was pointed at last is how an agent open in one
-    project quietly quotes another.
-    """
-    other = tmp_path / "other"
-    (other / ".git").mkdir(parents=True)
-    paths.born_for(other).write_text("", encoding="utf-8")  # knos has read it
-
-    paths.remember_pointed(repo)
-    monkeypatch.chdir(other)
-    assert paths.current_repo() == other.resolve()
-
-    monkeypatch.chdir(tmp_path)
-    assert paths.current_repo() == repo.resolve()
-
-
-def test_a_repo_knos_has_not_read_does_not_hijack_the_answer(
-    knos_home, repo, tmp_path, monkeypatch
-):
-    """Standing in an unread repo still answers, rather than going silent."""
-    fresh = tmp_path / "fresh"
-    (fresh / ".git").mkdir(parents=True)
-    paths.remember_pointed(repo)
-    monkeypatch.chdir(fresh)
-    assert paths.current_repo() == repo.resolve()

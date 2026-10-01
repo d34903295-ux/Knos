@@ -40,7 +40,7 @@ def ledger() -> Ledger:
     from ..team import rpc
     c = cluster()
     url = os.environ.get("KNOS_JOBS_RPC") or rpc.CLUSTERS[c]
-    return Ledger(url, sol.program_id(), commitment=finality(url))
+    return Ledger(url, sol.program_id(), commitment=finality(url), network=c)
 
 
 def finality(url: str) -> str:

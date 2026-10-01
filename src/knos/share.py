@@ -288,29 +288,3 @@ def restore(repo: Path, mem: Any, source: Path | None = None) -> tuple[int, int]
         kept += 1
     return kept, skipped
 
-
-def read_claims(text: str) -> list[tuple[str, str]]:
-    """Parse the claims back out of an exported file.
-
-    Used by CI, which has the file but not the store. Deliberately tolerant:
-    a malformed line is skipped rather than failing the check, because a
-    non-blocking comment that does not appear is better than a red build.
-    """
-    found: list[tuple[str, str]] = []
-    inside = False
-    for line in text.splitlines():
-        if line.startswith("## Being worked on"):
-            inside = True
-            continue
-        if inside and line.startswith("## "):
-            break
-        if not inside or not line.startswith("- `"):
-            continue
-        try:
-            topic = line.split("`")[1]
-            who = line.split("held by **")[1].split("**")[0]
-        except (IndexError, ValueError):
-            continue
-        if topic.strip():
-            found.append((topic.strip(), who.strip()))
-    return found

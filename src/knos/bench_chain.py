@@ -36,7 +36,7 @@ def _funded(url: str, sol: float) -> Keypair:
 
 
 def _team(url: str, machines: int):
-    from .team import config, protocol, registry
+    from .team import config, registry
     owner = _funded(url, 5)
     keys = [_funded(url, 3) for _ in range(machines)]
     made = registry.create(url, owner, [owner.pubkey(), *[k.pubkey() for k in keys]])

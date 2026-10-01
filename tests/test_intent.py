@@ -16,7 +16,7 @@ Dropped, because their purpose no longer exists in 0.2.0:
   - the override tests (override unlocks and is written down, holds for that claim only, release clears overrides):
     there are no overrides.
   - the stemming / topic-word tests (a claim covers the word in all its shapes, stemming is not greedy,
-    answer.same_subject): claims are path globs now; prose never matches. Replaced by "prose never blocks" and
+    a subject matcher): claims are path globs now; prose never matches. Replaced by "prose never blocks" and
     "`*` does not cross directories".
   - "the whole pattern dies with the store": coordination lives in claims.db, not in the Sibyl memory store.
   - "the time is the soonest of several holds" and "no time is promised when it cannot be worked out": a file is

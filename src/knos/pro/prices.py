@@ -53,10 +53,11 @@ def cost(model: str, inp: int = 0, out: int = 0, cache_write: int = 0, cache_wri
     return usd, known
 
 
-# What Knos itself costs, in USDC. The one place these numbers live.
+# What Knos itself costs, in USDC. The one place these numbers live. Every plan includes Sibyl Pro, which Knos buys
+# for the paying wallet from this one payment (knos.sibyl_pro); there is no second checkout.
 PLANS = {
-    "pro-month": {"usdc": 10, "days": 30, "label": "Knos Pro, 30 days"},
-    "pro-year": {"usdc": 100, "days": 365, "label": "Knos Pro, 1 year"},
-    "team-seat": {"usdc": 20, "days": 30, "label": "Knos Team, 1 seat, 30 days"},
+    "pro-month": {"usdc": 22, "days": 30, "label": "Knos Pro with Sibyl Pro, 30 days"},
+    "pro-year": {"usdc": 208, "days": 365, "label": "Knos Pro with Sibyl Pro, 1 year"},
+    "team-seat": {"usdc": 32, "days": 30, "label": "Knos Team with Sibyl Pro, 1 seat, 30 days"},
 }
 TRIAL_DAYS = 14

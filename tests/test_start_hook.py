@@ -29,7 +29,6 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 
 from knos import start_hook
 from knos.claims import Claims, claims_db

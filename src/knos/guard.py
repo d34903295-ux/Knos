@@ -39,9 +39,6 @@ from .identity import Agent
 REFUSE = 2
 ALLOW = 0
 
-CLIENTS = ("claude", "codex", "cursor", "opencode")
-
-
 @dataclass(frozen=True)
 class Verdict:
     allow: bool
@@ -252,9 +249,6 @@ def _check_local(repo: Path, rel: str, agent: Agent) -> Verdict:
 
 # ---- talking to each client ------------------------------------------------------------
 
-EDIT_TOOLS = {"edit", "write", "multiedit", "notebookedit", "str_replace_editor", "apply_patch", "edit_file", "write_file"}
-
-
 def target_of(client: str, event: dict) -> str:
     """The path an edit hook payload is about, or "" when it is not an edit."""
     if client == "claude":
@@ -420,15 +414,13 @@ def decide(client: str, event: dict, repo: Path | None = None) -> Verdict:
 
 def _over_budget(repo: Path | None = None) -> str | None:
     """Knos Pro's spend cap, when one is set: a one-line refusal once it is reached. No cap, no cost (one stat)."""
-    home = paths.home()
-    mine, team = (home / "budget.json").exists(), (home / "team.json").exists()
-    if not mine and not team:
+    if not (paths.home() / "budget.json").exists():
         return None
     try:
         from .pro import budget
     except ImportError:
         return None
-    return (budget.refusal(repo) if mine else None) or (budget.team_refusal(budget.CHECK_EVERY) if team else None)
+    return budget.refusal(repo)
 
 
 def once(event: dict, compute) -> Verdict:
@@ -513,10 +505,6 @@ def knos_cmd_argv() -> list[str]:
     """knos_cmd for subprocess (no shell quoting)."""
     exe = _script()
     return [exe] if exe else [sys.executable, "-m", "knos"]
-
-
-def _knos_cmd() -> list[str]:  # kept for callers from 0.1
-    return knos_cmd()
 
 
 def hook_cmd(kind: str, client: str) -> str:

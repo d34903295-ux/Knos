@@ -6,9 +6,8 @@ import multiprocessing
 import sqlite3
 import uuid
 
-import pytest
 
-from knos.memory import FILE, TOPIC, Fact, Memory
+from knos.memory import INTERNAL, FILE, TOPIC, Fact, Memory
 
 
 def test_tiers_round_trip(knos_home, repo):
@@ -20,7 +19,7 @@ def test_tiers_round_trip(knos_home, repo):
 
         assert m.journal()[0]["evaluated"] == "we dropped redis"
         assert m.thing(TOPIC, "redis")["body"] == {"decision": "dropped"}
-        assert m.focus()["body"] == {"working_on": "auth"}
+        assert m.client.get_state(INTERNAL + "focus")["body"] == {"working_on": "auth"}
         assert m.reference("license")["body"] == "MIT"
 
 

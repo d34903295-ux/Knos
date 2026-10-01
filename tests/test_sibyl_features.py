@@ -1,17 +1,11 @@
-"""Sibyl is load-bearing, Knos never routes around its gate or cap, and Sibyl Pro is bought in the same command
-without anyone paying twice. Tiers are mocked here, and only here (never in src/)."""
+"""Sibyl is load-bearing, and Knos never routes around its gate or cap: Sibyl Pro comes with Knos Pro (one payment;
+see test_sibyl_pro.py). Tiers are mocked here, and only here (never in src/)."""
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import stat
 import sys
-import threading
-import uuid
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -69,11 +63,10 @@ def test_a_020_store_is_migrated_into_the_counted_store_once(knos_home, repo):
     MemoryClient(st).write_event(evaluated="we chose sqlite in 0.2", acted="note", extra={"text": "we chose sqlite"})
     st.close()
     with Memory(repo) as mem:
-        assert mem.migrated > 0
         assert any("sqlite in 0.2" in str(e.get("evaluated")) for e in mem.journal())
     assert not legacy.exists() and Path(str(legacy) + ".migrated").exists()  # kept, never deleted
-    with Memory(repo) as mem:
-        assert mem.migrated == 0
+    with Memory(repo) as mem:  # opening again migrates nothing twice
+        assert sum("sqlite in 0.2" in str(e.get("evaluated")) for e in mem.journal()) == 1
 
 
 # ---- learn and lint: Sibyl Pro through MemoryClient only ------------------------------------------------------------
@@ -82,7 +75,7 @@ def test_learn_and_lint_on_the_free_tier_say_how_to_get_pro(knos_home, repo, cap
     with Memory(repo) as mem:
         mem.record(Fact(text="x", source="note", where="you", when=_now()))
     assert main(["learn"]) == 1
-    assert "needs Sibyl Pro; get it with `knos pro buy`" in capsys.readouterr().out
+    assert "needs Sibyl Pro, which Knos Pro includes: knos pro buy" in capsys.readouterr().out
     assert main(["lint"]) == 1
     assert "needs Sibyl Pro" in capsys.readouterr().out
 
@@ -172,94 +165,3 @@ def test_records_anchor_sibyl_journal_entries(knos_home, repo):
         with_journal = records.build(b"s" * 32, b"h" * 32, records.period_start(), [], mem.journal())
     without = records.build(b"s" * 32, b"h" * 32, records.period_start(), [], [])
     assert with_journal.data().merkle_root != without.data().merkle_root
-
-
-# ---- Path B: one command, two payments, never twice -----------------------------------------------------------------
-
-class _MockSibyl:
-    """Sibyl's /api/plugin/access, with an account whose tier `sibyl upgrade` flips to pro."""
-
-    def __init__(self, tier: str):
-        self.tier, self.calls = tier, []
-        mock = self
-
-        class H(BaseHTTPRequestHandler):
-            def log_message(self, *a):
-                pass
-
-            def do_POST(self):
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                mock.calls.append((self.path, body))
-                if self.path == "/test/upgrade":
-                    mock.tier = "pro"
-                out = json.dumps({"tier": mock.tier, "source": "stripe" if mock.tier == "pro" else ""}).encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(out)))
-                self.end_headers()
-                self.wfile.write(out)
-
-        self.server = HTTPServer(("127.0.0.1", 0), H)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-
-
-def _fake_sibyl_cli(tmp_path: Path, url: str) -> None:
-    """A stand-in for Sibyl's official `sibyl` CLI: `status` prints the server tier, `upgrade` completes checkout."""
-    script = tmp_path / "bin" / "sibyl_fake.py"
-    script.parent.mkdir()
-    script.write_text(f'''import json, sys, urllib.request
-def post(p):
-    r = urllib.request.Request("{url}" + p, data=b"{{}}", headers={{"Content-Type": "application/json"}})
-    return json.loads(urllib.request.urlopen(r).read())
-if sys.argv[1] == "upgrade":
-    post("/test/upgrade")
-print("server")
-print("Tier  " + post("/api/plugin/access")["tier"].upper())
-''', encoding="utf-8")
-    if os.name == "nt":
-        (tmp_path / "bin" / "sibyl.bat").write_text(f'@"{sys.executable}" "{script}" %*\n', encoding="utf-8")
-    else:
-        exe = tmp_path / "bin" / "sibyl"
-        exe.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
-        exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
-
-
-def test_path_b_buys_sibyl_pro_through_sibyls_own_client(tmp_path, monkeypatch):
-    from knos.pro import bundle
-    mock = _MockSibyl("free")
-    _fake_sibyl_cli(tmp_path, mock.url)
-    monkeypatch.setenv("PATH", str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
-    said = []
-    got = bundle.step(said.append, lambda q, d: True, "month")
-    assert got == "bought", said
-    assert said[-1] == "Sibyl Pro: active."
-    assert ("/test/upgrade", {}) in mock.calls  # the checkout ran through Sibyl's own client
-
-
-def test_nobody_pays_sibyl_twice(tmp_path, monkeypatch):
-    from knos.pro import bundle
-    mock = _MockSibyl("pro")
-    _fake_sibyl_cli(tmp_path, mock.url)
-    monkeypatch.setenv("PATH", str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
-    upgraded = []
-    said = []
-    got = bundle.step(said.append, lambda q, d: True, "month", upgrade=lambda: upgraded.append(1) or "done")
-    assert got == "skipped" and not upgraded
-    assert "not charged again" in said[0]
-    # a staker is Pro too
-    staker = bundle.step(said.append, lambda q, d: True, detect=lambda consent_to_access: sibyl.Tier("staker", "access"),
-                         upgrade=lambda: upgraded.append(1) or "done")
-    assert staker == "skipped" and not upgraded
-
-
-def test_unknown_tier_is_never_bought_blind(monkeypatch):
-    from knos.pro import bundle
-    said, upgraded = [], []
-    got = bundle.step(said.append, lambda q, d: False, detect=lambda consent_to_access: sibyl.Tier("unknown", "none"),
-                      upgrade=lambda: upgraded.append(1) or "done")
-    assert got == "unknown" and not upgraded
-
-
-def test_status_output_parsing():
-    assert sibyl.tier_from_status_output("local\nTier  FREE\n\nserver\nTier  PRO\n") == "pro"
-    assert sibyl.tier_from_status_output("local\nTier  FREE\n") == "free"

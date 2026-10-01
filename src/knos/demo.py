@@ -8,7 +8,6 @@ own ~/.knos are never touched: the demo runs with its own KNOS_HOME and deletes 
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -98,7 +97,7 @@ def run(out: Any, pause: float = PAUSE) -> int:
     os.environ["KNOS_HOME"] = str(home)
     env = {**os.environ, "KNOS_HOME": str(home), "PYTHONIOENCODING": "utf-8"}
     try:
-        from . import answer, guard, paths, refresh
+        from . import answer, guard, refresh
         from .claims import Claims
         from .identity import Agent
         from .memory import TOPIC, Fact, Memory

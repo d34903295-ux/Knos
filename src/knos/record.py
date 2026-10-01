@@ -102,8 +102,6 @@ HALF_LIFE_DAYS = 45.0
 # Archive. An agent nobody has seen for this long leaves WARM entirely, so the
 # tier stays a list of who is actually around. It is recoverable: the next
 # claim it makes writes the record again, and the journal never lost anything.
-ARCHIVE_AFTER_DAYS = 180.0
-
 # Written as ordinary journal facts so `knos why` and search see them like
 # anything else. The prefix is what makes them findable again.
 _MARK = "knos.claim"
@@ -333,38 +331,6 @@ def standing(mem: Any, who: str, now: str = "") -> dict[str, Any]:
     }
 
 
-def archive_the_quiet(mem: Any, now: str = "") -> list[str]:
-    """Move agents nobody has seen for a season out of WARM. Returns the names.
-
-    The tier is meant to be a list of who is around, and an agent that stopped
-    working in the spring is not. Nothing is lost: the journal keeps every
-    event, and the next claim that agent makes writes its record again from
-    the count it had - which is what makes this an archive rather than a
-    delete.
-
-    Not called on the critical path. `knos who` runs it, because that is the
-    command whose whole job is looking at the list.
-    """
-    moved: list[str] = []
-    try:
-        rows = mem.things(STANDING, limit=1000)
-    except Exception:
-        return moved
-    for row in rows:
-        body = row.get("body") if isinstance(row.get("body"), dict) else row
-        name = str(row.get("name") or "")
-        last = str((body or {}).get("last_seen") or "")
-        if not name or not last:
-            continue
-        if _age_days(last, now) >= ARCHIVE_AFTER_DAYS:
-            try:
-                mem.supersede(STANDING, name, "no claims for a season")
-                moved.append(name)
-            except Exception:
-                pass
-    return moved
-
-
 def holds_for(mem: Any, who: str, before: str = "") -> int:
     """Minutes `who` may hold a claim, given what it has done before.
 
@@ -435,36 +401,3 @@ def everyone(mem: Any) -> list[dict[str, Any]]:
 # money out of the same pocket. An agent that buys a brief and then abandons
 # the work it bought it for has spent it on nothing, and it will do it again in
 # half an hour.
-TRIED = 3      # claims before anyone is judged on spending at all
-KEEPS = 1 / 3  # the share it has to close to keep spending on its own
-
-
-def may_spend(mem: Any, who: str) -> tuple[bool, str]:
-    """Whether `who` should spend shared money, and why not if not.
-
-    Deliberately blunt, and deliberately hard to trip: nobody is refused
-    without a real record of abandoning work, and one bad afternoon is not a
-    record. A new agent spends freely, because refusing on no evidence is the
-    failure this whole file is written against.
-
-    This is not a security boundary and does not pretend to be one. An agent
-    picks its own name. It is the same trust model as the rest of knos - what
-    an agent says about itself, held against what it did last time - applied
-    at the one point where being wrong costs actual money.
-    """
-    got = standing(mem, who)
-    taken, finished = got["taken"], got["finished"]
-    if taken < TRIED:
-        return True, ""
-    # Judged on the shrunk and aged ratio, not the raw one: an agent that
-    # abandoned three claims last spring and has been quiet since is drifting
-    # back toward the prior rather than being refused forever on a record
-    # nobody has tested lately.
-    if got["kept"] >= KEEPS:
-        return True, ""
-    return False, (
-        f"{who} has taken {taken} pieces of work here and closed {finished}. "
-        "Money spent on work that gets abandoned is spent on nothing, and "
-        "this machine's budget is shared. Close what you are holding with "
-        "`knos done`, or ask the person to buy it for you."
-    )

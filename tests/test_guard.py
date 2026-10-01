@@ -39,6 +39,8 @@ HOLDER = Agent(host="claude", session="alice123-holder-session")
 OTHER_CLAUDE = Agent(host="claude", session="bob45678-other-session")
 CURSOR = Agent(host="cursor", session="carol999-cursor-chat")
 
+CLIENTS = ("claude", "codex", "cursor", "opencode")  # the hosts whose hook payloads the guard reads
+
 
 def _take(repo: Path, agent: Agent, description: str, globs: list[str] | None) -> None:
     with Claims(repo) as c:
@@ -194,13 +196,13 @@ def _payload(client: str, target: str, cwd: Path, session: str = "zed00000-someo
     return {"session_id": session, "args": {"filePath": target}, "cwd": str(cwd)}
 
 
-@pytest.mark.parametrize("client", guard.CLIENTS)
+@pytest.mark.parametrize("client", CLIENTS)
 def test_a_payload_with_no_path_in_it_is_allowed(client, claimed):
     out, code = guard.run(client, json.dumps({"tool_name": "Bash", "tool_input": {}, "cwd": str(claimed)}))
     assert (out, code) == ("", guard.ALLOW)
 
 
-@pytest.mark.parametrize("client", guard.CLIENTS)
+@pytest.mark.parametrize("client", CLIENTS)
 def test_nonsense_on_stdin_is_allowed(client, knos_home):
     for said in ("not json at all", "", "[1, 2]", "null"):
         assert guard.run(client, said) == ("", guard.ALLOW), said
@@ -210,7 +212,7 @@ def test_nonsense_on_stdin_is_allowed(client, knos_home):
 def test_each_client_is_refused_in_its_own_words(claimed):
     """The exit code is the refusal; the JSON is how each client explains it."""
     target = str(claimed / "src" / "auth.py")
-    for client in guard.CLIENTS:
+    for client in CLIENTS:
         out, code = guard.run(client, json.dumps(_payload(client, target, claimed)))
         assert code == guard.REFUSE, client
         said = json.loads(out)
@@ -229,7 +231,7 @@ def test_each_client_is_refused_in_its_own_words(claimed):
         assert reason.startswith("knos: src/auth.py is claimed by claude/alice123"), (client, reason)
 
 
-@pytest.mark.parametrize("client", guard.CLIENTS)
+@pytest.mark.parametrize("client", CLIENTS)
 def test_the_holders_own_session_is_allowed_through_the_hook(client, knos_home, repo):
     host = {"claude": "claude", "cursor": "cursor", "opencode": "opencode", "codex": "codex"}[client]
     _take(repo, Agent(host=host, session="mine0000-session"), "auth", ["src/auth.py"])

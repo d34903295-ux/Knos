@@ -11,10 +11,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 from _devchain import URL, devchain, funded
-from knos.team import config, protocol, service
+from knos.team import config, service
 
 FAST = {"KNOS_NO_MIRROR": "1", "KNOS_TEAM_READ_S": "20", "KNOS_TEAM_VERDICT_S": "30"}
 

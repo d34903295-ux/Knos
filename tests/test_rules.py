@@ -10,7 +10,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from knos import answer, paths, rules
+from knos import answer, rules
 from knos.memory import Memory
 
 

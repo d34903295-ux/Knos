@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from knos import answer, paths, share
+from knos import answer, share
 from knos.claims import Claims, claims_db
 from knos.identity import Agent
 from knos.memory import TOPIC, Fact, Memory
@@ -55,7 +55,6 @@ def _commit_a_record(repo, text: str = WRITTEN):
 def test_a_fresh_machine_gets_the_decisions_back(knos_home, repo) -> None:
     """The keepsake, and the whole reason a repo commits the file."""
     _commit_a_record(repo)
-    paths.remember_pointed(repo)
 
     with Memory(repo) as mem:
         kept, skipped = share.restore(repo, mem)
@@ -76,7 +75,6 @@ def test_claims_are_not_restored(knos_home, repo) -> None:
     never say.
     """
     _commit_a_record(repo)
-    paths.remember_pointed(repo)
     with Memory(repo) as mem:
         kept, _ = share.restore(repo, mem)
     assert kept == 2, "the decisions beside the claim should still come back"
@@ -112,7 +110,6 @@ def test_an_exported_live_claim_does_not_come_back_on_another_machine(knos_home,
 
 def test_restoring_twice_does_not_duplicate(knos_home, repo) -> None:
     _commit_a_record(repo)
-    paths.remember_pointed(repo)
     with Memory(repo) as mem:
         first, _ = share.restore(repo, mem)
     with Memory(repo) as mem:
@@ -123,7 +120,6 @@ def test_restoring_twice_does_not_duplicate(knos_home, repo) -> None:
 
 def test_what_was_already_here_is_left_alone(knos_home, repo) -> None:
     """A restore must not overwrite a decision this machine has moved on from."""
-    paths.remember_pointed(repo)
     with Memory(repo) as mem:
         mem.note_thing(TOPIC, "storage", {"note": "we moved to postgres", "when": "2026-09-05"})
     _commit_a_record(repo)
@@ -136,7 +132,6 @@ def test_what_was_already_here_is_left_alone(knos_home, repo) -> None:
 
 
 def test_a_repo_with_no_record_restores_nothing_and_says_so(knos_home, repo) -> None:
-    paths.remember_pointed(repo)
     with Memory(repo) as mem:
         assert share.restore(repo, mem) == (0, 0)
 
@@ -147,7 +142,6 @@ def test_a_mangled_line_is_skipped_not_fatal(knos_home, repo) -> None:
         "- **the risk guard** — refuses unknown assets  _(recorded 2026-09-02)_",
         "- **broken line with no separator",
     ))
-    paths.remember_pointed(repo)
     with Memory(repo) as mem:
         kept, _ = share.restore(repo, mem)
     assert kept == 1
@@ -155,7 +149,6 @@ def test_a_mangled_line_is_skipped_not_fatal(knos_home, repo) -> None:
 
 def test_the_round_trip_holds(knos_home, repo) -> None:
     """What export writes is what restore reads. Nothing in between."""
-    paths.remember_pointed(repo)
     now = _now()
     with Memory(repo) as mem:
         mem.record(Fact(text="we pinned pnpm", source="note", where="you",

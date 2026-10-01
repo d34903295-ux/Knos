@@ -18,7 +18,7 @@ from mcp.types import ToolAnnotations
 from . import version
 from . import answer, code, private
 from . import paths as knos_paths
-from .memory import TOPIC, Fact, Memory, StoreFull
+from .memory import TOPIC, Fact, Memory
 
 server = MCPServer("knos", version=version(), instructions=(
     "One local memory every coding agent on this machine shares, and the list of which files each of them is "
@@ -37,7 +37,7 @@ NOT_A_REPO = (
 )
 FULL = (
     "knos: the memory store is full (Sibyl's free 5 MB), and nothing was written. "
-    "Fix: knos compact, or Sibyl Pro (uncapped): sibyl upgrade."
+    "Fix: knos compact, or knos pro buy (Sibyl Pro, uncapped, is included)."
 )
 
 FIRST_READ_BUDGET = 12.0
@@ -92,6 +92,22 @@ def _agent(repo: Path, ctx: Context | None):
     return identity.for_mcp(name or "agent", lookup_session(repo))
 
 
+def _recalled(mem, query: str, shown: set[str], limit: int) -> list[str]:
+    """knos.recall over the past conversations this repo's sessions hold: what answer.ask did not already return."""
+    from . import recall
+    try:
+        rows = recall.retrieve(mem.client, query, k=limit)
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        text = r["text"].split(": ", 1)[-1].strip()
+        if text and text not in shown and not private._quotes_a_secret({"text": text}):
+            shown.add(text)
+            out.append(f"{text}\n    source: {r.get('where') or 'past session ' + str(r.get('date') or '')}")
+    return out
+
+
 def _claim_notes(repo: Path, text: str, agent) -> str:
     """Who holds files this question or answer mentions. Annotation only."""
     from .claims import Claims, claims_db
@@ -122,39 +138,17 @@ def search(query: str, limit: int = 8, ctx: Context | None = None) -> str:
         return NOT_A_REPO
     with Memory(repo) as mem:
         found = answer.ask(repo, mem, query, identity=private.AGENT, limit=limit)
+        recalled = _recalled(mem, query, {p.text.strip() for p in found}, limit)
         tail = _unfinished(mem)
-    if found:
-        answered = "\n\n".join(f"{p.text.strip()}\n    source: {p.where}" for p in found)
+    if found or recalled:
+        answered = "\n\n".join([f"{p.text.strip()}\n    source: {p.where}" for p in found] + recalled)
     else:
         answered = "Nothing known about that."
     if answer.looks_structural(query) and not code.indexed(repo):
         answered += ("\n\n(knos has not read this repo's code structure yet: `knos point` reads it. Sessions, commits "
                      "and instruction files answered this.)")
     notes = _claim_notes(repo, query + "\n" + "\n".join(p.text + " " + p.where for p in found), _agent(repo, ctx))
-    team = _team_notes(query, repo)
-    return (notes + "\n\n" if notes else "") + answered + team + tail
-
-
-def _share_with_team(fact: str, about: str, who: str, repo: Path) -> None:
-    try:
-        from .pro import team
-
-        team.share_note(fact, about, who, repo)
-    except Exception:
-        pass
-
-
-def _team_notes(query: str, repo: Path) -> str:
-    """Notes teammates wrote on other machines (Knos Team), after the local answers."""
-    try:
-        from .pro import team
-
-        got = team.team_notes(query, repo)
-    except Exception:
-        return ""
-    if not got:
-        return ""
-    return "\n\n" + "\n\n".join(f"{n['fact']}\n    source: {n['who']}, team note, {str(n['ts'])[:10]}" for n in got)
+    return (notes + "\n\n" if notes else "") + answered + tail
 
 
 @server.tool(annotations=ToolAnnotations(title="Look up one thing", read_only_hint=True, destructive_hint=False,
@@ -239,7 +233,6 @@ def remember(fact: str, about: str, claiming: bool = False, paths: list[str] | N
         if written is None:
             return FULL
         mem.note_thing(TOPIC, about, {"note": fact, "when": now[:10], "who": agent.label})
-    _share_with_team(fact, about, agent.label, repo)
     with Memory(repo) as mem:
         holds = 30
         if claiming:
@@ -253,7 +246,7 @@ def remember(fact: str, about: str, claiming: bool = False, paths: list[str] | N
     try:
         with Claims(repo) as c:
             took, conflict, mine = c.take(agent, about, wanted or None, holds_min=holds)
-    except Exception as why:  # e.g. the team server is down: say so, never crash the tool call
+    except Exception as why:  # say so, never crash the tool call
         return f"Remembered, about {about}. Not claimed: {why}. Nothing is blocked for anyone until it is."
     if not took and conflict is not None:
         from .guard import _since

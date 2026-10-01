@@ -131,10 +131,10 @@ def test_no_jargon_anywhere(name, screen):
 
 
 def test_the_one_screen_states_both_halves_of_the_product():
-    """The claim has to be in the product, not only in the README: who works on what, what is known (shared memory),
-    and what each may spend."""
+    """The claim has to be in the product, not only in the README: hire any agent and pay only for accepted work; and
+    for coding agents, who works on what, what is known (shared memory), and what each may spend."""
     screen = help_text.main()
-    assert "coordination and memory for every agent you run" in screen
+    assert "hire any AI agent and pay only for work you accept" in screen
     assert "who works on" in screen and "what each may spend" in screen
 
 

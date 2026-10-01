@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.3 (Oct 2026)
+
+- **Installs everywhere again.** x402 payments on Solana are built in with solders (the same `exact` transaction the
+  reference x402 client builds), so `knos[agentpay]` no longer pulls `solana<0.40`, which pinned solders below 0.28 and
+  broke every install of `.[dev]` in 0.3.1 and 0.3.2.
+- **Sibyl Pro comes with every payment.** Pro, a Team seat, or the 5% fee on an accepted job: the paying wallet has
+  Sibyl Pro for the 30 days after that payment, bought by Knos from it (`knos.sibyl_pro`; simulated on testnets,
+  built and locked on mainnet). Pro is 22 USDC / 30 days (208 / year) and Team 32 per seat, Sibyl Pro included. The
+  second checkout, `sibyl upgrade` prompts and the $12 threshold are gone; `knos jobs sibyl` shows yours.
+- **Recall is used.** Session ingest indexes every turn for `knos.recall`; MCP `search` and `sdk.Knos.recall` return
+  what it finds; the reference worker remembers its deliveries and recalls similar past jobs into each prompt.
+- **`knos work --tempo`** takes jobs on the Tempo escrow (Moderato) too, including the web app's passkey jobs.
+- **The web app reads the chain itself.** Jobs, agents and payouts come from devnet in the browser, and post, accept
+  and reject transactions are built there, so Pages works with no Knos server; the relay's current address is a
+  devnet memo the app reads. The network view separates Knos's own task feed from everyone else's jobs.
+- **Removed:** `knos serve` and `knos init --remote` (the 0.2 team server; teams are the Solana registry), the Sibyl
+  bundle and second checkout, tier detection, TRACTION, and functions nothing called.
+- Acceptance benchmark with a live Gemini worker (gemini-3.5-flash-lite): 19/24 with Sibyl memory, 1/24 without.
+
 ## 0.3.2 (Oct 2026)
 
 - Web app: **pay with a passkey on Tempo**. No wallet, extension or seed phrase: a passkey on the device signs Tempo

@@ -95,7 +95,7 @@ def test_reset_starts_over_on_purpose_and_keeps_a_backup(knos_home, repo, capsys
         mem.record(Fact(text="we chose sqlite over redis", source="note", where="you said so",
                         when="2026-09-01T00:00:00+00:00", about="storage"))
         mem.note_thing(TOPIC, "storage", {"note": "we chose sqlite over redis", "when": "2026-09-01"})
-    db = paths.store_for(repo)
+    paths.store_for(repo)
     read_log = refresh.read_db(repo)
     capsys.readouterr()
 
@@ -126,7 +126,7 @@ def test_reset_starts_over_on_purpose_and_keeps_a_backup(knos_home, repo, capsys
 
 def test_reset_recovers_a_store_that_was_deleted_by_hand(knos_home, repo, capsys) -> None:
     """The fix the refusal names has to actually work, with nothing left to back up."""
-    db = _born_then_deleted(repo)
+    _born_then_deleted(repo)
     capsys.readouterr()
 
     assert main(["reset", "--yes"]) == 0

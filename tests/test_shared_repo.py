@@ -6,7 +6,7 @@ those are exactly what a second clone needs.
 
 So `knos export` writes one committed file, and this proves the loop: a
 maintainer exports, a *second clean clone* reads the same decisions with no
-import step, and the file parses back (share.read_decisions / read_claims) into
+import step, and the file parses back (share.read_decisions) into
 exactly what was written, whatever a stranger commits to it.
 
 0.2.0: claims come from claims.db (description, who, since, globs). The GitHub Action / CI pull-request warning is gone
@@ -16,7 +16,7 @@ from the product (no action/ folder). Dropped with it:
   - test_a_wall_of_claims_is_capped_the_way_decisions_are
   - test_the_action_never_returns_non_zero
 The hostile-input test used to run the Action as a subprocess; it now feeds the same inputs to the parsers
-(share.read_decisions, share.read_claims) and to share.restore, and the round-trip test checks share's own parsers.
+(share.read_decisions) and to share.restore, and the round-trip test checks share's own parsers.
 """
 
 from __future__ import annotations
@@ -188,9 +188,7 @@ def test_the_exported_file_survives_a_round_trip(knos_home, repo):
         text, decisions, claims = share.export(repo, mem)
 
     assert (decisions, claims) == (1, 2)
-    assert sorted(share.read_claims(text)) == sorted(
-        [("the parser", "claude/aaaa1111"), ("the risk guard", "cursor/cccc2222")]
-    )
+    assert "the parser" in text and "the risk guard" in text
     assert share.read_decisions(text) == [
         ("storage", "we chose sqlite because a server is one more thing to run", _now()[:10])
     ]
@@ -200,7 +198,6 @@ def test_nothing_claimed_and_nothing_decided_means_nothing_parsed(knos_home, rep
     with Memory(repo) as mem:
         text, decisions, claims = share.export(repo, mem)
     assert (decisions, claims) == (0, 0)
-    assert share.read_claims(text) == []
     assert share.read_decisions(text) == []
 
 
@@ -295,7 +292,6 @@ def test_the_parsers_survive_whatever_is_committed(knos_home, repo, name):
         (repo / ".knos" / "decisions.md").write_text(body, encoding="utf-8", errors="replace")
 
         assert share.read_decisions(body) == decisions
-        assert share.read_claims(body) == claims
 
     with Memory(repo) as mem:
         kept, skipped = share.restore(repo, mem)

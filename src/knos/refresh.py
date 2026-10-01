@@ -155,7 +155,6 @@ def ensure(repo: Path, *, budget: float | None = None, force: bool = False, inde
         if not counts.get("ran_out") and not counts.get("full"):
             log.save_offsets(offsets)
             log.put("signature", sig)
-    paths.remember_pointed(repo)
     return counts
 
 

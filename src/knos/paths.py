@@ -175,15 +175,6 @@ def work_dir(repo: Path) -> Path:
     return d
 
 
-def pointer() -> Path:
-    """File recording the repo most recently pointed at."""
-    return home() / "pointed"
-
-
-def remember_pointed(repo: Path) -> None:
-    pointer().write_text(str(Path(repo).resolve()), encoding="utf-8")
-
-
 def repo_here(start: Path | None = None) -> Path | None:
     """The git repo the current directory is inside, if any."""
     here = Path(start) if start else Path.cwd()
@@ -197,29 +188,8 @@ def repo_here(start: Path | None = None) -> Path | None:
     return None
 
 
-def pointed_repo() -> Path | None:
-    """The repo `knos point` was last run on, or None."""
-    p = pointer()
-    if not p.exists():
-        return None
-    raw = p.read_text(encoding="utf-8").strip()
-    return Path(raw) if raw else None
-
-
 def has_store(repo: Path) -> bool:
     """Whether knos has read this repo. Does not create anything."""
     d = home() / slug(shared_root(repo))
     return (d / "memory.born").exists() or (d / SIBYL_STORE).exists()
 
-
-def current_repo() -> Path | None:
-    """The repo to answer from.
-
-    The one you are standing in wins, if knos has read it. Two repos both
-    pointed at used to mean the second one answered for both, which is how
-    an agent open in one project quietly quotes another.
-    """
-    here = repo_here()
-    if here is not None and has_store(here):
-        return here
-    return pointed_repo()

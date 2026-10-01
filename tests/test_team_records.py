@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import secrets
 
-import pytest
 
 from _devchain import URL, devchain, new_team
 from knos.team import records, rpc

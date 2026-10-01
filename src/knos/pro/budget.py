@@ -81,44 +81,6 @@ def state(refresh_every: float = 0.0) -> dict | None:
             "over": total >= float(cap["usd"]), "estimated": got["estimated"], "repo": cap.get("repo")}
 
 
-def team_refusal(refresh_every: float = 0.0) -> str | None:
-    """Knos Team: this machine reports its spend (tokens plus agents' API payments) for day, week and month, and gets
-    back the team's pooled total against the team cap. A refusal line when the team is over; None otherwise, and None
-    when the server cannot be reached (fail open). Never raises."""
-    try:
-        from . import agentpay, meter, team
-
-        if team.config() is None:
-            return None
-        cache = paths.home() / "team-budget.json"  # one report a minute, not one per edit
-        if refresh_every:
-            try:
-                last = json.loads(cache.read_text(encoding="utf-8"))
-                if datetime.now(timezone.utc).timestamp() - float(last["at"]) < refresh_every:
-                    return last.get("refusal")
-            except (OSError, ValueError, KeyError):
-                pass
-        meter.update(min_interval=refresh_every)
-        by = {}
-        for per in PERIODS:
-            start = meter.period_start(per)
-            by[per] = meter.spent(start)["usd"] + (
-                agentpay.spent(since=start.timestamp()) if (paths.home() / "agentpay.db").exists() else 0.0)
-        got = team.report_spend(by)
-        refusal = None
-        if got and got.get("over"):
-            cap = got.get("cap") or {}
-            refusal = (f"knos: the team's {cap.get('per', 'day')} spend cap of ${float(cap.get('usd', 0)):.2f} is "
-                       f"reached (${float(got.get('team_usd', 0)):.2f} across every machine). The team server's host "
-                       f"can raise it: knos serve budget <dollars>")
-        if got is not None:
-            cache.write_text(json.dumps({"at": datetime.now(timezone.utc).timestamp(), "refusal": refusal}),
-                             encoding="utf-8")
-        return refusal
-    except Exception:
-        return None
-
-
 # ---- agent budget wallets: which agent has which wallet, and its Knos cap ----------------------
 
 def _agents_path() -> Path:

@@ -21,7 +21,7 @@ import base64
 import hashlib
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -31,9 +31,6 @@ from . import rpc, sas, schemas, units
 
 LEASE_S = 60 * 60
 SWEEP_GRACE_S = 10 * 60
-MIN_CONTEXT_NOT_REACHED = -32016
-
-
 @dataclass(frozen=True)
 class Team:
     """What the protocol needs about a team: the public `.knos/team.json` plus this machine's copy of the salt."""
@@ -82,7 +79,6 @@ class Verdict:
     slot: int | None = None
     lost_to: LiveClaim | None = None
     reason: str = ""
-    signatures: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -261,11 +257,6 @@ def creation_slot(url: str, address: Pubkey, min_context_slot: int | None = None
 
 # ---- writing ------------------------------------------------------------------------------------------------------
 
-def claim_address(team: Team, unit: str) -> Pubkey:
-    nonce = Pubkey.from_bytes(units.unit_hash(team.salt, team.repo_id, units.unit(unit)))
-    return sas.attestation_pda(team.credential, team.claim_schema, nonce)
-
-
 def _with_min_context(fn, deadline: float):
     """Retry a read while the endpoint has not reached the asked slot yet (it lags), until `deadline`."""
     while True:
@@ -316,10 +307,9 @@ def claim(team: Team, holder: Holder, unit: str, kind: int = units.FILE, lease_s
         payer = payer or holder.key
         ix = sas.create_attestation(payer.pubkey(), holder.key.pubkey(), team.credential, team.claim_schema, nonce,
                                     data)
-        outcome, sigs = "won", []
+        outcome = "won"
         try:
             sig = rpc.send(team.url, [ix], payer, [holder.key], timeout=left(), confirm_within=left())
-            sigs = [sig]
             my_slot = int(rpc.call(team.url, "getSignatureStatuses", [[sig]], left())["value"][0]["slot"])
         except rpc.RpcError:
             # Refused in preflight, or lost the race on chain (two creates of one address both pass preflight;
@@ -362,7 +352,7 @@ def claim(team: Team, holder: Holder, unit: str, kind: int = units.FILE, lease_s
             return Verdict("offline", addr, my_slot, reason="a rival's creation slot is not visible yet")
         loser_to = decide(addr, my_slot, my_holder, uh, anc, rivals, slots, now)
         if loser_to is None:
-            return Verdict(outcome, addr, my_slot, signatures=sigs)
+            return Verdict(outcome, addr, my_slot)
         mine = sas.Attestation(nonce, team.credential, team.claim_schema, data, holder.key.pubkey(), 0,
                                Pubkey.default())
         try:
@@ -370,7 +360,7 @@ def claim(team: Team, holder: Holder, unit: str, kind: int = units.FILE, lease_s
                      [holder.key])
         except (rpc.RpcError, OSError, TimeoutError):
             pass  # it lapses at its lease, and a later sweep closes it
-        return Verdict("lost", addr, my_slot, lost_to=loser_to, signatures=sigs)
+        return Verdict("lost", addr, my_slot, lost_to=loser_to)
     except (OSError, TimeoutError, rpc.RpcError, KeyError, TypeError) as e:
         return Verdict("offline", addr, reason=str(e)[:200])
 

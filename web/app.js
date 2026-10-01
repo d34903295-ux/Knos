@@ -1,11 +1,13 @@
-// Knos web app: hire an agent, review its work, see every agent's record. Talks to `knos jobs serve` (Solana Actions
-// and the network API) on this origin, or the one in ?api=. The server builds each transaction; your wallet shows it
-// and signs it. Deliverables are sealed to a key only your wallet can re-derive, and opened here, in your browser.
+// Knos web app: hire an agent, review its work, see every agent's record. It reads the escrow on Solana devnet
+// directly and builds each transaction here (web/chain.js), so it works with no Knos server at all; your wallet shows
+// the transaction and signs it. The API (the relay that carries briefs and sealed work, and Solana Actions) is found
+// through a devnet pointer memo, or ?api=. Deliverables are sealed to a key only your wallet can re-derive.
+import * as chain from "./chain.js";
+
 const params = new URLSearchParams(location.search);
-const API = (params.get("api") || location.origin).replace(/\/$/, "");
 const CHAIN = params.get("chain") || "solana:devnet";
 const $ = (id) => document.getElementById(id);
-const state = { wallet: null, account: null, sealKey: null };
+const state = { wallet: null, account: null, sealKey: null, api: undefined };
 
 // ---- theme -------------------------------------------------------------------------------------------------------
 function setTheme(t) {
@@ -31,19 +33,47 @@ function route() {
 addEventListener("hashchange", route);
 
 // ---- helpers -----------------------------------------------------------------------------------------------------
-const b64 = { dec: (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) };
+const b64 = { dec: (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0)),
+  enc: (u8) => btoa(String.fromCharCode(...u8)) };
 const hex = (u8) => [...u8].map((b) => b.toString(16).padStart(2, "0")).join("");
 const unhex = (h) => Uint8Array.from(h.match(/../g).map((x) => parseInt(x, 16)));
 const usdc = (n) => Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
 const short = (s) => (s ? `${s.slice(0, 4)}…${s.slice(-4)}` : "—");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-async function getJSON(path, body) {
-  const r = await fetch(API + path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.message || `HTTP ${r.status}`);
-  return j;
-}
+const sha256 = async (u8) => new Uint8Array(await crypto.subtle.digest("SHA-256", u8));
 function say(el, text, kind = "") { el.textContent = text; el.className = `status ${kind}`; }
+const store = {
+  get: (k, d) => { try { return JSON.parse(localStorage.getItem(k) || "null") ?? d; } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+// The API: ?api=, else this origin when it is one (knos jobs serve), else the devnet pointer. Optional everywhere.
+async function api() {
+  if (state.api !== undefined) return state.api;
+  const tries = [params.get("api")];
+  if (!/github\.io$/.test(location.hostname)) tries.push(location.origin);
+  try { tries.push(await chain.apiUrl()); } catch {}
+  for (const u of tries.filter(Boolean)) {
+    try {
+      const r = await fetch(`${u.replace(/\/$/, "")}/actions.json`, { signal: AbortSignal.timeout(4000) });
+      if (r.ok) return (state.api = u.replace(/\/$/, ""));
+    } catch {}
+  }
+  return (state.api = null);
+}
+
+// Briefs posted while the relay was unreachable wait here, and go up the next time it answers.
+async function flushPendingBriefs() {
+  const pending = store.get("knos-pending-briefs", []);
+  const base = pending.length ? await api() : null;
+  if (!base) return;
+  const left = [];
+  for (const b of pending) {
+    try { const r = await fetch(`${base}/briefs`, { method: "PUT", body: b64.dec(b) }); if (!r.ok) left.push(b); }
+    catch { left.push(b); }
+  }
+  store.set("knos-pending-briefs", left);
+}
 
 // ---- wallet (wallet-standard) ------------------------------------------------------------------------------------
 let walletsApi;
@@ -53,7 +83,7 @@ async function wallets() {
 }
 async function connect() {
   const list = await wallets();
-  if (!list.length) throw new Error("No Solana wallet found. Install Phantom, Solflare or Backpack.");
+  if (!list.length) throw new Error("No Solana wallet found. Install Phantom, Solflare or Backpack, or pay with a passkey.");
   const w = list.length === 1 ? list[0] : list.find((x) => confirm(`Connect ${x.name}?`)) || list[0];
   const { accounts } = await w.features["standard:connect"].connect();
   state.wallet = w; state.account = accounts[0];
@@ -62,10 +92,10 @@ async function connect() {
 }
 $("connect").onclick = () => connect().then(route).catch((e) => alert(e.message));
 
-async function signAndSend(txBase64) {
+async function signAndSend(txBytes) {
   const f = state.wallet.features["solana:signAndSendTransaction"];
   if (!f) throw new Error("This wallet cannot send transactions.");
-  const [out] = await f.signAndSendTransaction({ account: state.account, chain: CHAIN, transaction: b64.dec(txBase64) });
+  const [out] = await f.signAndSendTransaction({ account: state.account, chain: CHAIN, transaction: txBytes });
   return out.signature;
 }
 
@@ -80,13 +110,13 @@ async function sealKey() {
   if (!f) throw new Error("This wallet cannot sign messages, so it cannot open sealed work.");
   const msg = new TextEncoder().encode(`Knos delivery key v1\n${state.account.address}`);
   const [{ signature }] = await f.signMessage({ account: state.account, message: msg });
-  const sk = new Uint8Array(await crypto.subtle.digest("SHA-256", signature));
+  const sk = await sha256(signature);
   const s = await sodium();
   state.sealKey = { sk, pk: s.crypto_scalarmult_base(sk) };
   return state.sealKey;
 }
 
-// ---- hire --------------------------------------------------------------------------------------------------------
+// ---- hire (Solana): the brief goes to the relay, the post transaction is built here ------------------------------
 $("hire-form").onsubmit = async (e) => {
   e.preventDefault();
   const st = $("hire-status"); const btn = $("post"); btn.disabled = true;
@@ -94,30 +124,45 @@ $("hire-form").onsubmit = async (e) => {
     if (!state.account) await connect();
     say(st, "Preparing your delivery key…");
     const { pk } = await sealKey();
-    const q = new URLSearchParams({ task: $("task").value.trim(), price: $("price").value, kind: $("kind").value });
-    const got = await getJSON(`/api/jobs/post?${q}`, { account: state.account.address, seal_to: hex(pk) });
+    const task = $("task").value.trim(), kind = $("kind").value, units = Math.round(Number($("price").value) * 1e6);
+    if (!task || !(units > 0)) throw new Error("Describe the task and set a price.");
+    const jobId = crypto.getRandomValues(new Uint8Array(32));
+    const brief = new TextEncoder().encode(JSON.stringify({ title: task.split("\n")[0].slice(0, 80), task, kind,
+      checks: null, buyer: state.account.address, price_units: units, created: Math.floor(Date.now() / 1000),
+      job_id: hex(jobId), seal_to: hex(pk) }));
+    const briefHash = await sha256(brief);
+    const base = await api();
+    let held = false;
+    if (base) {
+      const r = await fetch(`${base}/briefs`, { method: "PUT", body: brief }).catch(() => null);
+      held = !r || !r.ok;
+    } else held = true;
+    if (held) store.set("knos-pending-briefs", [...store.get("knos-pending-briefs", []), b64.enc(brief)]);
     say(st, "Approve in your wallet…");
-    await signAndSend(got.transaction);
-    say(st, `Posted. ${got.message}`, "ok");
-  } catch (err) { say(st, err.message, "bad"); } finally { btn.disabled = false; }
+    const sig = await signAndSend(await chain.postTx(state.account.address, jobId, units, briefHash));
+    const addr = await chain.jobAddress(jobId);
+    store.set("knos-job-ids", { ...store.get("knos-job-ids", {}), [addr]: hex(jobId) });
+    say(st, `Posted: ${usdc(units / 1e6)} USDC in escrow (${typeof sig === "string" ? sig.slice(0, 10) : "signed"}…).`
+      + (held ? " The relay is offline right now; this browser hands it the brief when it is back." : ""), "ok");
+  } catch (err) { say(st, err.message || String(err), "bad"); } finally { btn.disabled = false; }
 };
 
 // ---- hire with a passkey (Tempo): no extension, no seed phrase ---------------------------------------------------
 const TEMPO_JOBS = "knos-tempo-jobs";
-const tempoJobs = () => { try { return JSON.parse(localStorage.getItem(TEMPO_JOBS) || "[]"); } catch { return []; } };
+const tempoJobs = () => store.get(TEMPO_JOBS, []);
 async function deviceSealKey() {   // passkey signatures are not deterministic, so the delivery key lives on this device
   const s = await sodium();
-  try {
-    const k = JSON.parse(localStorage.getItem("knos-seal-key") || "null");
-    if (k) return { sk: unhex(k.sk), pk: unhex(k.pk) };
-  } catch {}
+  const k = store.get("knos-seal-key", null);
+  if (k) return { sk: unhex(k.sk), pk: unhex(k.pk) };
   const kp = s.crypto_box_keypair();
-  try { localStorage.setItem("knos-seal-key", JSON.stringify({ sk: hex(kp.privateKey), pk: hex(kp.publicKey) })); } catch {}
+  store.set("knos-seal-key", { sk: hex(kp.privateKey), pk: hex(kp.publicKey) });
   return { sk: kp.privateKey, pk: kp.publicKey };
 }
 $("post-passkey").onclick = async () => {
   const st = $("hire-status"); const btn = $("post-passkey"); btn.disabled = true;
   try {
+    const base = await api();
+    if (!base) throw new Error("Tempo jobs need the relay, which is offline right now. Try again later, or use a Solana wallet.");
     const T = await import("./tempo.js");
     say(st, "Use your passkey (Face ID, fingerprint or device PIN)…");
     state.tempo ||= await T.passkeyAccount();
@@ -132,9 +177,9 @@ $("post-passkey").onclick = async () => {
     $("passkey-info").textContent = `Passkey wallet ${short(addr)} · ${usdc(bal)} pathUSD (Tempo testnet)`;
     say(st, "Approve with your passkey…");
     const { pk } = await deviceSealKey();
-    const id = await T.postJob(state.tempo, API, { task: $("task").value.trim(), kind: $("kind").value,
+    const id = await T.postJob(state.tempo, base, { task: $("task").value.trim(), kind: $("kind").value,
       priceUsd: Number($("price").value), sealTo: hex(pk) });
-    try { localStorage.setItem(TEMPO_JOBS, JSON.stringify([...tempoJobs(), id])); } catch {}
+    store.set(TEMPO_JOBS, [...tempoJobs(), id]);
     say(st, `Posted on Tempo: ${usdc($("price").value)} pathUSD in escrow. See My jobs.`, "ok");
   } catch (err) { say(st, err.message || String(err), "bad"); } finally { btn.disabled = false; }
 };
@@ -156,7 +201,17 @@ async function loadTempoJobs(box) {
   }));
 }
 
-// ---- my jobs -----------------------------------------------------------------------------------------------------
+// ---- my jobs: read from the chain; titles and sealed work from the relay when it answers -----------------------
+async function briefOf(job) {
+  const base = await api();
+  if (!base) return null;
+  try {
+    const r = await fetch(`${base}/briefs/${job.brief}`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return null;
+    const raw = new Uint8Array(await r.arrayBuffer());
+    return hex(await sha256(raw)) === job.brief ? JSON.parse(new TextDecoder().decode(raw)) : null;
+  } catch { return null; }
+}
 async function loadJobs() {
   const box = $("jobs-list");
   if (!state.account) {
@@ -164,29 +219,33 @@ async function loadJobs() {
     return loadTempoJobs(box).catch((e) => box.insertAdjacentHTML("beforeend", `<p class="status bad">${esc(e.message)}</p>`));
   }
   $("jobs-hint").hidden = true;
-  box.innerHTML = "<p class='fine'>Loading from the chain…</p>";
+  box.innerHTML = "<p class='fine'>Reading the escrow on devnet…</p>";
   try {
-    const { jobs } = await getJSON(`/api/network/jobs/${state.account.address}`);
-    if (!jobs.length) { box.innerHTML = "<p class='lede'>No jobs yet. <a href='#hire'>Hire an agent</a>.</p>"; return; }
     const me = state.account.address;
+    const mine = (await chain.jobs()).filter((j) => j.buyer === me || j.worker === me).sort((a, b) => b.deadline - a.deadline);
+    if (!mine.length) { box.innerHTML = "<p class='lede'>No jobs yet. <a href='#hire'>Hire an agent</a>.</p>"; await loadTempoJobs(box); return; }
+    const briefs = await Promise.all(mine.map(briefOf));
+    const ids = store.get("knos-job-ids", {});
     box.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Job</th><th>Price</th><th>State</th><th></th></tr></thead><tbody>${
-      jobs.map((j) => `<tr><td>${esc(j.title || "a job")}<div class="fine">${j.buyer === me ? "you hired" : "you worked"} · ${short(j.worker)}</div></td>
-        <td>${usdc(j.amount_usdc)} USDC</td><td><span class="pill">${esc(j.state)}</span></td>
+      mine.map((j, i) => { const b = briefs[i], id = (b && b.job_id) || ids[j.address] || "";
+        return `<tr><td>${esc((b && b.title) || "Job " + short(j.address))}<div class="fine">${j.buyer === me ? "you hired" : "you worked"} · ${short(j.worker)}</div></td>
+        <td>${usdc(j.amount)} USDC</td><td><span class="pill">${esc(j.state)}</span></td>
         <td>${j.buyer === me && j.state === "delivered" ? `<button class="small" data-open="${j.result}">Open</button>
-          <button class="small" data-act="accept" data-id="${j.job_id}">Accept</button>
-          <button class="small ghost" data-act="reject" data-id="${j.job_id}">Reject</button>` : ""}</td></tr>`).join("")
+          ${id ? `<button class="small" data-act="accept" data-i="${i}" data-id="${id}">Accept</button>
+          <button class="small ghost" data-act="reject" data-i="${i}" data-id="${id}">Reject</button>` : ""}` : ""}</td></tr>`; }).join("")
     }</tbody></table></div>`;
     box.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => openDelivery(b.dataset.open).catch((e) => alert(e.message))));
-    box.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => settle(b.dataset.id, b.dataset.act).catch((e) => alert(e.message))));
+    box.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => settle(mine[b.dataset.i], b.dataset.id, b.dataset.act).catch((e) => alert(e.message))));
     await loadTempoJobs(box);
   } catch (err) { box.innerHTML = `<p class="status bad">${esc(err.message)}</p>`; }
 }
 async function openDelivery(resultHex, keyFn = sealKey) {
-  const r = await fetch(`${API}/deliveries/${resultHex}`);
+  const base = await api();
+  if (!base) throw new Error("The relay holding the sealed work is offline right now. Try again later.");
+  const r = await fetch(`${base}/deliveries/${resultHex}`);
   if (!r.ok) throw new Error("The relay does not have this delivery.");
   const blob = new Uint8Array(await r.arrayBuffer());
-  const digest = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", blob)));
-  if (digest !== resultHex) throw new Error("The relay's copy does not match what the agent committed on chain.");
+  if (hex(await sha256(blob)) !== resultHex) throw new Error("The relay's copy does not match what the agent committed on chain.");
   const { sk, pk } = await keyFn();
   const s = await sodium();
   let text;
@@ -194,34 +253,39 @@ async function openDelivery(resultHex, keyFn = sealKey) {
   catch { throw new Error("Sealed to another key: this job was posted outside the web app. Open it with  knos jobs get."); }
   $("delivery-text").textContent = text; $("delivery").hidden = false; $("delivery").scrollIntoView({ behavior: "smooth" });
 }
-async function settle(id, verb) {
-  const got = await getJSON(`/api/jobs/${id}/${verb}`, { account: state.account.address });
-  if (!confirm(got.message)) return;
-  await signAndSend(got.transaction);
+async function settle(job, jobIdHex, verb) {
+  const msg = verb === "accept" ? `Pay the agent ${usdc(job.amount * 0.95)} USDC (5% Knos fee)?` : `Refund ${usdc(job.amount)} USDC to you?`;
+  if (!confirm(msg)) return;
+  await signAndSend(await chain.settleTx(state.account.address, job, unhex(jobIdHex), verb));
   setTimeout(loadJobs, 1500);
 }
 
-// ---- agents and network ------------------------------------------------------------------------------------------
+// ---- agents and network: counted from the escrow's job accounts ----------------------------------------------
 async function loadAgents() {
   const box = $("agents-list");
   try {
-    const { agents } = await getJSON("/api/network/agents");
-    box.innerHTML = agents.length ? `<table><thead><tr><th>Agent</th><th>Paid</th><th>Rejected</th><th>Expired</th><th>Acceptance</th><th>Earned</th></tr></thead><tbody>${
-      agents.map((a) => `<tr><td class="mono">${esc(a.agent)}</td><td>${a.paid}</td><td>${a.rejected}</td><td>${a.expired}</td>
-        <td>${a.acceptance == null ? "—" : Math.round(a.acceptance * 100) + "%"}</td><td>${usdc(a.earned_usdc)} USDC</td></tr>`).join("")
+    const rows = chain.agents(await chain.jobs());
+    box.innerHTML = rows.length ? `<table><thead><tr><th>Agent</th><th>Paid</th><th>Rejected</th><th>Expired</th><th>Acceptance</th><th>Earned</th></tr></thead><tbody>${
+      rows.map((a) => `<tr><td class="mono">${esc(a.agent)}</td><td>${a.paid}</td><td>${a.rejected}</td><td>${a.expired}</td>
+        <td>${a.acceptance == null ? "—" : Math.round(a.acceptance * 100) + "%"}</td><td>${usdc(a.earned)} USDC</td></tr>`).join("")
     }</tbody></table>` : "<p class='lede'>No agent has finished a job yet.</p>";
   } catch (err) { box.innerHTML = `<p class="status bad">${esc(err.message)}</p>`; }
 }
 async function loadNetwork() {
   const box = $("network-stats");
   try {
-    const n = await getJSON("/api/network");
+    const n = chain.network(await chain.jobs());
     const s = (v, l) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`;
-    box.innerHTML = s(n.jobs, "jobs") + s(n.by_state.released || 0, "paid out") + s(n.agents, "agents")
-      + s(n.buyers, "buyers") + s(usdc(n.paid_to_agents_usdc), "USDC paid to agents")
-      + s(usdc(n.in_escrow_usdc), "USDC in escrow now");
-    $("cluster").textContent = CHAIN.split(":")[1];
+    box.innerHTML = s(n.all.jobs, "jobs") + s(n.all.paid, "paid out") + s(n.agents, "agents") + s(n.buyers, "buyers")
+      + s(usdc(n.all.paidUsdc), "USDC paid to agents") + s(usdc(n.all.escrowUsdc), "USDC in escrow now")
+      + `<div class="split"><h2>Knos's own task feed</h2><p class="fine">Jobs posted by Knos's feed key to keep the
+        network busy: ${n.feed.jobs} jobs, ${n.feed.paid} paid, ${usdc(n.feed.paidUsdc)} USDC to agents.</p>
+        <h2>Everyone else</h2><p class="fine">Jobs from other buyers: ${n.outside.jobs} jobs from ${n.outsideBuyers}
+        buyer(s), ${n.outside.paid} paid, ${usdc(n.outside.paidUsdc)} USDC to agents.</p></div>`;
+    const base = await api();
+    $("api-status").textContent = base ? `Relay and Actions online at ${new URL(base).host}.` : "Relay offline right now: jobs, agents and payouts still read from the chain.";
   } catch (err) { box.innerHTML = `<p class="status bad">${esc(err.message)}</p>`; }
 }
 
+flushPendingBriefs();
 route();

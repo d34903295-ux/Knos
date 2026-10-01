@@ -193,19 +193,19 @@ def register(app: typer.Typer, out, Stop) -> None:
         got = mem.preferences()
         out.print("\n".join(f"- {p}" for p in got) if got else "No saved preferences yet.", markup=False)
 
-    @jobs.command("perks")
-    def perks_cmd() -> None:
-        """Sibyl Pro paid by Knos: a month for every $12 of fees on your released jobs (checkout simulated)."""
-        from . import perks
+    @jobs.command("sibyl")
+    def sibyl_cmd() -> None:
+        """Sibyl Pro, bought by Knos: yours for the 30 days after each job of yours is accepted (5% fee paid)."""
+        from .. import sibyl_pro
         ledger, relay, key = _ctx()
-        js = ledger.jobs()
-        got = perks.claim(js, str(key.pubkey()))
-        st = perks.status(js, str(key.pubkey()))
-        out.print(f"fees paid {st['fees_paid_usdc']:.2f} USDC · Sibyl Pro months earned {st['months_earned']}, "
-                  f"granted {st['months_granted']} · next at {st['next_month_at_usdc']:.2f} USDC", markup=False)
-        if got:
-            out.print(f"[green]✓[/green] {len(got)} month(s) of Sibyl Pro granted (SIMULATED: Sibyl's partner checkout "
-                      "is not live yet; no money moved)")
+        me = str(key.pubkey())
+        sibyl_pro.from_chain(ledger.jobs(), me, ledger.network)
+        got = sibyl_pro.active(me, ledger.network)
+        if not got:
+            out.print("No Sibyl Pro yet: it comes with your next accepted job (or Knos Pro).")
+            return
+        label = " (SIMULATED on testnets: no money moved)" if got.simulated else ""
+        out.print(f"Sibyl Pro until {got.until[:10]}, paid by Knos from your {got.source}{label}.", markup=False)
 
     @jobs.command("relay")
     def relay_cmd(port: int = typer.Option(8787, "--port"), host: str = typer.Option("127.0.0.1", "--host"),
@@ -260,7 +260,10 @@ def register(app: typer.Typer, out, Stop) -> None:
              model: str = typer.Option(None, "--model", help="provider:model on your own key, e.g. groq:llama-3.3-70b-versatile"),
              kinds: str = typer.Option(",".join(("python", "csv", "json", "copy", "text")), "--kinds"),
              min_price: float = typer.Option(0.0, "--min-price", help="skip jobs paying less (USDC)"),
-             every: float = typer.Option(5.0, "--every", help="seconds between polls")) -> None:
+             every: float = typer.Option(5.0, "--every", help="seconds between polls"),
+             tempo: bool = typer.Option(False, "--tempo", help="also take jobs on the Tempo escrow (Moderato testnet)"),
+             memory: bool = typer.Option(True, "--memory/--no-memory",
+                                         help="remember your deliveries and recall similar past jobs (Sibyl)")) -> None:
         """Be hired: take open jobs, do them with your own model key, deliver; paid when the buyer accepts."""
         from . import models, net
         from .worker import Worker
@@ -269,10 +272,13 @@ def register(app: typer.Typer, out, Stop) -> None:
         except LookupError as why:
             raise Stop(str(why)) from None
         ledger, relay, key = _ctx()
+        venue = _tempo_venue(relay) if tempo else None
         w = Worker(ledger, relay, key, m, kinds=tuple(k for k in kinds.split(",") if k),
                    min_price=round(min_price * UNITS), log=lambda s: out.print(s, markup=False),
-                   on_delivered=lambda jid, title: net.remember_job(jid, "worker", title))
-        out.print(f"working as {key.pubkey()} on {net.cluster()}  (Ctrl-C to stop)", markup=False)
+                   on_delivered=lambda jid, title: net.remember_job(jid, "worker", title), tempo=venue,
+                   memory=_worker_memory(str(key.pubkey())) if memory else None)
+        where = net.cluster() + (f" and Tempo Moderato as {venue.key.address}" if venue else "")
+        out.print(f"working as {key.pubkey()} on {where}  (Ctrl-C to stop)", markup=False)
         if once:
             w.once()
             return
@@ -280,3 +286,35 @@ def register(app: typer.Typer, out, Stop) -> None:
             w.run(every)
         except KeyboardInterrupt:
             out.print("Stopped.")
+
+    def _worker_memory(wallet: str):
+        """This worker's own Sibyl store: what it delivered, recalled into similar jobs (knos.recall)."""
+        from sibyl_memory_client import MemoryClient
+
+        from .. import paths
+        from .buyer_memory import tenant_for
+        d = paths.home() / "jobs"
+        d.mkdir(parents=True, exist_ok=True)
+        return MemoryClient.local(str(d / f"worker-{tenant_for(wallet)}.db"), tenant_id=tenant_for(wallet))
+
+    def _tempo_venue(relay):
+        """A worker key for Tempo (KNOS_TEMPO_KEY, or one kept owner-only in ~/.knos/jobs), with gas from Tempo's own
+        testnet faucet when it has none. Moderato only: mainnet stays locked."""
+        import os
+
+        from eth_account import Account
+
+        from .. import keystore, paths
+        from .tempo import PATH_USD, TempoVenue
+        given = os.environ.get("KNOS_TEMPO_KEY")
+        if given:
+            acct = Account.from_key(given)
+        else:
+            p = paths.home() / "jobs" / "tempo-worker.key"
+            if not p.exists():
+                keystore.write_private(p, Account.create().key.hex())
+            acct = Account.from_key(p.read_text(encoding="utf-8").strip())
+        v = TempoVenue.moderato(relay, acct)
+        if v.escrow.chain.balance(PATH_USD, acct.address) < 100_000:
+            v.escrow.chain.rpc("tempo_fundAddress", [acct.address])
+        return v

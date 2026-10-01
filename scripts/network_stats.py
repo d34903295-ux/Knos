@@ -7,8 +7,7 @@ layout byte for byte (the schema account is recomputed from src/knos/team/schema
 counts are not proof of distinct teams, and the page says so. Devnet and mainnet are reported separately.
 
 Per team: live claims, renewals, members, records; and from the credential's recent history, closes (releases, lost
-races and sweeps together). Licence payments come from scripts/traction.py's chain scan. GitHub numbers come from
-GitHub's public API.
+races and sweeps together). GitHub numbers come from GitHub's public API.
 """
 
 from __future__ import annotations
@@ -143,15 +142,6 @@ def github() -> dict:
         return {"error": f"{type(e).__name__}"}
 
 
-def licences() -> dict:
-    try:
-        import traction  # scripts/traction.py
-        rows = traction.solana_sales(set()) + traction.tempo_sales(set())
-        return {"mainnet_licence_payments": len(rows)}
-    except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}"}
-
-
 def render(data: dict) -> str:
     def row(c):
         if c["error"] and not c["teams"]:
@@ -160,7 +150,6 @@ def render(data: dict) -> str:
                                  ("cluster", "teams", "members", "claims_live", "renewals_live", "records",
                                   "closes_recent")) + "</tr>")
     gh = data["github"]
-    lic = data["licences"]
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Knos network</title>
@@ -184,10 +173,8 @@ with the Knos schema, so counts are not proof of distinct teams. Devnet is a tes
 claims, claims that lost a race, and sweeps of lapsed claims, together. Look-alike credentials whose claim schema is
 not Knos's, byte for byte, are left out
 ({sum(c['rejected_lookalikes'] for c in data['clusters'])} this run).</p>
-<h2>Licences and the project</h2>
-<p>Mainnet licence payments (Solana and Tempo, with a <code>knos:</code> memo):
-{lic.get('mainnet_licence_payments', 'not readable now')}.
-GitHub: {gh.get('stars', '?')} stars, {gh.get('forks', '?')} forks, {gh.get('contributors', '?')} contributors,
+<h2>The project</h2>
+<p>GitHub: {gh.get('stars', '?')} stars, {gh.get('forks', '?')} forks, {gh.get('contributors', '?')} contributors,
 {gh.get('open_issues', '?')} open issues and pull requests.</p>
 </main></body></html>
 """
@@ -196,7 +183,7 @@ GitHub: {gh.get('stars', '?')} stars, {gh.get('forks', '?')} forks, {gh.get('con
 def main() -> int:
     data = {"updated": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
             "clusters": [cluster_stats(n, u) for n, u in CLUSTERS.items()],
-            "github": github(), "licences": licences()}
+            "github": github()}
     out = ROOT / "docs" / "network"
     out.mkdir(parents=True, exist_ok=True)
     (out / "data.json").write_text(json.dumps(data, indent=1), encoding="utf-8")

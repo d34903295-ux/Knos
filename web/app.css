@@ -52,3 +52,4 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: upp
 pre { white-space: pre-wrap; word-break: break-word; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
 .foot { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; padding: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
+.stats .split { grid-column: 1 / -1; } .split h2 { margin-top: 10px; }

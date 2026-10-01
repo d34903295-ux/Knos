@@ -122,7 +122,6 @@ def test_5_claimed_work_is_annotated_never_hidden(repo) -> None:
 def test_6_no_wrong_repo_fallback(repo, tmp_path, monkeypatch) -> None:
     from knos import mcp
 
-    paths.remember_pointed(repo)
     elsewhere = tmp_path / "not-a-repo"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)

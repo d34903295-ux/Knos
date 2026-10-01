@@ -63,28 +63,6 @@ with Claims(repo=".", who="my-agent", session="run-42") as claims:
 `take` is the same single transaction the MCP server uses: of many callers reaching for overlapping paths at once,
 exactly one wins.
 
-## 4. The team server (Knos Team)
-
-`knos serve` is a small HTTP JSON API that the customer hosts. Each machine joins with
-`knos init --remote <url> --token <seat token>`. From then on, that machine's claims are decided on the server by the
-same code: one transaction, exactly one winner. They are keyed by the repo's first commit, so two clones of one repo
-on two machines share one list. An agent on the wire is its host plus `session@machine`.
-
-| route | what |
-|---|---|
-| `GET /v1/whoami` | the seat the token belongs to |
-| `GET /v1/claims/live?repo=` / `POST /v1/claims/take` / `POST /v1/claims/release` | the claim list |
-| `POST /v1/claims/blocked`, `GET /v1/claims/events?repo=` | refusals and history (for `knos worth` / `board`) |
-| `POST /v1/notes`, `GET /v1/notes?repo=&q=` | notes shared across the team |
-| `POST /v1/budget/report` | a machine's spend for day, week and month; returns the pooled total against the team cap |
-
-How requests are handled:
-- **Auth:** every request carries `Authorization: Bearer <seat token>`. Tokens are stored only as SHA-256.
-- **Host header:** a request whose Host is not one the server answers to is refused (421).
-- **Limits:** bodies over 64 KB get a 413.
-- **Errors:** every error comes back as a JSON object.
-- **Fail open:** a machine whose server does not answer within 2 s allows the edit and logs one line.
-
 ## Data on disk (all under `~/.knos`, never in your repo)
 
 | file | what |
@@ -94,8 +72,9 @@ How requests are handled:
 | `<repo>-<hash>/read.db` | what has been read already, so nothing is written twice |
 | `backups/` | `knos init` and `knos reset` copies |
 | `meter.db`, `budget.json`, `licence.json`, `agents.json`, `agentpay.db`, `wallets/` | Knos Pro (`wallets/` holds keys, owner-only) |
+| `sibyl-pro.json` | the Sibyl Pro Knos bought for this machine's paying wallets (simulated on testnets) |
 
-## 5. The team registry on Solana
+## 4. The team registry on Solana
 
 A team is one [Solana Attestation Service](https://github.com/solana-foundation/solana-attestation-service) credential
 (program `22zoJMtdu4tQc2PzL74ZUT7FrwgB1Udec8DdW4yw4BdG`) named `knos-<16 hex>`. Its authority is the owner key and its

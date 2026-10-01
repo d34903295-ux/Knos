@@ -60,22 +60,11 @@ def remaining(url: str, account: str, key_id: str, token: str) -> tuple[int, int
     return int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:64], "big")
 
 
-def key_info(url: str, account: str, key_id: str) -> dict:
-    from pytempo.contracts._encode import encode_calldata
-    from pytempo.contracts.abis import ACCOUNT_KEYCHAIN_ABI
-    data = encode_calldata(ACCOUNT_KEYCHAIN_ABI, "getKey", [account, key_id])
-    raw = bytes.fromhex(rpc(url, "eth_call", [{"to": KEYCHAIN, "data": data}, "latest"])[2:])
-    w = [raw[i:i + 32] for i in range(0, min(len(raw), 160), 32)]
-    return {"expiry": int.from_bytes(w[2], "big"), "enforce_limits": bool(int.from_bytes(w[3], "big")),
-            "revoked": bool(int.from_bytes(w[4], "big"))} if len(w) == 5 else {}
-
-
 @dataclass
 class Sent:
     tx: str
     ok: bool
     status: str
-    fee_units: int = 0
 
 
 def _send(url: str, chain_id: int, calls: tuple, sign, sender: str, fee_token: str, key_id: str | None = None,
@@ -137,19 +126,6 @@ def revoke(url: str, chain_id: int, root_key: str, agent: str, fee_token: str) -
     root = Account.from_key(root_key).address
     return _send(url, chain_id, (AccountKeychain.revoke_key(key_id=agent),), lambda tx: tx.sign(root_key), root,
                  fee_token)
-
-
-def agent_pay(url: str, chain_id: int, agent_key: str, root: str, token: str, to: str, amount_units: int,
-              memo: bytes = b"", estimate: bool = True) -> Sent:
-    """A payment signed by the agent's access key on behalf of the budget account: what Tempo limits."""
-    from eth_account import Account
-    from pytempo import Call
-    from pytempo.contracts._encode import encode_calldata
-    from pytempo.contracts.abis import TIP20_ABI
-    agent = Account.from_key(agent_key).address
-    data = encode_calldata(TIP20_ABI, "transferWithMemo", [to, amount_units, memo.ljust(32, b"\0")[:32]])
-    return _send(url, chain_id, (Call.create(to=token, data=data),), lambda tx: tx.sign_access_key(agent_key, root),
-                 root, token, key_id=agent, estimate=estimate)
 
 
 def balance(url: str, token: str, who: str) -> int:

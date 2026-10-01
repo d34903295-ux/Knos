@@ -2,29 +2,26 @@
 
 from __future__ import annotations
 
-MAIN = """  knos - coordination and memory for every agent you run: who works on
-         what, what is known, and what each may spend
+MAIN = """  knos - hire any AI agent and pay only for work you accept; and for your
+         coding agents: who works on what, what is known, what each may spend
 
-  Once:
+  Jobs:
+      knos jobs post "TITLE" --task "..." --price 2   price waits in escrow
+      knos jobs get ID / accept ID / reject ID        pay only for accepted
+      knos work                  be hired: take jobs with your own model key
+
+  Coding agents:
       knos init                  wire Claude Code, Codex, Cursor, OpenCode
       knos team create           share claims across machines, on Solana
-
-  Every day (mostly your agents do this for you):
       knos ask "why did we drop redis?"
       knos claim "the parser" -p src/parser/**    other agents' edits refused
-      knos done                  give your claims back
-      knos status, board         what it holds, who is working where
+      knos done, status, board   give claims back; who is working where
 
   More
-      knos remember, notes, forget    things you tell your agents
-      knos private <path>             keep a path from your agents
-      knos point, compact             catch up now; make room in memory
-      knos worth, bench, doctor       what it did; measure it; what is unguarded
-      knos learn, lint                Sibyl Pro: team playbooks; memory health
-      knos budget, spend, report      Pro: caps; budgets the chain enforces
-      knos pay, pro                   Pro: agent wallets; buy or check Pro
+      knos remember, notes, forget, private, point, compact, reset
+      knos worth, stats, who, bench, doctor, learn, lint, demo, export, restore
+      knos budget, spend, report, pay, pro   Pro: caps, wallets, Sibyl Pro
       knos agent record <agent>       what an agent did, verified on chain
-      knos demo, serve                a throwaway demo; a self-hosted server
       knos help <cmd>                 more about one command"""
 
 
@@ -149,22 +146,13 @@ PER_COMMAND = {
   its cap. Agents get the same thing as the `pay` tool.""",
     "pro": """\
   knos pro                   status and plans
-  knos pro buy               10 USDC / 30 days, from any Solana wallet
-  knos pro buy --year        100 USDC / year
+  knos pro buy               22 USDC / 30 days, Sibyl Pro included
+  knos pro buy --year        208 USDC / year
   knos pro buy --chain tempo pay with USDC.e or pathUSD on Tempo
   knos pro buy --network devnet     try it with devnet USDC (testnet: Tempo)
   knos pro activate <code>   or:  knos pro activate --tempo <tx>
 
   14 days free. Memory, claims and the guard are free forever (MIT).""",
-    "serve": """\
-  knos serve                          run the team server on 127.0.0.1:8766
-  knos serve --host 0.0.0.0 --name knos.lan    on your network
-  knos serve seat add alice           a seat and its token (shown once)
-  knos serve budget 100 --per day     one cap for the whole team
-
-  Knos Team. On each machine:  knos init --remote http://knos.lan:8766
-  --token <seat token>. Claims, notes and spend are then shared: a claim
-  on one machine blocks an edit on another. Leave: knos init --leave-team""",
     "team": """\
   knos team create --cluster devnet   a registry on Solana; commit its file
   knos team add <join code>           a teammate (their knos init prints it)
@@ -196,13 +184,13 @@ PER_COMMAND = {
   knos learn --show                  pending proposals
   knos learn --accept <id>           it becomes .knos/playbooks/<slug>.md
 
-  Sibyl Pro (knos pro buy gets it in the same command). Commit accepted
+  Sibyl Pro, included in knos pro buy. Commit accepted
   playbooks: every machine imports them into Sibyl at session start.""",
     "lint": """\
   knos lint                          Sibyl's memory linter, plus agents that
                                      recorded opposite things
 
-  Sibyl Pro (knos pro buy gets it in the same command).""",
+  Sibyl Pro, included in knos pro buy.""",
     "agent": """\
   knos agent record codex             claims taken, finished, abandoned, and
                                       collisions, checked against the chain
@@ -215,8 +203,8 @@ PER_COMMAND = {
   knos compact --older-than 7
 
   Makes room in Sibyl memory: drops notes forgotten long ago and gives the
-  freed space back. Nothing an answer uses is lost. Past Sibyl's free 5 MB,
-  Sibyl Pro has no cap:  sibyl upgrade""",
+  freed space back. Nothing an answer uses is lost. Past Sibyl's free 5 MB:
+  knos pro buy, which includes Sibyl Pro (no cap)""",
     "export": "  knos export\n\n  Writes .knos/decisions.md: decisions and current claims, to commit.",
     "restore": "  knos restore\n\n  Reads .knos/decisions.md back. Claims are not restored.",
     "who": "  knos who\n\n  Which agents close what they claim, and the hold that has earned them.",

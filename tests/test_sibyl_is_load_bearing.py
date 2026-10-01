@@ -28,7 +28,7 @@ from knos import answer, paths, private, refresh
 from knos.claims import Claims
 from knos.cli import main
 from knos.identity import Agent
-from knos.memory import TOPIC, Fact, Memory, StoreGone
+from knos.memory import INTERNAL, TOPIC, Fact, Memory, StoreGone
 
 CLAUDE = Agent(host="claude", session="aaaa1111bbbb")
 CURSOR = Agent(host="cursor", session="cccc2222dddd")
@@ -147,7 +147,7 @@ def test_what_the_work_is_about_is_overwritten_not_accumulated(knos_home, repo):
         before = len(mem.journal())
         mem.set_focus({"topic": "redis"})
         mem.set_focus({"topic": "auth"})
-        focus = json.dumps(mem.focus(), default=str)
+        focus = json.dumps(mem.client.get_state(INTERNAL + "focus"), default=str)
         assert len(mem.journal()) == before
 
     assert "auth" in focus
@@ -288,7 +288,7 @@ def test_status_reports_the_cap_and_warns_before_it_is_reached(knos_home, repo, 
     assert main(["status"]) == 0
     said = capsys.readouterr().out
     assert "4.2 MB of Sibyl's 5 MB free tier" in said, said
-    assert "nearly full: knos compact, or sibyl upgrade" in said, said
+    assert "nearly full: knos compact, or knos pro buy (Sibyl Pro, uncapped, is included)" in said, said
 
 
 def test_status_does_not_cry_wolf_below_eighty_percent(knos_home, repo, monkeypatch, capsys):
@@ -350,7 +350,7 @@ def test_a_full_store_refuses_a_note_loudly(knos_home, repo, monkeypatch, capsys
         assert main(["remember", "we chose sqlite over redis", "--about", "storage"]) == 1
         said = capsys.readouterr().out
         assert "Not remembered" in said and "nothing was written" in said, said
-        assert "knos compact" in said and "sibyl upgrade" in said, said
+        assert "knos compact" in said and "knos pro buy" in said and "Sibyl Pro" in said, said
 
     with Memory(repo) as mem:
         assert not mem.remembered("storage"), "a refused note was written anyway"

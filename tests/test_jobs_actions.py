@@ -17,8 +17,8 @@ from solders.transaction import VersionedTransaction  # noqa: E402
 
 from knos.jobs import market  # noqa: E402
 from knos.jobs.actions import Actions, serve  # noqa: E402
-from knos.jobs.ledger import LocalLedger  # noqa: E402
-from knos.jobs.localsvm import Escrow  # noqa: E402
+from _jobharness import LocalLedger  # noqa: E402
+from _jobharness import Escrow  # noqa: E402
 from knos.jobs.relay import DirRelay  # noqa: E402
 
 USDC = 1_000_000

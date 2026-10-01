@@ -163,3 +163,59 @@ class Escrow:
         zero = "0x" + "0" * 40
         return TempoJob(job_id, b, None if w == zero else w, amount, deadline, STATES[state],
                         None if result == bytes(32) else result)
+
+
+ESCROW_MODERATO = "0x888d39bB186cC718481E98080Bdb5fd8Df27Ab49"
+DEPLOY_BLOCK_MODERATO = 37_671_589
+
+
+def _posted_topic() -> str:
+    from eth_utils import keccak
+    return "0x" + keccak(text="Posted(bytes32,address,uint256)").hex()
+
+
+class TempoVenue:
+    """Knos jobs on the Tempo escrow, for the reference worker: open jobs from the contract's Posted logs, briefs from
+    the relay (a Tempo job id is the sha256 of its brief, so the relay cannot swap it), claim and deliver on chain.
+    The deliverable is sealed to the brief's `seal_to` key (the web app's passkey buyers set one); a brief without
+    one is skipped, since an EVM address is not an encryption key."""
+
+    def __init__(self, escrow: Escrow, relay, key, from_block: int = DEPLOY_BLOCK_MODERATO):
+        self.escrow, self.relay, self.key, self.from_block = escrow, relay, key, from_block
+
+    @classmethod
+    def moderato(cls, relay, key) -> "TempoVenue":
+        return cls(Escrow(Chain(MODERATO), ESCROW_MODERATO, PATH_USD), relay, key)
+
+    def open(self) -> list[tuple[TempoJob, object]]:
+        from .market import Brief
+        logs = self.escrow.chain.rpc("eth_getLogs", [{"address": self.escrow.address, "fromBlock": hex(self.from_block),
+                                                      "toBlock": "latest", "topics": [_posted_topic()]}]) or []
+        now = self.escrow.chain.now()
+        out = []
+        for log in logs:
+            jid = bytes.fromhex(log["topics"][1][2:])
+            j = self.escrow.job(jid)
+            if j.state != "open" or j.deadline < now:
+                continue
+            try:
+                brief = Brief.decode(self.relay.get_brief(jid.hex()))
+            except Exception:  # noqa: BLE001 - a brief this relay does not hold, or does not verify, is skipped
+                continue
+            if brief.seal_to:
+                out.append((j, brief))
+        return sorted(out, key=lambda x: x[0].deadline)
+
+    def claim(self, j: TempoJob) -> bool:
+        try:
+            self.escrow.claim(self.key, j.id)
+            return True
+        except TempoError:
+            return False
+
+    def deliver(self, j: TempoJob, text: str, seal_to: str) -> str:
+        from .market import seal_for
+        sealed = seal_for(None, text.encode(), seal_to)
+        h = self.relay.put_delivery(sealed)
+        self.escrow.deliver(self.key, j.id, bytes.fromhex(h))
+        return h

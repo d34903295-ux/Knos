@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 
 import pytest
 
@@ -19,13 +18,10 @@ def _problems(repo):
         errors.nothing_indexed(),
         errors.no_such_folder("nope"),
         errors.nothing_found(repo),
-        errors.memory_full(repo),
-        errors.not_a_repo(str(repo)),
-        errors.code_engine_missing(),
     ]
 
 
-@pytest.mark.parametrize("kind", range(6))
+@pytest.mark.parametrize("kind", range(3))
 def test_every_message_ends_with_a_command_or_a_link(knos_home, repo, kind):
     problem = _problems(repo)[kind]
     # Either a knos command, or the one-line install of the thing that is
@@ -33,7 +29,7 @@ def test_every_message_ends_with_a_command_or_a_link(knos_home, repo, kind):
     assert NEXT_COMMAND.search(problem.fix) or "install" in problem.fix
 
 
-@pytest.mark.parametrize("kind", range(6))
+@pytest.mark.parametrize("kind", range(3))
 def test_no_message_reads_like_a_crash(knos_home, repo, kind):
     text = str(_problems(repo)[kind]).lower()
     for word in ("traceback", "exception", "error:", "failed", "fatal", ".py", "none"):

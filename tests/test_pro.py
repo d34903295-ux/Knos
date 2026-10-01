@@ -233,7 +233,7 @@ def test_team_needs_three_seats_and_prices_by_seat(repo, capsys, monkeypatch) ->
 
     assert main(["pro", "buy", "--team", "2", "--no-wait"]) == 1
     assert main(["pro", "buy", "--team", "3", "--no-wait", "--network", "devnet"]) == 0
-    assert "amount=60" in capsys.readouterr().out
+    assert "amount=96" in capsys.readouterr().out
 
 
 # ---- the cap, at the guard ------------------------------------------------------------------

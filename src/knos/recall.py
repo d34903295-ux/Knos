@@ -1,9 +1,11 @@
 """No-LLM conversational recall on top of the public sibyl_memory_client API.
 
-Two entry points, meant to be ported into product code:
-
     index(client, sessions)            store past chat sessions as Sibyl entities
+    index_turn(client, ...)            store one turn (Knos's session reader: answer.point)
     retrieve(client, question, k=10)   -> list of entity bodies (dicts), best first
+
+Used by the MCP `search` tool, `knos.sdk.Knos.recall`, and the reference worker's memory of its own past jobs.
+LongMemEval_s, held-out 370 questions: 96.8% top-10 (docs/BENCH.md).
 
 `sessions` is an iterable of dicts {"id": str, "date": str, "turns": [{"role", "content"}, ...]}.
 Every returned body has "session", "date", "text".
@@ -153,6 +155,20 @@ def index(client, sessions) -> int:
     return n
 
 
+def index_turn(client, session: str, n: int, date: str, role: str, text: str, where: str = "") -> int:
+    """Store one thing said in a session (what Knos's session reader yields) as a round, plus its preference sentences
+    when a person said it. Upserted by name, so reading the same turn again writes nothing new."""
+    body = {"session": session, "date": date, "text": f"[{date}] {role}: {text}", "where": where}
+    client.set_entity("round", f"{session}#{n}", body)
+    wrote = 1
+    if role == "user":
+        p = pref_text(text)
+        if p:
+            client.set_entity("pref", f"{session}#{n}", {**body, "text": f"[{date}] user: {p}"})
+            wrote += 1
+    return wrote
+
+
 # ----------------------------------------------------------------------------- retrieve
 def _body(row):
     b = row.get("body") if isinstance(row, dict) else None
@@ -297,7 +313,8 @@ def retrieve(client, question: str, k: int = 10) -> list[dict]:
             if t in seen:
                 continue
             seen.add(t)
-            out.append({"session": body.get("session"), "date": body.get("date"), "text": t})
+            out.append({"session": body.get("session"), "date": body.get("date"), "text": t,
+                        "where": body.get("where", "")})
             taken += 1
             if taken >= per or len(out) >= k:
                 break
@@ -311,5 +328,6 @@ def retrieve(client, question: str, k: int = 10) -> list[dict]:
                     break
                 if body.get("text", "") not in have:
                     have.add(body.get("text", ""))
-                    out.append({"session": body.get("session"), "date": body.get("date"), "text": body.get("text", "")})
+                    out.append({"session": body.get("session"), "date": body.get("date"), "text": body.get("text", ""),
+                                "where": body.get("where", "")})
     return out[:k]

@@ -10,7 +10,6 @@ Every result says where it ran. Numbers from the in-process runtime and anvil me
 
 from __future__ import annotations
 
-import os
 import shutil
 import socket
 import statistics

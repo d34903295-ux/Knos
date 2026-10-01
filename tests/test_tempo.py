@@ -32,8 +32,6 @@ def test_the_event_topic_is_the_keccak_of_the_spec_signature() -> None:
         pytest.skip("eth_utils not installed")
     assert "0x" + keccak(text="TransferWithMemo(address,address,uint256,bytes32)").hex() == \
         tempo.TOPIC_TRANSFER_WITH_MEMO
-    assert "0x" + keccak(text="transferWithMemo(address,uint256,bytes32)").hex()[:8] == \
-        tempo.SELECTOR_TRANSFER_WITH_MEMO
 
 
 def test_memo_packs_into_32_bytes_and_reads_back() -> None:
@@ -90,7 +88,7 @@ def test_activate_with_a_tempo_transaction(repo, capsys, monkeypatch) -> None:
     monkeypatch.setattr(tempo, "find_payment", lambda *a, **k: None)
     assert main(["pro", "buy", "--chain", "tempo", "--network", "testnet", "--no-wait"]) == 0
     pending = json.loads((licence.licence_path().parent / "pending.json").read_text())
-    good = _receipt(memo=pending["ref"])
+    good = _receipt(amount=pending["amount"], memo=pending["ref"])
     monkeypatch.setattr(tempo, "rpc", lambda n, m, p, timeout=20.0: good if p == ["0xpaid"] else None)
     assert main(["pro", "activate", "--tempo", "0xpaid"]) == 0
     lic = licence.read()

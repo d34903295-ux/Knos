@@ -11,8 +11,8 @@ import pytest
 pytest.importorskip("solders.litesvm")
 
 from knos.jobs import api, market, models, net, stats  # noqa: E402
-from knos.jobs.ledger import LocalLedger  # noqa: E402
-from knos.jobs.localsvm import Escrow  # noqa: E402
+from _jobharness import LocalLedger  # noqa: E402
+from _jobharness import Escrow  # noqa: E402
 from knos.jobs.relay import DirRelay  # noqa: E402
 from knos.jobs.worker import Worker  # noqa: E402
 

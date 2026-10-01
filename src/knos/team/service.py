@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import json
 import secrets
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -20,7 +19,7 @@ from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
 
 from .. import keystore
-from . import config, protocol, registry, rpc, sas, schemas, words
+from . import config, protocol, registry, rpc, sas, words
 
 FAUCETS = [
     "https://faucet.solana.com (devnet, sign in with GitHub)",
@@ -53,11 +52,6 @@ def fingerprint(key: Pubkey) -> str:
 
 
 # ---- the owner key -------------------------------------------------------------------------------------------------
-
-@dataclass
-class Owner:
-    key: Keypair
-
 
 def unlock_owner(cluster: str, ask: Callable[[Path, str], str] | None = None) -> Keypair:
     p = config.owner_keystore_path()
@@ -287,7 +281,3 @@ def key_import(src: Path, code: str) -> Pubkey:
 def is_member(tf: config.TeamFile, key: Pubkey) -> bool:
     return key in registry.signers(tf.url, tf.credential)
 
-
-def schema_ok(tf: config.TeamFile) -> bool:
-    _, raw = rpc.account_data(tf.url, tf.schemas["claim"])
-    return raw == schemas.schema_account_bytes(tf.credential, schemas.CLAIM)

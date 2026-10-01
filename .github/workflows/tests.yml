@@ -39,6 +39,19 @@ jobs:
           test $(( $(date +%s) - start )) -le 30
           knos init --undo --hosts cursor
 
+  # Nothing unused ships: every module is reached from an entry point, and vulture finds no unused code beyond the
+  # framework-called names listed (with reasons) in scripts/vulture_whitelist.py.
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . vulture==2.14
+      - run: python scripts/deadcode.py
+      - run: vulture src/knos scripts --min-confidence 60
+
   # The team registry against the real programs: a local validator with the devnet-deployed Solana Attestation Service
   # and Lighthouse cloned into it (scripts/devchain.sh). The claim protocol's property test runs 200 rounds here.
   chain:
@@ -55,7 +68,7 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - run: bash scripts/devchain.sh start
-      - run: pytest -q tests/test_sas.py tests/test_team_protocol.py tests/test_team_two_homes.py tests/test_team_records.py tests/test_chain_budgets.py tests/test_bench_chain.py tests/test_network_stats.py tests/test_bundle.py tests/test_team_property.py
+      - run: pytest -q tests/test_sas.py tests/test_team_protocol.py tests/test_team_two_homes.py tests/test_team_records.py tests/test_chain_budgets.py tests/test_bench_chain.py tests/test_network_stats.py tests/test_team_property.py
         env:
           KNOSTEST_PROPERTY_N: "200"
       - uses: actions/setup-node@v4

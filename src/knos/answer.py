@@ -337,6 +337,12 @@ def point(
                 break
             if got == "known":
                 continue
+            try:
+                from . import recall
+                recall.index_turn(mem.client, turn.session, counts["sessions"], turn.when[:10],
+                                  "user" if turn.role == "user" else "assistant", _trim(turn.text), turn.where)
+            except Exception:  # recall is a second index over the same turns: never stop the read for it
+                pass
             counts["sessions"] += 1
             if counts["sessions"] % 100 == 0:
                 say(f"{counts['sessions']} things said in past sessions")
@@ -561,45 +567,9 @@ def _withdraw(mem: Memory, text: str, where: str) -> None:
         pass
 
 
-def same_subject(topic: str, question: str) -> bool:
-    """Whether a claim and a question are about the same thing.
-
-    Shared word stems, not shared substrings. Substrings made a claim on a
-    short word warn about half the repo: "guard" fired on "safeguarding".
-    Bare word overlap fixed that but missed the obvious, because a claim on
-    "parser" said nothing about "parsing".
-    """
-    claimed = _subject_stems(topic)
-    asked = _subject_stems(question)
-    return bool(claimed) and bool(claimed & asked)
-
-
 # What joins the parts of an identifier or a path. Terms arrive lowercased
 # and alphanumeric-or-punctuation, so everything else is a separator.
 _JOINED = re.compile(r"[^a-z0-9]+")
-
-
-def _subject_stems(text: str) -> set[str]:
-    """Stems for claim matching, with identifiers broken into their parts.
-
-    A claim is typed as prose — "the risk guard" — and the thing it protects
-    is written in code as risk_guard.py. Left whole that is one token and
-    shares no word with the claim, so a claim missed the very file it was
-    made about, and any question phrased in the code's spelling walked past
-    it. Splitting on the punctuation that joins identifiers puts both
-    spellings on the same words.
-
-    Only claim matching reads this. Scoring still uses whole tokens, because
-    a search for risk_guard.py should rank that file above every other file
-    with guard in the name.
-    """
-    stems = set()
-    for word in terms(text):
-        stems.add(stem(word))
-        for part in _JOINED.split(word):
-            if len(part) > 2:
-                stems.add(stem(part))
-    return stems
 
 
 # Enough English to see that parser, parsers, parsing and parsed are one

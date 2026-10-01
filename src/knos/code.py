@@ -13,7 +13,6 @@ process per query, and nothing left running between commands.
 from __future__ import annotations
 
 import functools
-import json
 import os
 import re
 import shutil
@@ -21,7 +20,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from . import builtin_reader
 
