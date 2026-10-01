@@ -256,15 +256,20 @@ def register(app: typer.Typer, out, Stop) -> None:
     @jobs.command("serve")
     def serve_cmd(port: int = typer.Option(8788, "--port"), host: str = typer.Option("127.0.0.1", "--host"),
                   web: Path = typer.Option(None, "--web", help="also serve this static web app (default: ./web)"),
-                  relay_dir: Path = typer.Option(None, "--relay-dir", help="also be the relay, storing here")) -> None:
+                  relay_dir: Path = typer.Option(None, "--relay-dir", help="also be the relay, storing here"),
+                  gas_key: Path = typer.Option(None, "--gas-key", help="devnet: answer POST /gas from this keypair "
+                                               "(default KNOS_GAS_KEY_FILE; none = no /gas)")) -> None:
         """Serve Solana Actions (Blinks), the network API, and optionally the web app and a relay, on one port."""
         from . import net, stats
         from .actions import Actions, serve
+        from .gas import Gas, load_key
         ledger, relay, _ = _ctx()
+        gk = load_key(gas_key)
+        gas = Gas(ledger, gk, net.cluster()) if gk is not None else None
         web = web or (Path("web") if Path("web/index.html").exists() else None)
         cap = net.MAINNET_CAP_UNITS if net.cluster() == "mainnet" else None
         srv = serve(Actions(ledger, relay, net.cluster(), cap), host, port, static_dir=web, relay_dir=relay_dir,
-                    extra=stats.api(ledger, relay))
+                    extra=stats.api(ledger, relay), gas=gas)
         out.print(f"Actions on http://{host}:{port}/actions.json  ({net.cluster()}, finality {ledger.commitment})",
                   markup=False)
         out.print(f"Public link:  cloudflared tunnel --url http://{host}:{port}   then share "
