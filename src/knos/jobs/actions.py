@@ -163,7 +163,7 @@ class Actions:
 
 
 def serve(actions: Actions, host: str = "127.0.0.1", port: int = 8788, static_dir=None, relay_dir=None,
-          extra=None):
+          extra=None, gas=None):
     """One server for a public demo: Actions, an optional relay (/briefs, /deliveries), an optional static web app,
     and `extra(path) -> dict | None` for read-only JSON the web app needs."""
     from pathlib import Path
@@ -240,6 +240,16 @@ def serve(actions: Actions, host: str = "127.0.0.1", port: int = 8788, static_di
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n) or b"{}") if 0 < n < 10_000 else {}
                 parts = u.path.strip("/").split("/")
+                if u.path.rstrip("/") == "/gas":
+                    # devnet gas for a passkey wallet's throwaway key (knos.jobs.gas; 503 without --gas-key)
+                    from .gas import GasError
+                    if gas is None:
+                        return self._send(503, {"message": "this server has no gas key"})
+                    ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+                    try:
+                        return self._send(200, gas.top_up(body, ip))
+                    except GasError as why:
+                        return self._send(why.code, {"message": str(why)})
                 if u.path.rstrip("/") == "/api/jobs/post":
                     return self._send(200, actions.post_tx(urllib.parse.parse_qs(u.query), body))
                 if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] in ("accept", "reject"):

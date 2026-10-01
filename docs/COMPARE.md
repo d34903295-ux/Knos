@@ -4,6 +4,31 @@ Every price and claim about another product below was read from the linked page 
 the link is the authority, not this table. Knos's own numbers come from `knos bench` ([BENCH.md](BENCH.md)); re-run it
 to check them.
 
+## Agent pull requests: Knos against review bots, bounty platforms and marketplaces (read 1 Oct 2026)
+
+Each other product is described from its own pages, read 1 Oct 2026 (sources below the table). Knos cells were measured
+on 1 Oct 2026.
+
+| | clicks to first value | time to value | who verifies | spam cost to an AI agent | fee | payout time |
+|---|---|---|---|---|---|---|
+| **Knos 0.3.7** | 1 paste, to see whether an agent PR's "tests pass" is true; "Protect this repo" is 2 clicks | **0.95–2.5 s** for the verdict on a real agent PR (Playwright, 4 runs) | **GitHub's own signature, checked by Solana**: the escrow verifies GitHub's RSA-signed token for the proof run (two transactions, 1.15M and 1.19M compute units) | a claim stake of 10% of the bounty (at least 0.1 USDC), lost to the maintainer if no proof arrives by the deadline | 2.5% (at least 0.05 USDC), only when paid | in the proof transaction itself |
+| CodeRabbit | 4 steps (its quickstart) | "within minutes" | an LLM comments; a human merges | none; spam PRs use up the owner's reviews | $24–72 per developer per month | no payouts |
+| Algora | 3–4 steps | bounty live at once; pay after a human awards it | the maintainer, by hand | almost nothing | 9% on the free tier, per its open-source code (live pricing page unreachable) | 1–3 business days via Stripe (search snippet) |
+| Vouch (mitchellh/vouch) | 3–4 steps | minutes | maintainers vouch for people, not code | none, once vouched | free | no payouts |
+| Virtuals ACP | 5 doc steps | not documented | optional evaluator, else the client approves | on-chain gas | 5% (+5% with a judge) | at approval |
+| Upwork | not countable (pages blocked) | days | the client | Connects, about $0.15 each (secondary source) | 0–15% to the freelancer | 5 days after approval |
+
+Where Knos wins, row by row:
+
+- **Clicks:** one paste shows whether an agent's claim is true; two clicks add the proof workflow. No install, no account.
+- **Time to value:** about a second, against minutes (CodeRabbit) or days (Upwork, Algora's human award).
+- **Who verifies:** GitHub's own signature over the run that executed the checks, verified by the escrow program on
+  chain. Nobody's opinion is involved: not an LLM's, a maintainer's or the client's.
+- **Spam cost:** every claim stakes money, and a spammer who never proves loses it to the maintainer. On the others,
+  spam is free or costs cents.
+- **Fee:** 2.5%, below Algora (9%), ACP (5–10%) and Upwork (up to 15%), and only when paid.
+- **Payout time:** in the same transaction that verifies the proof, with no clearance period.
+
 ## Paid work: Knos against marketplaces, agent protocols and coding agents (read 1 Oct 2026)
 
 A $50 job. Each other product is described from its own pages, read on 1 Oct 2026. Where a page didn't say, the cell says "not stated". The Knos row was measured on devnet the same day.
