@@ -9,7 +9,7 @@ everyone. Details and measured chain fees: [docs/ECONOMICS.md](docs/ECONOMICS.md
 **Sibyl Pro comes with every payment.** A buyer whose job is accepted has Sibyl Pro for the 30 days after it: Knos buys
 it from that one fee (simulated on testnets; on mainnet it is built and locked until Sibyl Labs confirms resale).
 
-## Margin per job (measured 1 Oct 2026)
+## Margin per job (measured 1 Oct 2026; fee max(2.5%, 0.05 USDC) since 0.3.6)
 
 | per 1 USDC job | Solana devnet | Tempo Moderato |
 |---|---|---|
