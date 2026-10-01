@@ -91,8 +91,9 @@ def wait(url: str, signature: str, within: float = 30.0, timeout: float = 10.0, 
     good = ("finalized",) if commitment == "finalized" else ("confirmed", "finalized")
     while time.monotonic() < end:
         got = call(url, "getSignatureStatuses", [[signature]], timeout)["value"][0]
-        if got and got.get("err"):
-            raise RpcError(f"transaction failed: {got['err']}", got)
+        # A failure is reported only once it reaches `commitment`: a caller that lost a race (the claim protocol) then
+        # reads the winner at that same commitment, and must find it there. Raising at `processed` made it read too
+        # early, see no winner, and fail open.
         if got and got.get("confirmationStatus") in good:
             if got.get("err"):
                 raise RpcError(f"transaction failed: {got['err']}", got)
