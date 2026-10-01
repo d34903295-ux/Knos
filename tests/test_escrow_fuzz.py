@@ -58,7 +58,7 @@ class Model:
         return sum(j["amount"] + j["stake"] for j in self.jobs.values() if j["state"] in LIVE)
 
     def pay(self, j: dict, payee_tok) -> None:
-        fee = sol.fee_for(j["amount"])
+        c = self.e.config(); fee = sol.fee_for(j["amount"], c["fee_bps"], c["min_fee"], c["min_amount"])
         self.bal[self.e.vault] -= j["amount"]
         self.bal[payee_tok] += j["amount"] - fee
         self.bal[self.e.fee_token] += fee
