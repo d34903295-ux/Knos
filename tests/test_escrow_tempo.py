@@ -28,4 +28,4 @@ def test_escrow_contract_under_foundry():
     env = {**os.environ, "FOUNDRY_DISABLE_NIGHTLY_WARNING": "1"}
     got = subprocess.run([FORGE, "test", "--root", str(ROOT)], capture_output=True, text=True, env=env, timeout=600)
     assert got.returncode == 0, got.stdout[-3000:] + got.stderr[-2000:]
-    assert "7 passed; 0 failed" in got.stdout
+    assert "13 passed; 0 failed" in got.stdout   # 0.3.6: + 6 ERC-8183 tests

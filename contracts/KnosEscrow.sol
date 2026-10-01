@@ -7,6 +7,7 @@
 // (and the fee address, on release). The guardian can only pause NEW posts and lower the per-job cap.
 // 0.3.4: a job may name a verifier who releases it on proof (the exact committed result hash, plus a proof root);
 // a minimum job and a minimum fee (fee = max(feeBps of the price, minFee)).
+// 0.3.6: the ERC-8183 job interface (createJob ... complete / reject / claimRefund) beside it; see docs/ERC8183.md.
 pragma solidity ^0.8.26;
 
 interface IERC20 {
@@ -138,5 +139,113 @@ contract KnosEscrow {
         require(token.transfer(j.worker, j.amount - f), "worker");
         if (f > 0) require(token.transfer(feeTo, f), "fee");
         emit Released(id, j.amount - f, f);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // 0.3.6: ERC-8183 (Agentic Commerce), alongside the Knos jobs above. client = buyer, provider = worker,
+    // evaluator = verifier. Knos verifier rule: the evaluator can never be the provider, and once a job is funded only
+    // the evaluator (complete / reject) or expiry (claimRefund, by anyone) settles it: the client cannot reject it.
+    // Same guard rails as post: a pause stops new funding, the minimum job and the cap apply. Fee only on Completed.
+    // Hooks: none are whitelisted, so `hook` must be zero. claimRefund is never hookable.
+    enum JobStatus { Open, Funded, Submitted, Completed, Rejected, Expired }
+    struct AcpJob {
+        uint256 id; address client; address provider; address evaluator; string description; uint256 budget;
+        uint256 expiredAt; JobStatus status; address hook;
+    }
+    uint256 public jobCount;
+    mapping(uint256 => AcpJob) internal acp;
+
+    event JobCreated(uint256 indexed jobId, address indexed client, address indexed provider, address evaluator,
+                     uint256 expiredAt, address hook);
+    event ProviderSet(uint256 indexed jobId, address indexed provider);
+    event BudgetSet(uint256 indexed jobId, uint256 amount);
+    event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
+    event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
+    event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
+    event JobRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
+    event JobExpired(uint256 indexed jobId);
+    event PaymentReleased(uint256 indexed jobId, address indexed provider, uint256 amount);
+    event Refunded(uint256 indexed jobId, address indexed client, uint256 amount);
+
+    function getJob(uint256 jobId) external view returns (AcpJob memory) { return acp[jobId]; }
+
+    function createJob(address provider, address evaluator, uint256 expiredAt, string calldata description,
+                       address hook) external returns (uint256 jobId) {
+        require(evaluator != address(0), "evaluator");
+        require(evaluator != provider, "evaluator cannot be provider");
+        require(expiredAt > block.timestamp + 5 minutes, "expiredAt");
+        require(hook == address(0), "hook not whitelisted");
+        jobId = ++jobCount;
+        acp[jobId] = AcpJob(jobId, msg.sender, provider, evaluator, description, 0, expiredAt, JobStatus.Open, hook);
+        emit JobCreated(jobId, msg.sender, provider, evaluator, expiredAt, hook);
+    }
+    function setProvider(uint256 jobId, address provider_) external {
+        AcpJob storage j = acp[jobId];
+        require(j.status == JobStatus.Open && j.client != address(0) && msg.sender == j.client, "not client");
+        require(j.provider == address(0) && provider_ != address(0), "provider");
+        require(provider_ != j.evaluator, "evaluator cannot be provider");
+        j.provider = provider_;
+        emit ProviderSet(jobId, provider_);
+    }
+    function setBudget(uint256 jobId, uint256 amount, bytes calldata) external {
+        AcpJob storage j = acp[jobId];
+        require(j.status == JobStatus.Open && j.provider != address(0) && msg.sender == j.provider, "not provider");
+        j.budget = amount;
+        emit BudgetSet(jobId, amount);
+    }
+    function fund(uint256 jobId, bytes calldata) external {
+        AcpJob storage j = acp[jobId];
+        require(j.status == JobStatus.Open && j.client != address(0) && msg.sender == j.client, "not client");
+        require(j.provider != address(0), "no provider");
+        require(!paused, "paused");
+        require(block.timestamp < j.expiredAt, "expired");
+        uint256 b = j.budget;
+        require(b >= minAmount, "below minimum");
+        require(maxAmount == 0 || b <= maxAmount, "over cap");
+        j.status = JobStatus.Funded;
+        require(token.transferFrom(msg.sender, address(this), b), "pay");
+        emit JobFunded(jobId, msg.sender, b);
+    }
+    function submit(uint256 jobId, bytes32 deliverable, bytes calldata) external {
+        AcpJob storage j = acp[jobId];
+        require(j.status == JobStatus.Funded && msg.sender == j.provider, "not provider");
+        require(block.timestamp < j.expiredAt, "expired");
+        j.status = JobStatus.Submitted;
+        emit JobSubmitted(jobId, msg.sender, deliverable);
+    }
+    // Evaluator only (never the provider): pays the provider, minus the platform fee.
+    function complete(uint256 jobId, bytes32 reason, bytes calldata) external {
+        AcpJob storage j = acp[jobId];
+        require(j.status == JobStatus.Submitted && msg.sender == j.evaluator, "not evaluator");
+        require(msg.sender != j.provider, "provider cannot evaluate own work");
+        j.status = JobStatus.Completed;
+        uint256 f = fee(j.budget);
+        require(token.transfer(j.provider, j.budget - f), "provider");
+        if (f > 0) require(token.transfer(feeTo, f), "fee");
+        emit JobCompleted(jobId, msg.sender, reason);
+        emit PaymentReleased(jobId, j.provider, j.budget - f);
+    }
+    // The client while Open (nothing escrowed); once funded, the evaluator only. Full refund, no fee.
+    function reject(uint256 jobId, bytes32 reason, bytes calldata) external {
+        AcpJob storage j = acp[jobId];
+        JobStatus s = j.status;
+        if (s == JobStatus.Open) require(j.client != address(0) && msg.sender == j.client, "not client");
+        else require((s == JobStatus.Funded || s == JobStatus.Submitted) && msg.sender == j.evaluator, "not evaluator");
+        j.status = JobStatus.Rejected;
+        emit JobRejected(jobId, msg.sender, reason);
+        if (s != JobStatus.Open) _acpRefund(jobId, j);
+    }
+    // After expiry anyone recovers a funded or submitted job for the client. Not hookable: nobody can block it.
+    function claimRefund(uint256 jobId) external {
+        AcpJob storage j = acp[jobId];
+        require(j.status == JobStatus.Funded || j.status == JobStatus.Submitted, "not refundable");
+        require(block.timestamp >= j.expiredAt, "not expired");
+        j.status = JobStatus.Expired;
+        emit JobExpired(jobId);
+        _acpRefund(jobId, j);
+    }
+    function _acpRefund(uint256 jobId, AcpJob storage j) internal {
+        require(token.transfer(j.client, j.budget), "refund");
+        emit Refunded(jobId, j.client, j.budget);
     }
 }
