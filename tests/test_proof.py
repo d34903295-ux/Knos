@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from knos.proof import checks, claims, engine, history, hook, receipt, replay
+from knos.proof import checks, claims, engine, history, hook, receipt
+
+import _replay as replay
 
 DATA = Path(__file__).parent / "data" / "release_replay.json"
 

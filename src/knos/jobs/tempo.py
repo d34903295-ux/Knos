@@ -201,8 +201,6 @@ class Escrow:
 
 ESCROW_MODERATO = "0x70043F5c1A3db0Fb243Fd1270176557cCA1dE584"   # 0.3.4: paid on proof, 1 USDC minimum
 DEPLOY_BLOCK_MODERATO = 37_714_000          # at or before the deployment (a log-scan start)
-ESCROW_MODERATO_V031 = "0x888d39bB186cC718481E98080Bdb5fd8Df27Ab49"   # pre-0.3.4 (immutable): its jobs still settle there
-DEPLOY_BLOCK_MODERATO_V031 = 37_671_589
 
 
 def _posted_topic() -> str:

@@ -28,3 +28,7 @@ _.row_factory, _.whitespace_split, _.dwSize
 
 # The public Python SDK (docs/INTEGRATE.md, examples/langgraph_team.py) and what Worker.once() returns to callers.
 sdk.Knos, sdk.Knos.holder_of, sdk.Knos.memory_client, worker.Outcome.delivered
+
+# 0.3.4: the escrow's fee rule and pause switch, used by the escrow tests and the operator; the proof verdict's
+# failures (used by the replay); the Sibyl store keeps its Memory open for its lifetime.
+_.fee_for, _.set_paused, _.failures, _._mem

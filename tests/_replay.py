@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import checks, engine, history
+from knos.proof import checks, engine, history
 
 CLAIM = "Knos {version} is shipped: tagged, on PyPI, tests pass."
 
