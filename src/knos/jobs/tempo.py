@@ -20,7 +20,7 @@ MODERATO = "https://rpc.moderato.tempo.xyz"
 PATH_USD = "0x20C0000000000000000000000000000000000000"
 STATES = {0: "none", 1: "open", 2: "claimed", 3: "delivered", 4: "released", 5: "refunded"}
 MIN_JOB_UNITS = 1_000_000     # 1 USDC (pathUSD has 6 decimals)
-MIN_FEE_UNITS = 50_000        # fee = max(5%, 0.05)
+MIN_FEE_UNITS = 50_000        # fee = max(2.5%, 0.05)
 
 
 class TempoError(Exception):
@@ -90,7 +90,7 @@ class Chain:
             q = {"from": key.address, "data": "0x" + data.hex()}
             if to:
                 q["to"] = to
-            gas = int(self.rpc("eth_estimateGas", [q]), 16) * 13 // 10
+            gas = min(int(self.rpc("eth_estimateGas", [q]), 16) * 13 // 10, 30_000_000)   # the per-tx gas cap
         tx = {"to": to_checksum_address(to) if to else b"", "data": data, "value": 0, "gas": gas, "gasPrice": self._gas_price, "nonce": nonce,
               "chainId": self.chain_id}
         raw = Account.sign_transaction(tx, key.key).raw_transaction
@@ -199,8 +199,8 @@ class Escrow:
                         None if result == bytes(32) else result, verifier, proof)
 
 
-ESCROW_MODERATO = "0x70043F5c1A3db0Fb243Fd1270176557cCA1dE584"   # 0.3.4: paid on proof, 1 USDC minimum
-DEPLOY_BLOCK_MODERATO = 37_714_000          # at or before the deployment (a log-scan start)
+ESCROW_MODERATO = "0x8B913C5946a4C1CD95089D7a563dB864d46b694E"   # 0.3.6: + ERC-8183 jobs; fee max(2.5%, 0.05 USDC)
+DEPLOY_BLOCK_MODERATO = 37_733_653          # at or before the deployment (a log-scan start)
 
 
 def _posted_topic() -> str:
