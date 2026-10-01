@@ -19,7 +19,7 @@ from . import version
 from .memory import TOPIC, Fact, Memory, StoreGone
 
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False,
-                  help="AI agent work counts only when Knos proves it: no unproven done, no unproven payout")
+                  help="AI agent work gets paid only when someone other than the agent proves it.")
 
 # Answers quote other people's writing, which on Windows routinely contains characters the console's code page cannot
 # encode. Ask for UTF-8 and replace what will not fit rather than fail on an em dash.
