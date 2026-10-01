@@ -16,6 +16,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write      # each run starts the next: GitHub's cron is a restart safety net, not the pickup clock
 
 jobs:
   work:
@@ -40,16 +41,22 @@ jobs:
           path: .knos-home
           key: knos-worker-home-${{ github.run_id }}
           restore-keys: knos-worker-home-
-      - name: worker (Gemini, with Sibyl recall)
-        run: '[ -n "$KNOS_MEMBER_KEY" ] || { echo "no KNOS_WORKER_KEY secret: skipped"; exit 0; }; knos work --once --model "$KNOS_WORKER_MODEL"' 
+      - name: worker + verifier + deadline crank, every 10 s for about 4.5 minutes
         env:
-          KNOS_MEMBER_KEY: ${{ secrets.KNOS_WORKER_KEY }}
+          WORKER_KEY: ${{ secrets.KNOS_WORKER_KEY }}
+          VERIFIER_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      - name: verifier (re-runs the checks; releases or refunds by proof)
-        run: '[ -n "$KNOS_MEMBER_KEY" ] || { echo "no KNOS_VERIFIER_KEY secret: skipped"; exit 0; }; knos verify --all --once' 
+        run: |
+          [ -n "$WORKER_KEY" ] && [ -n "$VERIFIER_KEY" ] || { echo "no worker/verifier key secrets: skipped"; exit 0; }
+          end=$(( $(date +%s) + 270 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            KNOS_MEMBER_KEY="$WORKER_KEY" knos work --once --model "$KNOS_WORKER_MODEL" || true
+            KNOS_MEMBER_KEY="$VERIFIER_KEY" knos verify --all --once || true
+            KNOS_MEMBER_KEY="$VERIFIER_KEY" knos jobs settle --all || true
+            sleep 10
+          done
+      - name: start the next run (always on)
+        if: always()
         env:
-          KNOS_MEMBER_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}
-      - name: settle jobs past their deadline (anyone may)
-        run: '[ -n "$KNOS_MEMBER_KEY" ] || exit 0; knos jobs settle --all || true'
-        env:
-          KNOS_MEMBER_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run worker.yml --repo "$GITHUB_REPOSITORY" --ref main
