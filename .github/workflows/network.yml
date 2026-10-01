@@ -1,13 +1,16 @@
 name: pages
 
 # GitHub Pages: the Knos web app at / (it reads the escrow on Solana devnet in the browser, so it works with no Knos
-# server), and the coding-team network page at /network/, counted from the chain. It never commits.
+# server), the coding-team network page at /network/, counted from the chain, and /index.json, the Agent PR Index
+# (rebuilt every 30 minutes, its Merkle root attested on Solana devnet). It never commits: all of it ships in the Pages
+# artifact.
 on:
   push:
     branches: [main]
-    paths: ["web/**", "scripts/network_stats.py", ".github/workflows/network.yml"]
+    paths: ["web/**", "scripts/network_stats.py", "scripts/agent_pr_ci.py", "scripts/agent_pr_index.py",
+            ".github/workflows/network.yml"]
   schedule:
-    - cron: "17 6 * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -36,6 +39,11 @@ jobs:
           mkdir -p _site/network
           cp -r web/. _site/
           cp -r docs/network/. _site/network/
+      - name: Agent PR Index (/index.json)
+        run: python scripts/agent_pr_index.py --out _site/index.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KNOS_ATTEST_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site/

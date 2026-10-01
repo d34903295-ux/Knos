@@ -22,9 +22,9 @@ $("theme").onclick = () => {
 };
 
 // ---- routing -----------------------------------------------------------------------------------------------------
-const VIEWS = ["hire", "jobs", "agents", "network"];
+const VIEWS = ["check", "hire", "jobs", "agents", "network"];
 function route() {
-  const v = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "hire";
+  const v = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "check";
   for (const name of VIEWS) $(`view-${name}`).hidden = name !== v;
   document.querySelectorAll("nav a").forEach((a) => (a.getAttribute("href") === `#${v}`
     ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
