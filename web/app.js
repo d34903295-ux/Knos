@@ -342,7 +342,7 @@ flushPendingBriefs();
       const units = Math.round(Number($("bw-amount").value || 0) * 1e6);
       say(st, "Funding the issue…");
       const got = await w.fundIssue($("bw-repo").value.trim(), $("bw-issue").value, units);
-      st.dataset.job = got.jobId;
+      st.dataset.job = got.jobId; st.dataset.sig = got.sig; st.dataset.account = got.job;
       say(st, `Bounty funded: job ${got.jobId.slice(0, 12)}… (${usdc(units / 1e6)} USDC in escrow)`, "ok");
     } catch (e) { say(st, e.message, "err"); }
   };

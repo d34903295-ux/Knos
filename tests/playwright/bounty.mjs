@@ -29,6 +29,7 @@ try {
   await page.click("#bw-usdc"); await until(/Test USDC received/); lap("test USDC");
   await page.fill("#bw-repo", repo); await page.fill("#bw-issue", issue); await page.fill("#bw-amount", amount);
   await page.click("#bw-fund"); await until(/Bounty funded/); lap("bounty funded");
+  console.log("PostBounty signature:", await page.getAttribute("#bw-status", "data-sig"), " job account:", await page.getAttribute("#bw-status", "data-account"));
   console.log(`TOTAL first visit -> funded bounty: ${marks["bounty funded"].toFixed(1)} s (target <= 30 s)`);
 } catch (e) {
   console.error("FAILED after", ((Date.now() - t0) / 1000).toFixed(1), "s:", e.message.split("\n")[0]);
