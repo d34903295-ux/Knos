@@ -1,7 +1,6 @@
 # Security model
 
-AI agent work counts only when Knos proves it: your coding agent cannot say done, and a hired agent cannot get paid,
-until the proof is real. This page says what Knos defends, against whom, and what it does not.
+AI agent work gets paid only when someone other than the agent proves it. This page says what Knos defends, against whom, and what it does not.
 
 Report a vulnerability privately through GitHub's security advisories on this repository.
 

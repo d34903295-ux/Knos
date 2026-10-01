@@ -21,7 +21,7 @@ export class Knos {
   static async connect({ agent, workspace = process.cwd(), command = "knos", args = ["mcp"], env, timeoutMs } = {}) {
     if (!agent) throw new Error("agent is required: a stable name for this agent");
     const transport = new StdioClientTransport({ command, args, cwd: workspace, env: { ...process.env, ...env } });
-    const client = new Client({ name: `knos-ts/${agent}`, version: "0.3.4" });
+    const client = new Client({ name: `knos-ts/${agent}`, version: "0.3.5" });
     await client.connect(transport);
     return new Knos(client, agent, timeoutMs);
   }

@@ -1,7 +1,7 @@
 {
   "name": "knos",
-  "description": "AI agent work counts only when Knos proves it: your coding agent cannot say done, and a hired agent cannot get paid, until the proof is real. Stop hook, safety guard, shared Sibyl memory and enforced claims. Requires knos>=0.3.4 (pipx install knos).",
-  "version": "0.3.4",
+  "description": "AI agent work gets paid only when someone other than the agent proves it. The free entry: a Stop hook, so your coding agent cannot say done until Knos proves it; a safety guard; shared Sibyl memory. Requires knos>=0.3.5 (pipx install knos).",
+  "version": "0.3.5",
   "author": { "name": "drexthealpha" },
   "mcpServers": {
     "knos": {

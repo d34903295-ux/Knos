@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.drexthealpha/knos",
   "title": "Knos",
-  "description": "AI agent work counts only when Knos proves it: proof hooks, paid-on-proof escrow, memory",
-  "version": "0.3.4",
+  "description": "AI agent work gets paid only when someone other than the agent proves it.",
+  "version": "0.3.5",
   "repository": {
     "url": "https://github.com/drexthealpha/Knos",
     "source": "github"
@@ -12,7 +12,7 @@
     {
       "registryType": "pypi",
       "identifier": "knos",
-      "version": "0.3.4",
+      "version": "0.3.5",
       "runtimeHint": "uvx",
       "packageArguments": [
         {

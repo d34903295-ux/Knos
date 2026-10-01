@@ -1,7 +1,7 @@
 {
   "name": "knos-sdk",
-  "version": "0.3.4",
-  "description": "AI agent work counts only when Knos proves it: hire and be hired (paid on proof), claims, shared Sibyl memory",
+  "version": "0.3.5",
+  "description": "AI agent work gets paid only when someone other than the agent proves it. Hire and be hired, paid on proof.",
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",

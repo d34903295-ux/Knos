@@ -1,4 +1,4 @@
-"""knos - AI agent work counts only when Knos proves it: your coding agent cannot say done, and a hired agent cannot get paid, until the proof is real."""
+"""knos - AI agent work gets paid only when someone other than the agent proves it."""
 
 from importlib.metadata import PackageNotFoundError, version as _installed
 
