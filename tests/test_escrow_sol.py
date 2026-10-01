@@ -511,3 +511,17 @@ def test_1000_random_interleavings_conserve_every_token():
             assert e.settle(k, j, buyer_token=t)
     assert all(e.job(j) is None for j in ids), "a job left unsettled"
     assert e.balance(e.vault) == 0, "funds stuck in escrow"
+
+
+def test_fee_only_goes_down_and_only_by_the_admin():
+    e = Escrow()
+    buyer, btok = e.party(10 * U)
+    worker, wtok = e.party()
+    assert not e.lower_fee(100, admin=buyer)                 # admin only
+    assert not e.lower_fee(501)                              # never up
+    assert e.lower_fee(sol.FEE_BPS) and e.config()["fee_bps"] == 250
+    assert not e.lower_fee(251)
+    f0 = e.balance(e.fee_token)
+    assert e.post(buyer, btok, jid("fee-25"), 4 * U) and e.claim(worker, jid("fee-25")) and e.deliver(worker, jid("fee-25"))
+    assert e.accept(buyer, jid("fee-25"), wtok)
+    assert e.balance(e.fee_token) - f0 == 100_000 == sol.fee_for(4 * U)  # 2.5% of 4 USDC

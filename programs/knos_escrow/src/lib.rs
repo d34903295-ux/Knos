@@ -203,13 +203,19 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         }
         // 9 SetPause: admin(s), config2(w). data: paused u8. Stops new posts only; settlement and refunds never pause.
         // 10 LowerCap: admin(s), config2(w). data: max_amount u64 (non-zero; never above the current cap).
-        9 | 10 => {
+        // 14 LowerFee: admin(s), config2(w). data: fee_bps u16 (never above the current fee).
+        9 | 10 | 14 => {
             let admin = next_account_info(it)?; let config = next_account_info(it)?;
             let cfg = Config::load(config, program_id, &config_key)?;
             if !admin.is_signer || *admin.key != cfg.admin { return Err(err(15, "admin only")); }
             let mut d = config.try_borrow_mut_data()?;
             if tag == 9 {
                 d[122] = (*rest.first().ok_or(ProgramError::InvalidInstructionData)? != 0) as u8;
+            } else if tag == 14 {
+                if rest.len() < 2 { return Err(ProgramError::InvalidInstructionData); }
+                let bps = u16::from_le_bytes(rest[0..2].try_into().unwrap());
+                if bps as u64 > cfg.fee_bps { return Err(err(17, "fee only goes down")); }
+                d[96..98].copy_from_slice(&bps.to_le_bytes());
             } else {
                 let cap = u64_at(rest, 0)?;
                 if cap == 0 || (cfg.max_amount != 0 && cap > cfg.max_amount) || cap < cfg.min_amount { return Err(err(16, "cap only goes down")); }

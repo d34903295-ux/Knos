@@ -192,6 +192,10 @@ class Escrow:
         a = admin or self.admin
         return self.send([sol.lower_cap(self.pid, a.pubkey(), max_amount)], a, [a])
 
+    def lower_fee(self, fee_bps: int, admin: Keypair | None = None) -> bool:
+        a = admin or self.admin
+        return self.send([sol.lower_fee(self.pid, a.pubkey(), fee_bps)], a, [a])
+
     def config(self) -> dict:
         return sol.parse_config(bytes(self.svm.get_account(sol.config_pda(self.pid)).data))
 

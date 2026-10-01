@@ -59,7 +59,7 @@ def stake_for(amount: int) -> int:
     """The program's claim stake: max(10% of the price, 0.1 USDC), in the job's mint."""
     return max(amount * STAKE_BPS // 10_000, MIN_STAKE_UNITS)
 CONFIG_LEN = 124
-FEE_BPS = 500
+FEE_BPS = 250                 # 2.5%, with a 0.05 USDC floor (MIN_FEE_UNITS)
 MIN_FEE_UNITS = 50_000        # 0.05 USDC
 MIN_JOB_UNITS = 1_000_000     # 1 USDC
 NO_VERIFIER = Pubkey.default()
@@ -120,6 +120,12 @@ def set_pause(pid: Pubkey, admin: Pubkey, paused: bool) -> Instruction:
 
 def lower_cap(pid: Pubkey, admin: Pubkey, max_amount: int) -> Instruction:
     return Instruction(pid, bytes([10]) + struct.pack("<Q", max_amount),
+                       [_m(admin, True, False), _m(config_pda(pid), False, True)])
+
+
+def lower_fee(pid: Pubkey, admin: Pubkey, fee_bps: int) -> Instruction:
+    """LowerFee (14): the admin lowers fee_bps; the fee never goes up."""
+    return Instruction(pid, bytes([14]) + struct.pack("<H", fee_bps),
                        [_m(admin, True, False), _m(config_pda(pid), False, True)])
 
 
