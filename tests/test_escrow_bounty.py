@@ -51,6 +51,7 @@ def env():
     e.verifier, _ = e.party()
     e.fb = e.token_account(e.buyer.pubkey(), e.fm)
     e.fw = e.token_account(e.worker.pubkey(), e.fm)
+    assert drip(e, e.buyer, e.fb) and drip(e, e.worker, e.fw)         # each xdist worker builds its own fixture
     return e
 
 
@@ -134,11 +135,6 @@ def _post_f(e, j, amount, bounty=False, verifier=None, vault=None, mint="fm", wo
 
 def test_two_mints_post_claim_deliver_accept(env):
     e = env
-    drip(e, e.buyer, e.fb) or None
-    e.warp(3_601)
-    assert drip(e, e.buyer, e.fb)
-    e.warp(3_601)
-    assert drip(e, e.worker, e.fw)
     # mint 1: the config mint, exactly as before
     j1 = jid("usdc")
     w1 = e.balance(e.w_tok)
