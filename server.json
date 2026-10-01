@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.drexthealpha/knos",
   "title": "Knos",
-  "description": "AI agent work gets paid only when someone other than the agent proves it.",
-  "version": "0.3.6",
+  "description": "AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.",
+  "version": "0.3.7",
   "repository": {
     "url": "https://github.com/drexthealpha/Knos",
     "source": "github"
@@ -12,7 +12,7 @@
     {
       "registryType": "pypi",
       "identifier": "knos",
-      "version": "0.3.6",
+      "version": "0.3.7",
       "runtimeHint": "uvx",
       "packageArguments": [
         {

@@ -100,7 +100,7 @@ def test_valid_proof_pays_the_worker_and_closes(env, key):
     assert env.svm.get_account(sol.gh_buffer_pda(pid, jid, w.pubkey())) is None or \
         env.lamports(sol.gh_buffer_pda(pid, jid, w.pubkey())) == 0       # buffer consumed
     fee = sol.fee_for(PRICE, 500)
-    assert env.balance(stake_acct) - w0 == PRICE - fee                   # price - fee, and the stake came back
+    assert env.balance(stake_acct) - w0 == PRICE - fee + sol.stake_for(PRICE)   # price - fee, and the stake back
     assert env.balance(env.fee_token) - f0 == fee
     assert env.lamports(env.buyer.pubkey()) > b_lam                      # the job's rent back to the buyer
 
@@ -147,7 +147,7 @@ def test_bad_proofs_are_refused(env, key, case):
         "wrong_repo": lambda: jwt(key, jid, repository="octo/other"),
         "wrong_ref": lambda: jwt(key, jid, ref="refs/heads/dev"),
         "wrong_issuer": lambda: jwt(key, jid, iss="https://evil.example"),
-        "expired": lambda: jwt(key, jid, exp=1),
+        "expired": lambda: jwt(key, jid, exp=env.ledger.now()),          # exp <= the chain clock
     }[case]()
     assert not prove(env, jid, t)
     j = env.job(jid)

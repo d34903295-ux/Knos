@@ -53,3 +53,10 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--bg); bord
 .foot { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; padding: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
 .stats .split { grid-column: 1 / -1; } .split h2 { margin-top: 10px; }
+.verdict { font-size: 28px; font-weight: 800; margin: 16px 0 8px; }
+.verdict.bad, .status.bad { color: var(--bad); }
+.verdict.ok { color: var(--ok); }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0; }
+.facts dt { font-weight: 600; color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+a.button { display: inline-block; font-weight: 600; border-radius: 10px; padding: 10px 16px; background: var(--accent); color: var(--accent-fg); text-decoration: none; margin-top: 8px; }

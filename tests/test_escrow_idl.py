@@ -39,6 +39,10 @@ CALLS = {
     "verify_step2": lambda: sol.verify_step2(PID, K[0], H, K[1], K[2], K[3], K[4], K[5]),
     "post_github": lambda: sol.post_github(PID, K[0], H, 0, 60, 60, H, "o/r", "refs/heads/main", K[1], K[2]),
     "compute_limit": None,
+    "post_bounty": lambda: sol.post_bounty(PID, K[0], H, 0, 60, 60, H, K[1], K[2], verifier=K[3]),
+    "faucet": lambda: sol.faucet(PID, K[0], K[1], K[2], 100_000_000),
+    "init_faucet_mint": lambda: sol.init_faucet_mint(PID, K[0], K[1], 100_000_000),
+    "add_mint": lambda: sol.add_mint(PID, K[0], K[1], K[2]),
 }
 BY_TAG = {ix["discriminator"][0]: ix for ix in IDL["instructions"]}
 SIZES = {"u8": 1, "u16": 2, "u32": 4, "bytes": 0, "u64": 8, "i64": 8, "pubkey": 32}
@@ -81,7 +85,7 @@ def test_builders_match_idl():
             assert len(ix.data) > 1 + arg_len, name
         else:
             assert len(ix.data) == 1 + arg_len, name
-    assert seen == set(BY_TAG) == set(range(1, 20))
+    assert seen == set(BY_TAG) == set(range(1, 20)) | {20, 21, 22, 23}
 
 
 def _layout(name):

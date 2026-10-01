@@ -206,9 +206,15 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
                                       "  [red]differs from the record on chain[/red]"))
 
     @app.command("prove")
-    def prove(fact: str = typer.Argument(..., help="text of something an agent recorded"),
-              days: int = typer.Option(7, "--days", min=1)) -> None:
-        """Prove a recorded fact was in an agent's day: an inclusion proof against its record on chain."""
+    def prove(fact: str = typer.Argument(None, help="text of something an agent recorded"),
+              days: int = typer.Option(7, "--days", min=1),
+              job: str = typer.Option(None, "--job", help="a GitHub-posted job: pay it with --jwt-file's token"),
+              jwt_file: Path = typer.Option(None, "--jwt-file", help="the GitHub Actions OIDC token (prove.yml)")) -> None:
+        """Prove a recorded fact was in an agent's day, or (--job) pay a job with its GitHub Actions proof."""
+        if job or jwt_file:
+            return _prove_job(job, jwt_file)
+        if not fact:
+            raise Stop("Prove what?", 'knos prove "decided to shard by tenant"   or   knos prove --job ID --jwt-file F')
         from . import live, records
         repo = repo_of(None)
         rt = live.runtime(repo)
@@ -241,6 +247,31 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
                 out.print(f"  merkle_root {rec.merkle_root.hex()}")
                 return
         raise Stop(f"No recorded fact matching {fact!r} in a written record of the last {days} days.")
+
+    def _prove_job(job: str | None, jwt_file: Path | None) -> None:
+        from ..jobs import net
+        from ..jobs import prove as gh
+        if not job or not jwt_file:
+            raise Stop("--job and --jwt-file go together.", "knos prove --job JOB_ID --jwt-file token.txt")
+        try:
+            jwt = jwt_file.read_text(encoding="utf-8").strip()
+            job_id = net.resolve(job)
+            gh.precheck(gh.claims(jwt), job_id)
+        except OSError as why:
+            raise Stop(f"Cannot read the token: {why}") from None
+        except (net.Refused, ValueError) as why:
+            raise Stop(f"Not sent: {why}") from None
+        try:
+            sigs = gh.prove(net.ledger(), net.key(), job_id, jwt)
+        except net.Refused as why:
+            raise Stop(str(why)) from None
+        except LookupError as why:
+            raise Stop(str(why)) from None
+        except RuntimeError as why:
+            raise Stop(f"The escrow refused: {why}") from None
+        out.print(f"[green]proven[/green]: job {job_id.hex()[:16]} paid on its GitHub Actions proof")
+        for s in sigs:
+            out.print(f"  {s}", markup=False)
 
     @app.command("mirror", hidden=True)
     def mirror(once: bool = typer.Option(False, "--once")) -> None:

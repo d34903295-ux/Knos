@@ -34,6 +34,24 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
         if not v.ok:
             raise typer.Exit(1)
 
+    @proof.command("run")
+    def run(toml: Path = typer.Option(None, "--toml", help="default: .knos/proof.toml in the repo"),
+            in_: str = typer.Option(None, "--in", help="the repo the checks run in (default: this one)")) -> None:
+        """Run every [[check]] in .knos/proof.toml, whatever the claim. Exit 1 if any fails or none is defined."""
+        from . import checks, engine
+        repo = repo_of(in_)
+        cfg = engine.load(toml) if toml else engine.config(repo)
+        specs = [c for c in cfg.get("check", []) or [] if c.get("name") and c.get("run")]
+        if not specs:
+            raise Stop(cfg.get("_error") or "No [[check]] with a name and a run command: nothing to prove.")
+        results = [checks.custom(repo, c["name"], c["run"]) for c in specs]
+        for r in results:
+            out.print(f"{'ok ' if r.ok else 'NO '} {r.name}: {r.detail}", markup=False, emoji=False)
+        if not all(r.ok for r in results):
+            out.print("[red]not proven[/red]")
+            raise typer.Exit(1)
+        out.print("[green]proven[/green]")
+
     @proof.command("observe")
     def observe(sha: str = typer.Argument(...), check: str = typer.Argument(..., help="e.g. ci"),
                 failed: bool = typer.Option(False, "--failed"), detail: str = typer.Option("", "--detail")) -> None:

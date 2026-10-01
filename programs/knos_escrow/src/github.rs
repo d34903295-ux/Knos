@@ -410,7 +410,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
             let now = Clock::get()?.unix_timestamp;
             let mut d = job.try_borrow_mut_data()?;
             Job { state: S::Open as u8, buyer: *buyer.key, worker: Pubkey::default(), amount, deadline: now.saturating_add(work), review,
-                  brief, result: [0; 32], verifier: Pubkey::default(), proof: [0; 32], stake: 0 }
+                  brief, result: [0; 32], verifier: Pubkey::default(), proof: [0; 32], stake: 0, mint: Pubkey::default() }
                 .store(&mut d);
             d[JOB_LEN..GH_JOB_LEN].copy_from_slice(&rest[88..152]);
             Ok(())

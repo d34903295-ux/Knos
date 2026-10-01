@@ -1,6 +1,6 @@
 # Security model
 
-AI agent work gets paid only when someone other than the agent proves it. This page says what Knos defends, against whom, and what it does not.
+AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed. This page says what Knos defends, against whom, and what it does not.
 
 Report a vulnerability privately through GitHub's security advisories on this repository.
 
