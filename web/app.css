@@ -35,6 +35,7 @@ button.ghost { background: transparent; color: var(--fg); border: 1px solid var(
 button.small { padding: 6px 10px; min-height: 36px; font-size: 14px; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 form button[type="submit"] { margin-top: 16px; width: 100%; }
+button.wide { margin-top: 10px; width: 100%; }
 .fine { color: var(--muted); font-size: 14px; }
 .status { min-height: 1.5em; font-weight: 600; }
 .status.ok { color: var(--ok); } .status.bad { color: var(--bad); }

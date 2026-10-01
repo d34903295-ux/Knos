@@ -10,7 +10,7 @@
       "name": "knos",
       "source": "./plugins/knos",
       "description": "Coordination and memory for every agent you run: shared Sibyl memory, claims enforced across vendors and machines (Solana), and an edit guard. Requires knos>=0.3.1: pipx install knos",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "author": { "name": "drexthealpha" }
     }
   ]

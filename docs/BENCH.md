@@ -99,3 +99,27 @@ requests, Claude Sonnet as the worker in both runs): 14/24 accepted when memory 
 (54/72 preferences found), **22/24** with 0.3.1's preference capture (72/72 found; both misses were task errors,
 preferences were honoured 24/24). Capture on a held-out set written before it was run: 21/24 preferences, 0 of 30
 ordinary requests mistaken for one (`tests/data/preferences_heldout.json`).
+
+## Recall (0.3.2): `knos.recall` on LongMemEval_s
+
+No LLM. Sibyl (`sibyl-memory-client`) stores each past round; `knos.recall.retrieve` fuses one-term searches (BM25
+over the whole round, the user part and the assistant part), Sibyl's own search, and captured preference sentences,
+by reciprocal rank per session. Scored like the 0.3.1 baseline: the answer-bearing past session is in the top 10.
+Tuned on a fixed 100-question dev split (seed 0); the other 370 questions are held out.
+
+| | baseline (0.3.1) | dev (100) | **held-out (370)** |
+|---|---|---|---|
+| overall, top 10 | 81.5% | 97.0% | **96.8%** |
+| the assistant said | 51.8% | 100% | **88.4%** |
+| preferences | 50.0% | 100% | **83.3%** |
+| median tokens retrieved | 5,338 | 5,554 | 5,656 |
+
+Measured 1 Oct 2026 on LongMemEval_s (cleaned), 470 questions with evidence. The eval script lives with the private
+measurements; the strategy is `src/knos/recall.py`.
+
+## Web app (0.3.2): Lighthouse
+
+Lighthouse 12.8.2, headless Chrome, `web/` served as static files (as on GitHub Pages), 1 Oct 2026: performance 100,
+accessibility 100, best practices 100, SEO 100 on both the mobile and desktop presets (mobile first contentful paint
+1.1 s). Wallet and crypto libraries load only when used. Served instead through the Python dev server (`knos jobs
+serve`) on the same loaded machine, mobile performance was 55, all of it the server's 9.3 s time to first byte.

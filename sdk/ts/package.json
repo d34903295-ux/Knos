@@ -1,6 +1,6 @@
 {
   "name": "knos-sdk",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Knos for TypeScript agents: claims, shared Sibyl memory, over the Knos MCP server",
   "type": "module",
   "main": "index.js",

@@ -102,10 +102,67 @@ $("hire-form").onsubmit = async (e) => {
   } catch (err) { say(st, err.message, "bad"); } finally { btn.disabled = false; }
 };
 
+// ---- hire with a passkey (Tempo): no extension, no seed phrase ---------------------------------------------------
+const TEMPO_JOBS = "knos-tempo-jobs";
+const tempoJobs = () => { try { return JSON.parse(localStorage.getItem(TEMPO_JOBS) || "[]"); } catch { return []; } };
+async function deviceSealKey() {   // passkey signatures are not deterministic, so the delivery key lives on this device
+  const s = await sodium();
+  try {
+    const k = JSON.parse(localStorage.getItem("knos-seal-key") || "null");
+    if (k) return { sk: unhex(k.sk), pk: unhex(k.pk) };
+  } catch {}
+  const kp = s.crypto_box_keypair();
+  try { localStorage.setItem("knos-seal-key", JSON.stringify({ sk: hex(kp.privateKey), pk: hex(kp.publicKey) })); } catch {}
+  return { sk: kp.privateKey, pk: kp.publicKey };
+}
+$("post-passkey").onclick = async () => {
+  const st = $("hire-status"); const btn = $("post-passkey"); btn.disabled = true;
+  try {
+    const T = await import("./tempo.js");
+    say(st, "Use your passkey (Face ID, fingerprint or device PIN)…");
+    state.tempo ||= await T.passkeyAccount();
+    const addr = state.tempo.address;
+    let bal = await T.balance(addr);
+    $("passkey-info").hidden = false;
+    if (bal < Number($("price").value)) {
+      say(st, "Getting free testnet pathUSD from Tempo's faucet…");
+      await T.fund(addr);
+      for (let i = 0; i < 20 && bal < Number($("price").value); i++) { await new Promise((r) => setTimeout(r, 1000)); bal = await T.balance(addr); }
+    }
+    $("passkey-info").textContent = `Passkey wallet ${short(addr)} · ${usdc(bal)} pathUSD (Tempo testnet)`;
+    say(st, "Approve with your passkey…");
+    const { pk } = await deviceSealKey();
+    const id = await T.postJob(state.tempo, API, { task: $("task").value.trim(), kind: $("kind").value,
+      priceUsd: Number($("price").value), sealTo: hex(pk) });
+    try { localStorage.setItem(TEMPO_JOBS, JSON.stringify([...tempoJobs(), id])); } catch {}
+    say(st, `Posted on Tempo: ${usdc($("price").value)} pathUSD in escrow. See My jobs.`, "ok");
+  } catch (err) { say(st, err.message || String(err), "bad"); } finally { btn.disabled = false; }
+};
+async function loadTempoJobs(box) {
+  const ids = tempoJobs();
+  if (!ids.length) return;
+  const T = await import("./tempo.js");
+  const rows = await Promise.all(ids.map((id) => T.job(id).catch(() => null)));
+  const html = rows.filter(Boolean).map((j) => `<tr><td class="mono">${j.id.slice(0, 12)}…<div class="fine">Tempo · passkey</div></td>
+    <td>${usdc(j.amount)} pathUSD</td><td><span class="pill">${esc(j.state)}</span></td>
+    <td>${j.state === "delivered" ? `<button class="small" data-topen="${j.result.slice(2)}">Open</button>
+      <button class="small" data-tact="accept" data-id="${j.id}">Accept</button>
+      <button class="small ghost" data-tact="reject" data-id="${j.id}">Reject</button>` : ""}</td></tr>`).join("");
+  box.insertAdjacentHTML("beforeend", `<h2>On Tempo</h2><div class="table-wrap"><table><tbody>${html}</tbody></table></div>`);
+  box.querySelectorAll("[data-topen]").forEach((b) => (b.onclick = () => openDelivery(b.dataset.topen, deviceSealKey).catch((e) => alert(e.message))));
+  box.querySelectorAll("[data-tact]").forEach((b) => (b.onclick = async () => {
+    try { state.tempo ||= await T.passkeyAccount(); await T.settle(state.tempo, b.dataset.id, b.dataset.tact); loadJobs(); }
+    catch (e) { alert(e.message); }
+  }));
+}
+
 // ---- my jobs -----------------------------------------------------------------------------------------------------
 async function loadJobs() {
   const box = $("jobs-list");
-  if (!state.account) { box.innerHTML = ""; $("jobs-hint").hidden = false; return; }
+  if (!state.account) {
+    box.innerHTML = ""; $("jobs-hint").hidden = tempoJobs().length > 0;
+    return loadTempoJobs(box).catch((e) => box.insertAdjacentHTML("beforeend", `<p class="status bad">${esc(e.message)}</p>`));
+  }
   $("jobs-hint").hidden = true;
   box.innerHTML = "<p class='fine'>Loading from the chain…</p>";
   try {
@@ -121,15 +178,16 @@ async function loadJobs() {
     }</tbody></table></div>`;
     box.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => openDelivery(b.dataset.open).catch((e) => alert(e.message))));
     box.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => settle(b.dataset.id, b.dataset.act).catch((e) => alert(e.message))));
+    await loadTempoJobs(box);
   } catch (err) { box.innerHTML = `<p class="status bad">${esc(err.message)}</p>`; }
 }
-async function openDelivery(resultHex) {
+async function openDelivery(resultHex, keyFn = sealKey) {
   const r = await fetch(`${API}/deliveries/${resultHex}`);
   if (!r.ok) throw new Error("The relay does not have this delivery.");
   const blob = new Uint8Array(await r.arrayBuffer());
   const digest = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", blob)));
   if (digest !== resultHex) throw new Error("The relay's copy does not match what the agent committed on chain.");
-  const { sk, pk } = await sealKey();
+  const { sk, pk } = await keyFn();
   const s = await sodium();
   let text;
   try { text = new TextDecoder().decode(s.crypto_box_seal_open(blob, pk, sk)); }

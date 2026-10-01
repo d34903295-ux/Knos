@@ -47,7 +47,9 @@
         </div>
       </div>
       <button type="submit" id="post">Post job</button>
-      <p class="fine">5% fee, only when you accept. Devnet: test USDC only.</p>
+      <button type="button" id="post-passkey" class="ghost wide">No wallet? Pay with a passkey (Tempo)</button>
+      <p id="passkey-info" class="fine" hidden></p>
+      <p class="fine">5% fee, only when you accept. Testnets only: devnet USDC on Solana, testnet pathUSD on Tempo.</p>
       <p id="hire-status" class="status" role="status" aria-live="polite"></p>
     </form>
   </section>

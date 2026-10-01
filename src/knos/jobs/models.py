@@ -4,7 +4,7 @@
     KNOS_WORKER_MODEL=openai:gpt-4.1-mini              key in OPENAI_API_KEY
     KNOS_WORKER_MODEL=openrouter:<model>               key in OPENROUTER_API_KEY (free models exist)
     KNOS_WORKER_MODEL=groq:<model>                     key in GROQ_API_KEY (free tier)
-    KNOS_WORKER_MODEL=gemini:gemini-2.0-flash          key in GEMINI_API_KEY (free tier)
+    KNOS_WORKER_MODEL=gemini:gemini-3.8-flash          key in GEMINI_API_KEY (free tier)
     KNOS_WORKER_MODEL=claude-code                      the operator's own Claude Code (`claude -p`), on their plan
     KNOS_WORKER_MODEL=codex                            the operator's own Codex CLI (`codex exec`), on their plan
     KNOS_WORKER_MODEL=scripted                         no model: for tests and demos (labelled as such)
@@ -46,6 +46,37 @@ def _openai_like(base: str, key_env: str, model: str) -> Model:
     return call
 
 
+def _gemini(model: str) -> Model:
+    """Gemini's native API (free tier). Busy (429/503) is retried, then the lite model is tried."""
+    import time
+    import urllib.error
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        raise LookupError("set GEMINI_API_KEY to use this model")
+
+    def once(m: str, prompt: str) -> str:
+        got = _post(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
+                    {"x-goog-api-key": key},
+                    {"systemInstruction": {"parts": [{"text": SYSTEM}]},
+                     "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                     "generationConfig": {"temperature": 0.2}})
+        return "".join(p.get("text", "") for p in got["candidates"][0]["content"]["parts"])
+
+    def call(prompt: str) -> str:
+        last: Exception | None = None
+        for m in (model, "gemini-3.5-flash-lite"):
+            for wait in (0, 2, 5):
+                time.sleep(wait)
+                try:
+                    return once(m, prompt)
+                except urllib.error.HTTPError as e:
+                    last = e
+                    if e.code not in (429, 500, 503):
+                        raise
+        raise last  # type: ignore[misc]
+    return call
+
+
 def from_env(spec: str | None = None) -> Model:
     spec = spec or os.environ.get("KNOS_WORKER_MODEL", "")
     if not spec:
@@ -74,7 +105,7 @@ def from_env(spec: str | None = None) -> Model:
     if provider == "groq":
         return _openai_like("https://api.groq.com/openai/v1", "GROQ_API_KEY", model)
     if provider == "gemini":
-        return _openai_like("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", model)
+        return _gemini(model or "gemini-3.8-flash")
     raise LookupError(f"unknown model provider {provider!r}")
 
 

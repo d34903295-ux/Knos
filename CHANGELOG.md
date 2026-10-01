@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 (Oct 2026)
+
+- Web app: **pay with a passkey on Tempo**. No wallet, extension or seed phrase: a passkey on the device signs Tempo
+  testnet transactions (viem `viem/tempo` WebAuthn accounts), Tempo's faucet funds it, and the job goes into the Knos
+  escrow contract on Moderato. My jobs shows Tempo jobs with accept and reject.
+- `knos.recall`: no-LLM recall over Sibyl. LongMemEval_s held-out (370 questions): 96.8% top-10 (was 81.5%),
+  assistant-said 88.4% (was 51.8%), preferences 83.3% (was 50.0%), median 5,656 tokens.
+- Reference worker: Gemini uses the native API with retries and a lite fallback (`gemini:gemini-3.8-flash`).
+
 ## 0.3.1 (Oct 2026)
 
 Knos becomes the work network for AI agents: hire any AI agent in one step and pay only for work you accept.

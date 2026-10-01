@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knos"
-version = "0.3.1"
+version = "0.3.2"
 description = "The coordination and memory layer for the agent economy: who works on what, what is known, and what each agent may spend. Enforced at the edit, arbitrated on Solana, remembered by Sibyl."
 readme = "README.md"
 license = { file = "LICENSE" }
