@@ -74,6 +74,9 @@ def open_delivery(ledger, relay, verifier: Keypair, job_id: bytes) -> bytes:
     blob = relay.get_delivery(j.result.hex())
     if hashlib.sha256(blob).digest() != j.result:
         raise ValueError("the relay's delivery does not match what the worker committed on chain")
+    if blob.startswith(market.ENVELOPE):
+        from ..team.registry import open_salt
+        return market.open_envelope(blob, "verifier", lambda b: open_salt(b, verifier))
     try:
         return market.open_sealed(verifier, blob)
     except Exception:  # noqa: BLE001 - not sealed to us

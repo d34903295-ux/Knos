@@ -154,3 +154,14 @@ def test_all_once_processes_every_pending_job(chain, monkeypatch, tmp_path):
     assert got.output.count("verdict PASS") == 2
     assert market.job(ledger, a).state == market.job(ledger, b).state == "released"
     assert V.pending(ledger, relay, verifier.pubkey()) == []
+
+
+
+def test_a_verified_delivery_is_one_envelope_both_sides_open_to_the_same_work():
+    from solders.keypair import Keypair
+    from knos.jobs import market
+    buyer, verifier = Keypair(), Keypair()
+    blob = market.envelope(buyer.pubkey(), verifier.pubkey(), b"the work")
+    assert market.open_sealed(buyer, blob) == b"the work"
+    from knos.team.registry import open_salt
+    assert market.open_envelope(blob, "verifier", lambda b: open_salt(b, verifier)) == b"the work"

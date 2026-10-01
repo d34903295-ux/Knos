@@ -113,7 +113,8 @@ class Worker:
         self.log(f"claimed  {brief.title}  ({j.amount / 1e6:.2f} USDC)")
         ok, text, why = self.produce(brief)
         if ok:
-            market.deliver(self.ledger, self.relay, self.key, jid, j.buyer, text.encode(), brief.seal_to)
+            market.deliver(self.ledger, self.relay, self.key, jid, j.buyer, text.encode(), brief.seal_to,
+                           verifier=getattr(j, "verifier", None))
             self.remember(jid.hex(), brief, text)
             self.log(f"delivered {brief.title}: checks passed, sealed to the buyer, hash on chain")
             self.on_delivered(jid, brief.title)

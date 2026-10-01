@@ -185,14 +185,39 @@ def seal_for(buyer: Pubkey, content: bytes, seal_to: str | None = None) -> bytes
     return seal_salt(content, buyer)
 
 
+ENVELOPE = b'{"knos-envelope":1'
+
+
+def envelope(buyer: Pubkey, verifier: Pubkey, content: bytes, seal_to: str | None = None) -> bytes:
+    """A job with a verifier: one copy sealed to the buyer, one to the verifier, and the sha256 of the content. The
+    hash on chain commits to all three, so each side checks its copy against the same digest: both saw the same work."""
+    import base64
+    b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
+    return (ENVELOPE + b',"digest":"' + hashlib.sha256(content).hexdigest().encode() + b'","buyer":"'
+            + b64(seal_for(buyer, content, seal_to)).encode() + b'","verifier":"'
+            + b64(seal_for(verifier, content)).encode() + b'"}')
+
+
+def open_envelope(blob: bytes, role: str, opener) -> bytes:
+    import base64
+    import json
+    e = json.loads(blob)
+    content = opener(base64.b64decode(e[role]))
+    if hashlib.sha256(content).hexdigest() != e["digest"]:
+        raise ValueError(f"the {role}'s copy is not the work the envelope commits to")
+    return content
+
+
 def open_sealed(buyer: Keypair, blob: bytes) -> bytes:
     from ..team.registry import open_salt
+    if blob.startswith(ENVELOPE):
+        return open_envelope(blob, "buyer", lambda b: open_salt(b, buyer))
     return open_salt(blob, buyer)
 
 
 def deliver(ledger, relay, worker: Keypair, job_id: bytes, buyer: Pubkey, content: bytes,
-            seal_to: str | None = None) -> str:
-    sealed = seal_for(buyer, content, seal_to)
+            seal_to: str | None = None, verifier: Pubkey | None = None) -> str:
+    sealed = envelope(buyer, verifier, content, seal_to) if verifier else seal_for(buyer, content, seal_to)
     h = relay.put_delivery(sealed)
     mint = ledger.config()["mint"]
     ledger.send([sol.deliver(ledger.program, worker.pubkey(), job_id, bytes.fromhex(h),

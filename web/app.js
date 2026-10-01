@@ -264,7 +264,16 @@ async function openDelivery(resultHex, keyFn = sealKey) {
   const { sk, pk } = await keyFn();
   const s = await sodium();
   let text;
-  try { text = new TextDecoder().decode(s.crypto_box_seal_open(blob, pk, sk)); }
+  let sealed = blob, digest = null;
+  if (new TextDecoder().decode(blob.slice(0, 18)) === '{"knos-envelope":1') {     // a verified job: the buyer's copy
+    const e = JSON.parse(new TextDecoder().decode(blob));
+    sealed = Uint8Array.from(atob(e.buyer), (c) => c.charCodeAt(0)); digest = e.digest;
+  }
+  try {
+    const plain = s.crypto_box_seal_open(sealed, pk, sk);
+    if (digest && hex(await sha256(plain)) !== digest) throw new Error("not the committed work");
+    text = new TextDecoder().decode(plain);
+  }
   catch { throw new Error("Sealed to another key: this job was posted outside the web app. Open it with  knos jobs get."); }
   $("delivery-text").textContent = text; $("delivery").hidden = false; $("delivery").scrollIntoView({ behavior: "smooth" });
 }

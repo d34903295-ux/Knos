@@ -90,6 +90,7 @@ jobs:
         env:
           DEVNET_UPGRADE_KEY: ${{ secrets.DEVNET_UPGRADE_KEY }}
         run: |
+          trap 'rm -f "$RUNNER_TEMP/up.json"' EXIT
           umask 077; printf '%s' "$DEVNET_UPGRADE_KEY" > "$RUNNER_TEMP/up.json"
           solana config set --url devnet --keypair "$RUNNER_TEMP/up.json" >/dev/null
           have=$(solana -u devnet program show "$PROGRAM_ID" --output json | python3 -c 'import sys,json;print(json.load(sys.stdin)["dataLen"])')
@@ -97,9 +98,9 @@ jobs:
           if [ "$need" -gt "$have" ]; then solana -u devnet program extend "$PROGRAM_ID" $(( need - have + 4096 )) --keypair "$RUNNER_TEMP/up.json"; fi
           solana -u devnet program deploy knos_escrow.so --program-id "$PROGRAM_ID" \
             --upgrade-authority "$RUNNER_TEMP/up.json" --keypair "$RUNNER_TEMP/up.json" --output json-compact | tee deploy.json
-          rm -f "$RUNNER_TEMP/up.json"
           echo "upgrade signature: $(python3 -c 'import json;print(json.load(open("deploy.json")).get("signature"))')"
           echo "local .so sha256: $(sha256sum knos_escrow.so | cut -d' ' -f1)"
           solana -u devnet program dump "$PROGRAM_ID" onchain.so >/dev/null
           echo "on-chain program sha256: $(head -c $(stat -c%s knos_escrow.so) onchain.so | sha256sum | cut -d' ' -f1)"
           solana -u devnet program show "$PROGRAM_ID"
+          rm -f "$RUNNER_TEMP/up.json"
