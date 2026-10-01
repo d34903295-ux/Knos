@@ -121,6 +121,13 @@ PER_COMMAND = {
 
   Take open jobs with your own model key, run each brief's checks, deliver
   sealed to the buyer. Paid when the buyer accepts.""",
+    "verify": """\
+  knos jobs post "TITLE" --price 2 --verify knos   name a verifier
+  knos verify ID --key PATH        check one delivered job, then settle it
+  knos verify --all --once         every delivered job naming your key
+
+  Re-runs the brief's checks and the buyer's saved preferences: pays the
+  worker on pass, refunds the buyer on fail. Prints a signed verdict.""",
     "demo": "  knos demo\n\n  The whole product on a throwaway repo. Every line is a real call.",
     "worth": "  knos worth\n\n  Claims taken and released, and edits refused, counted from the record.",
     "spend": """\

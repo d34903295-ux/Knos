@@ -66,6 +66,9 @@ def register(app: typer.Typer, out, Stop) -> None:
              share_memory: bool = typer.Option(False, "--share-memory",
                                                help="attach your saved preferences to this brief (anyone with the "
                                                     "relay can read them)"),
+             verify: str = typer.Option(None, "--verify", metavar="KEY|knos",
+                                        help="name a verifier who pays the worker on proof (knos = the Knos "
+                                             "reference verifier)"),
              yes: bool = typer.Option(False, "--yes")) -> None:
         """Post a job: the price goes into escrow, the brief to the relay. One signature."""
         from . import buyer_memory, market, net
@@ -101,9 +104,17 @@ def register(app: typer.Typer, out, Stop) -> None:
         from .brief_lint import lint
         for warning in lint(brief, units, mem.preferences()):
             out.print(f"  note: {warning}", markup=False)
-        jid = _chain(market.post, ledger, relay, key, brief, units, _seconds(work), _seconds(review))
+        from .verify import resolve
+        try:
+            verifier = resolve(verify)
+        except ValueError as why:
+            raise Stop(str(why)) from None
+        jid = _chain(lambda: market.post(ledger, relay, key, brief, units, _seconds(work), _seconds(review),
+                                         verifier=verifier))
         net.remember_job(jid, "buyer", title)
         out.print(f"[green]✓[/green] posted {jid.hex()[:10]}  {title}  {_usdc(units)} in escrow")
+        if verifier:
+            out.print(f"  verified by {verifier}: paid on proof, refunded on a failed check", markup=False)
         if learned:
             out.print(f"  remembered {len(learned)} preference(s) for your next jobs")
         out.print(f"  when it is delivered:  knos jobs get {jid.hex()[:10]}")
@@ -286,6 +297,50 @@ def register(app: typer.Typer, out, Stop) -> None:
             w.run(every)
         except KeyboardInterrupt:
             out.print("Stopped.")
+
+    @app.command("verify")
+    def verify_cmd(job: str = typer.Argument(None, help="the job id (or its first characters)"),
+                   key_path: Path = typer.Option(None, "--key", help="the verifier's keypair file (default: yours)"),
+                   all_: bool = typer.Option(False, "--all", help="every delivered job naming this key"),
+                   once: bool = typer.Option(True, "--once/--watch", help="one pass, or keep watching"),
+                   every: float = typer.Option(15.0, "--every", help="--watch: seconds between passes")) -> None:
+        """Verify delivered work: re-run the brief's checks and the buyer's preferences, then pay or refund."""
+        import time
+
+        from . import verify as V
+        ledger, relay, key = _ctx()
+        if key_path:
+            try:
+                key = V.load_key(key_path)
+            except (OSError, ValueError) as why:
+                raise Stop(f"Cannot read the verifier key {key_path}: {why}") from None
+        if not job and not all_ and once:
+            raise Stop("Name a job, or use --all.", "knos verify JOB_ID   or   knos verify --all --once")
+
+        def one(jid: bytes) -> bool:
+            try:
+                v = V.verify_job(ledger, relay, key, jid)
+            except (LookupError, ValueError) as why:
+                out.print(f"skip {jid.hex()[:10]}: {why}", markup=False)
+                return False
+            except RuntimeError as why:
+                out.print(f"[red]✗[/red] {jid.hex()[:10]}: the escrow refused: {why}")
+                return False
+            for p in v.problems:
+                out.print(f"  {p}", markup=False)
+            out.print(v.line(), markup=False)
+            return v.ok
+
+        while True:
+            ids = [_id(job)] if job else V.pending(ledger, relay, key.pubkey())
+            if not ids and once:
+                out.print("No delivered jobs name this verifier.", markup=False)
+            results = [one(jid) for jid in ids]
+            if once:
+                if job and results and not results[0]:
+                    raise typer.Exit(1)
+                return
+            time.sleep(every)
 
     def _worker_memory(wallet: str):
         """This worker's own Sibyl store: what it delivered, recalled into similar jobs (knos.recall)."""
