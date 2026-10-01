@@ -1,0 +1,50 @@
+# .github/workflows/knos.yml - pay a Knos job when the pull request that delivers it passes this repo's checks.
+#
+# "Protect this repo" prefills this file. The job was posted with `market.post_github` naming this repo and the ref
+# the work must land on; the worker opens a pull request whose body contains a line
+#
+#     knos-job: <64 hex characters>
+#
+# Security model:
+#   - The trigger is `pull_request`, never `pull_request_target`: nothing here runs with this repo's write token
+#     against pull request code.
+#   - `job` reads the id from the pull request body through an environment variable (never inlined into the script)
+#     and checks out nothing.
+#   - Knos's prove.yml then runs the pull request's code in a job with no id-token permission and no secret, against
+#     the checks in the BASE branch's .knos/proof.toml; only if they pass does a second job, which runs no pull request
+#     code, mint the GitHub OIDC token (audience knos:<job>) and send it to the escrow. The escrow verifies the token
+#     on chain, including that it came from prove.yml at a Knos release tag, and pays the worker.
+#   - GitHub gives pull requests from forks neither secrets nor id-token: write, so the worker pushes a branch to
+#     this repo (or a maintainer re-opens the pull request from one) for the payment step to run.
+name: knos
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.id.outputs.id }}
+    steps:
+      - id: id
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          id=$(printf '%s\n' "$BODY" | grep -oiE '^knos-job:[[:space:]]*[0-9a-f]{64}' | head -1 | grep -oiE '[0-9a-f]{64}$' | tr 'A-F' 'a-f')
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  prove:
+    needs: job
+    if: needs.job.outputs.id != ''
+    permissions:
+      contents: read
+      id-token: write
+    uses: drexthealpha/Knos/.github/workflows/prove.yml@v0.3.7
+    with:
+      job: ${{ needs.job.outputs.id }}
+    secrets:
+      KNOS_PROVER_KEY: ${{ secrets.KNOS_PROVER_KEY }}
