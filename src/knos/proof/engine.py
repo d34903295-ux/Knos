@@ -24,7 +24,11 @@ KIND_CHECKS = {"tests": "tests", "ci": "ci", "pypi": "pypi", "urls": "urls", "de
 
 
 def config(repo: Path) -> dict:
-    p = Path(repo) / ".knos" / "proof.toml"
+    return load(Path(repo) / ".knos" / "proof.toml")
+
+
+def load(p: Path) -> dict:
+    p = Path(p)
     if not p.exists():
         return {}
     try:

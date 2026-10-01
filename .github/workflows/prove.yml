@@ -1,0 +1,113 @@
+name: knos prove
+
+# A reusable workflow: a repo that posted a Knos job with `market.post_github` calls this from a pull_request workflow
+# (template: examples/knos-workflow.yml), pinned to a release tag:
+#
+#     uses: drexthealpha/Knos/.github/workflows/prove.yml@v0.3.7
+#
+# The escrow pays the worker only for a GitHub Actions OIDC token whose job_workflow_ref starts with
+# "drexthealpha/Knos/.github/workflows/prove.yml@refs/tags/" and whose audience is "knos:<job id hex>". So the token
+# can only come from this file at a tag, never from a workflow the pull request edited.
+#
+# Security model (two jobs, so untrusted code and the token never meet):
+#   check   runs the pull request's code (its tests) with a read-only GITHUB_TOKEN and NO id-token permission: it can
+#           fail or pass the checks, but it cannot mint the OIDC token and sees no secret. The checks themselves come
+#           from the base branch's .knos/proof.toml, so the pull request cannot rewrite what it is checked against.
+#   attest  runs only if check passed. It never checks out the pull request: it installs knos from PyPI, mints the
+#           OIDC token for audience knos:<job>, and sends it to the escrow, which verifies it on chain and pays.
+on:
+  workflow_call:
+    inputs:
+      job:
+        description: the Knos job id (64 hex characters) this pull request delivers
+        required: true
+        type: string
+      knos-version:
+        description: the knos release (PyPI) both jobs install
+        required: false
+        type: string
+        default: "0.3.7"
+      cluster:
+        description: devnet (default) or localnet
+        required: false
+        type: string
+        default: devnet
+    secrets:
+      KNOS_PROVER_KEY:
+        description: the Solana key that pays the verify transactions (a fee payer, not the buyer)
+        required: true
+    outputs:
+      passed:
+        description: "true when every [[check]] in .knos/proof.toml passed"
+        value: ${{ jobs.check.outputs.passed }}
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      passed: ${{ steps.run.outputs.passed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - name: install knos from PyPI
+        run: uv pip install --system "knos==${{ inputs.knos-version }}"
+      - name: the checks, from the base branch
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/knos"
+          if [ -n "$BASE" ]; then
+            git show "$BASE:.knos/proof.toml" > "$RUNNER_TEMP/knos/proof.toml"
+          else
+            cp .knos/proof.toml "$RUNNER_TEMP/knos/proof.toml"
+          fi
+      - name: knos proof run
+        id: run
+        run: |
+          if knos proof run --toml "$RUNNER_TEMP/knos/proof.toml"; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+  attest:
+    needs: check
+    if: needs.check.outputs.passed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: none
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - name: install knos from PyPI (no pull request code in this job)
+        run: uv pip install --system "knos==${{ inputs.knos-version }}"
+      - name: mint the OIDC token for this job
+        env:
+          JOB: ${{ inputs.job }}
+        run: |
+          case "$JOB" in *[!0-9a-f]*|"") echo "job must be lowercase hex"; exit 1;; esac
+          curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=knos:$JOB" | jq -r .value > "$RUNNER_TEMP/token.txt"
+      - name: knos prove
+        env:
+          JOB: ${{ inputs.job }}
+          KNOS_JOBS_CLUSTER: ${{ inputs.cluster }}
+          KNOS_MEMBER_KEY: ${{ secrets.KNOS_PROVER_KEY }}
+        run: knos prove --job "$JOB" --jwt-file "$RUNNER_TEMP/token.txt"

@@ -34,6 +34,7 @@ PER_COMMAND = {
   knos proof lint                               claims the evidence contradicts
   knos proof learn                              make them required checks
   knos proof receipt "..." [--publish]          evidence root; devnet receipt
+  knos proof run                                every [[check]], no claim (CI)
 
   The Stop hook from `knos init` runs these on the agent's last message: tests
   in a fresh venv, every CI job for HEAD, PyPI, URLs, deleted files, the commit
@@ -196,6 +197,8 @@ PER_COMMAND = {
     "prove": """\
   knos prove "decided to shard by tenant"   an inclusion proof: that fact was
                                             in an agent's record on chain
+  knos prove --job ID --jwt-file token.txt  pay a GitHub-posted job on its
+                                            Actions proof (prove.yml)
 
   The leaf, its Merkle path and the record's root, all checkable by anyone
   holding the salted log.""",
