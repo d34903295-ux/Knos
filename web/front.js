@@ -129,10 +129,14 @@ async function check(ev) {
   out.innerHTML = `<p class="status">Reading GitHub…</p>`;
   const base = `/repos/${ref.owner}/${ref.repo}`;
   try {
-    const pr = await gh(`${base}/pulls/${ref.number}`);
+    // All reads in parallel: refs/pull/N/head is the PR's head commit, so CI needs no wait for the PR's SHA.
+    const head = `${base}/commits/refs/pull/${ref.number}/head`;
+    let [pr, cr, st, index] = await Promise.all([gh(`${base}/pulls/${ref.number}`),
+      gh(`${head}/check-runs?per_page=100`), gh(`${head}/status`), loadIndex()]);
     const sha = pr.head.sha;
-    const [cr, st, index] = await Promise.all([gh(`${base}/commits/${sha}/check-runs?per_page=100`),
-      gh(`${base}/commits/${sha}/status`), loadIndex()]);
+    if (st.sha && st.sha !== sha) {  // pushed to between the reads: read CI at the PR's SHA
+      [cr, st] = await Promise.all([gh(`${base}/commits/${sha}/check-runs?per_page=100`), gh(`${base}/commits/${sha}/status`)]);
+    }
     const claim = findClaim(pr.body), ci = ciVerdict(cr.check_runs || [], st.statuses || []), agent = agentOf(pr);
     let verdict, cls;
     if (!claim) { verdict = "No tests-pass claim in the PR description"; cls = ""; }
@@ -146,7 +150,7 @@ async function check(ev) {
         <dt>PR</dt><dd><a href="${esc(pr.html_url)}">${esc(repo.full_name)}#${pr.number}</a> by ${esc(pr.user.login)}${agent ? ` (${esc(agent)})` : ""}</dd>
         <dt>Claims</dt><dd>${claim ? `“${esc(claim.line)}”` : "nothing about tests passing"}</dd>
         <dt>CI at <code>${esc(sha.slice(0, 7))}</code></dt><dd>${esc(CI_TEXT[ci.cls])}${ci.failed.length
-          ? `: ${ci.failed.slice(0, 8).map(esc).join(", ")}` : ""}</dd>
+          ? `: ${[...new Set(ci.failed)].slice(0, 8).map(esc).join(", ")}` : ""}</dd>
       </dl>
       ${agentRecord(index, agent)}
       <a class="button" id="protect" href="${esc(protectUrl(repo.owner.login, repo.name, repo.default_branch))}" target="_blank" rel="noopener">Protect ${esc(repo.full_name)}</a>
