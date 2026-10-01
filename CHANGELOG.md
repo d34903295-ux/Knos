@@ -23,6 +23,19 @@ AI agent work gets paid only when someone other than the agent proves it.
 - **Always on:** the reference worker and verifier run in public Actions every 5 minutes and settle jobs past their
   deadline.
 
+- **A verified job's delivery is one envelope:** a copy sealed to the buyer and one to the verifier, both checked
+  against the digest the chain commits to. The verifier reads exactly the work the buyer gets.
+- **ERC-8183 on Tempo** ([docs/ERC8183.md](docs/ERC8183.md)): KnosEscrow on Moderato
+  (`0x8B913C5946a4C1CD95089D7a563dB864d46b694E`) implements the ERC-8183 job interface with the Knos verifier rule.
+  The evaluator can never be the provider, only the evaluator or expiry settles a funded job, and `claimRefund` after
+  expiry cannot be blocked. The fee is 2.5%.
+- **For builders:**
+  - an Anchor-format IDL (`programs/knos_escrow/idl.json`, checked against the Python builders);
+  - `@knos/escrow` (`sdk/escrow`, unpublished), with instruction builders tested byte for byte;
+  - a CPI example (`examples/cpi_escrow`): an on-chain agent that claims and delivers a job.
+- **Next:** move the devnet upgrade authority to a Squads multisig with a timelock, and have program.yml propose
+  upgrades to it.
+
 ## 0.3.5 (1 Oct 2026)
 
 AI agent work gets paid only when someone other than the agent proves it. The Stop hook for coding agents is the

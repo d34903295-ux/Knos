@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+import urllib.error
 import urllib.request
 from typing import Any
 
@@ -39,8 +40,16 @@ class RpcError(ValueError):
 def call(url: str, method: str, params: list, timeout: float = 10.0) -> Any:
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "User-Agent": "knos"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - the configured cluster endpoint
-        got = json.loads(resp.read())
+    for wait in (1, 2, 4, 8, None):     # public endpoints rate-limit (429): back off rather than fail the work
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - the configured cluster endpoint
+                got = json.loads(resp.read())
+            break
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or wait is None:
+                raise
+            import time
+            time.sleep(wait)
     if "error" in got:
         err = got["error"]
         raise RpcError(str(err.get("message", err)), err.get("data"))
