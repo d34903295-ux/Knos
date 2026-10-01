@@ -5,9 +5,9 @@ name: always-on worker
 # on every delivered job that names the Knos verifier, and releases or refunds by proof; then it settles jobs past
 # their deadline. Keys are repository secrets; the Sibyl stores (buyer preferences, the worker's past jobs) are
 # carried between runs in the Actions cache, so recall goes into every brief.
-# The 5-minute schedule turns on once the KNOS_WORKER_KEY and KNOS_VERIFIER_KEY secrets are set; until then it
-# runs only by hand and skips without keys.
 on:
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -47,5 +47,9 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       - name: verifier (re-runs the checks; releases or refunds by proof)
         run: '[ -n "$KNOS_MEMBER_KEY" ] || { echo "no KNOS_VERIFIER_KEY secret: skipped"; exit 0; }; knos verify --all --once' 
+        env:
+          KNOS_MEMBER_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}
+      - name: settle jobs past their deadline (anyone may)
+        run: '[ -n "$KNOS_MEMBER_KEY" ] || exit 0; knos jobs settle --all || true'
         env:
           KNOS_MEMBER_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}

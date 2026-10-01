@@ -73,6 +73,7 @@ def test_every_attack_is_refused(env, attack):
         assert not e.refund(e.buyer, j, e.b_tok)
     else:
         assert e.deliver(e.worker, j)
+        vault0 = e.balance(e.vault)                          # delivery returned the claim's stake to the worker
         if attack == "accept_by_worker":
             assert not e.accept(e.worker, j, e.w_tok)
         elif attack == "accept_by_attacker":

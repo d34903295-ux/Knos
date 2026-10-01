@@ -192,6 +192,28 @@ def register(app: typer.Typer, out, Stop) -> None:
         _chain(market.refund, ledger, key, _id(job))
         out.print("[green]✓[/green] refunded")
 
+    @jobs.command("settle")
+    def settle(job: str = typer.Argument(None, help="a job id; omit with --all"),
+               every: bool = typer.Option(False, "--all", help="every job past its deadline")) -> None:
+        """The deadline crank, by anyone: delivered work with no verdict pays the worker; undelivered work refunds the
+        buyer. The job account closes and its rent goes back to the buyer."""
+        from . import market
+        ledger, relay, key = _ctx()
+        if job:
+            ids = [_id(job)]
+        elif every:
+            now = ledger.now()
+            ids = [market.job_id_for(ledger, j.address, relay=relay) for j in ledger.jobs()
+                   if j.state in ("open", "claimed", "delivered") and now > j.deadline]
+            ids = [i for i in ids if i]
+        else:
+            raise Stop("Name a job, or pass --all.")
+        for jid in ids:
+            sig = _chain(market.settle, ledger, key, jid)
+            out.print(f"settled {jid.hex()[:16]}  {sig}", markup=False)
+        if not ids:
+            out.print("Nothing is past its deadline.")
+
     @jobs.command("prefs")
     def prefs(add: str = typer.Option(None, "--add"), forget: str = typer.Option(None, "--forget")) -> None:
         """Your standing preferences, kept on this machine (Sibyl), shared only per job with --share-memory."""
