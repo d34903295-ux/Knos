@@ -29,12 +29,15 @@ use solana_program::{
 #[cfg(not(feature = "no-entrypoint"))]
 solana_program::entrypoint!(process);
 
+mod bounty;
+
 pub const TOKEN_PROGRAM: Pubkey = solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const LEGACY_CONFIG_LEN: usize = 32 + 32 + 32 + 2 + 1; // ["config"]: admin, mint, fee_token, fee_bps, bump (retired)
 // ["config2"]: admin, mint, fee_token, fee_bps u16, min_fee u64, min_amount u64, max_amount u64, paused u8, bump u8
 const CONFIG_LEN: usize = 32 + 32 + 32 + 2 + 8 + 8 + 8 + 1 + 1;
 // state, buyer, worker, amount, deadline, review, brief, result, verifier, proof, stake
 const JOB_LEN: usize = 1 + 32 + 32 + 8 + 8 + 8 + 32 + 32 + 32 + 32 + 8;
+const MINT_JOB_LEN: usize = JOB_LEN + 32; // 0.3.7: a job in a registered mint stores the mint after the stake
 const V034_JOB_LEN: usize = 217;   // jobs posted by 0.3.4: no stake field (claimed without a stake); they settle as before
 const LEGACY_JOB_LEN: usize = 153; // jobs posted before 0.3.4: no verifier, no proof; they settle as before
 // The worker's stake at claim: 10% of the price, at least 0.1 USDC (6 decimals), held in the vault.
@@ -50,11 +53,11 @@ fn err(code: u32, m: &str) -> ProgramError { msg!("knos_escrow: {}", m); Program
 
 struct Job {
     state: u8, buyer: Pubkey, worker: Pubkey, amount: u64, deadline: i64, review: i64, brief: [u8; 32], result: [u8; 32],
-    verifier: Pubkey, proof: [u8; 32], stake: u64,
+    verifier: Pubkey, proof: [u8; 32], stake: u64, mint: Pubkey,
 }
 impl Job {
     fn load(d: &[u8]) -> Result<Job, ProgramError> {
-        if d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
+        if d.len() != MINT_JOB_LEN && d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
         let pk = |o: usize| Pubkey::new_from_array(d[o..o + 32].try_into().unwrap());
         let u = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
         let full = d.len() >= V034_JOB_LEN;
@@ -62,7 +65,8 @@ impl Job {
                  brief: d[89..121].try_into().unwrap(), result: d[121..153].try_into().unwrap(),
                  verifier: if full { pk(153) } else { Pubkey::default() },
                  proof: if full { d[185..217].try_into().unwrap() } else { [0; 32] },
-                 stake: if d.len() == JOB_LEN { u(217) } else { 0 } })
+                 stake: if d.len() >= JOB_LEN { u(217) } else { 0 },
+                 mint: if d.len() == MINT_JOB_LEN { pk(225) } else { Pubkey::default() } })
     }
     fn store(&self, d: &mut [u8]) {
         d[0] = self.state; d[1..33].copy_from_slice(self.buyer.as_ref()); d[33..65].copy_from_slice(self.worker.as_ref());
@@ -71,6 +75,7 @@ impl Job {
         d[121..153].copy_from_slice(&self.result);
         if d.len() >= V034_JOB_LEN { d[153..185].copy_from_slice(self.verifier.as_ref()); d[185..217].copy_from_slice(&self.proof); }
         if d.len() >= JOB_LEN { d[217..225].copy_from_slice(&self.stake.to_le_bytes()); }
+        if d.len() == MINT_JOB_LEN { d[225..257].copy_from_slice(self.mint.as_ref()); }
     }
 }
 
@@ -134,11 +139,19 @@ fn u64_at(d: &[u8], o: usize) -> Result<u64, ProgramError> {
 fn pay_out<'a>(j: &mut Job, job: &AccountInfo<'a>, cfg: &Config, vault_tok: &AccountInfo<'a>, vauth: &AccountInfo<'a>,
                worker_tok: &AccountInfo<'a>, fee_tok: &AccountInfo<'a>, token: &AccountInfo<'a>, vault_bump: u8) -> ProgramResult {
     let (wo, _) = token_owner_mint(worker_tok)?;
-    if wo != j.worker || *fee_tok.key != cfg.fee_token { return Err(err(33, "payee")); }
+    if wo != j.worker { return Err(err(33, "payee")); }
+    if j.mint == Pubkey::default() {
+        if *fee_tok.key != cfg.fee_token { return Err(err(33, "payee")); }
+    } else {
+        // A registered mint's fee goes to a token account of that mint owned by the admin.
+        let (fo, fm) = token_owner_mint(fee_tok)?;
+        if fo != cfg.admin || fm != j.mint { return Err(err(33, "payee")); }
+    }
     let fee = cfg.fee(j.amount).min(j.amount);
     j.state = S::Released as u8; j.store(&mut job.try_borrow_mut_data()?);
-    token_transfer(token, vault_tok, worker_tok, vauth, j.amount - fee, Some(&[b"vault", &[vault_bump]]))?;
-    if fee > 0 { token_transfer(token, vault_tok, fee_tok, vauth, fee, Some(&[b"vault", &[vault_bump]]))?; }
+    let b = [vault_bump]; let seeds = vseeds(&j.mint, &b);
+    token_transfer(token, vault_tok, worker_tok, vauth, j.amount - fee, Some(&seeds[..]))?;
+    if fee > 0 { token_transfer(token, vault_tok, fee_tok, vauth, fee, Some(&seeds[..]))?; }
     Ok(())
 }
 
@@ -149,7 +162,13 @@ fn refund_out<'a>(j: &mut Job, job: &AccountInfo<'a>, vault_tok: &AccountInfo<'a
     if bo != j.buyer { return Err(err(42, "refund to buyer only")); }
     let total = j.amount.checked_add(j.stake).ok_or(ProgramError::ArithmeticOverflow)?;
     j.state = S::Refunded as u8; j.stake = 0; j.store(&mut job.try_borrow_mut_data()?);
-    token_transfer(token, vault_tok, buyer_tok, vauth, total, Some(&[b"vault", &[vault_bump]]))
+    let b = [vault_bump]; let seeds = vseeds(&j.mint, &b);
+    token_transfer(token, vault_tok, buyer_tok, vauth, total, Some(&seeds[..]))
+}
+
+/// The vault authority's signer seeds for a job's mint: ["vault"] (config mint) or ["vault", mint].
+fn vseeds<'s>(mint: &'s Pubkey, bump: &'s [u8; 1]) -> Vec<&'s [u8]> {
+    if *mint == Pubkey::default() { vec![&b"vault"[..], &bump[..]] } else { vec![&b"vault"[..], mint.as_ref(), &bump[..]] }
 }
 
 /// Close a settled job: every lamport (its rent) goes to the buyer who funded it; the account is emptied and handed
@@ -225,7 +244,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         }
         // 1 Post: buyer(s,w), job(w), buyer_token(w), vault_token(w), config2, token, system.
         //   data: id[32] amount u64 work i64 review i64 brief[32] [verifier[32]] (absent or zero = no verifier)
-        1 => {
+        1 | 23 => {
             let buyer = next_account_info(it)?; let job = next_account_info(it)?; let buyer_tok = next_account_info(it)?;
             let vault_tok = next_account_info(it)?; let config = next_account_info(it)?; let token = next_account_info(it)?; let sys = next_account_info(it)?;
             if rest.len() < 32 + 8 + 8 + 8 + 32 { return Err(ProgramError::InvalidInstructionData); }
@@ -238,19 +257,32 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             if !buyer.is_signer || *token.key != TOKEN_PROGRAM || *sys.key != system_program::ID { return Err(err(3, "post accounts")); }
             let cfg = Config::load(config, program_id, &config_key)?;
             if cfg.paused { return Err(err(17, "paused: no new jobs")); }
-            if amount < cfg.min_amount { return Err(err(18, "below the minimum job")); }
+            // 23 PostBounty: a bounty may be funded with any amount, 0 included (paid on proof, the stake still applies).
+            if tag != 23 && amount < cfg.min_amount { return Err(err(18, "below the minimum job")); }
             if cfg.max_amount != 0 && amount > cfg.max_amount { return Err(err(19, "over the per-job cap")); }
             if work <= 0 || review <= 0 { return Err(err(4, "bad terms")); }
             let (job_key, bump) = Pubkey::find_program_address(&[b"job", &id], program_id);
             if *job.key != job_key { return Err(err(5, "job address")); }
             if !job.data_is_empty() || *job.owner != system_program::ID { return Err(err(6, "job exists")); }
             let (vo, vm) = token_owner_mint(vault_tok)?; let (_, bm) = token_owner_mint(buyer_tok)?;
-            if vo != vault_auth || vm != cfg.mint || bm != cfg.mint { return Err(err(7, "vault or mint")); }
-            create_pda(buyer, job, sys, program_id, JOB_LEN, &[b"job", &id, &[bump]])?;
+            // 8th account (0.3.7): the mint registry ["mint", mint] -> a job in that registered mint (257 bytes).
+            let (mint, len) = match next_account_info(it) {
+                Ok(reg) if bm != cfg.mint => {
+                    let rv = bounty::registry_vault(reg, &bm, program_id)?;
+                    let (va, _) = Pubkey::find_program_address(&[b"vault", bm.as_ref()], program_id);
+                    if *vault_tok.key != rv || vo != va || vm != bm { return Err(err(7, "vault or mint")); }
+                    (bm, MINT_JOB_LEN)
+                }
+                _ => {
+                    if vo != vault_auth || vm != cfg.mint || bm != cfg.mint { return Err(err(7, "vault or mint")); }
+                    (Pubkey::default(), JOB_LEN)
+                }
+            };
+            create_pda(buyer, job, sys, program_id, len, &[b"job", &id, &[bump]])?;
             token_transfer(token, buyer_tok, vault_tok, buyer, amount, None)?;
             let now = Clock::get()?.unix_timestamp;
             Job { state: S::Open as u8, buyer: *buyer.key, worker: Pubkey::default(), amount, deadline: now.saturating_add(work), review,
-                  brief, result: [0; 32], verifier, proof: [0; 32], stake: 0 }
+                  brief, result: [0; 32], verifier, proof: [0; 32], stake: 0, mint }
                 .store(&mut job.try_borrow_mut_data()?);
             Ok(())
         }
@@ -267,7 +299,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             if *worker.key == j.buyer { return Err(err(22, "a buyer cannot claim its own job")); }
             if *worker.key == j.verifier { return Err(err(36, "a worker cannot verify its own work")); }
             let (vo, vm) = token_owner_mint(vault_tok)?; let (_, wm) = token_owner_mint(worker_tok)?;
-            if vo != vault_auth || vm != cfg.mint || wm != cfg.mint { return Err(err(7, "vault or mint")); }
+            let jm = if j.mint == Pubkey::default() { cfg.mint } else { j.mint };
+            bounty::vault_bump_for(&j.mint, &vo, program_id, (vault_auth, vault_bump))?;
+            if vm != jm || wm != jm { return Err(err(7, "vault or mint")); }
             let stake = if job.data_len() >= JOB_LEN { stake_for(j.amount) } else { 0 };   // pre-0.3.5 jobs: no stake
             j.worker = *worker.key; j.state = S::Claimed as u8; j.stake = stake;
             j.store(&mut job.try_borrow_mut_data()?);
@@ -279,10 +313,11 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         3 => {
             let worker = next_account_info(it)?; let job = next_account_info(it)?; let worker_tok = next_account_info(it)?;
             let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?; let token = next_account_info(it)?;
-            if *job.owner != *program_id || !worker.is_signer || *vauth.key != vault_auth || *token.key != TOKEN_PROGRAM {
+            if *job.owner != *program_id || !worker.is_signer || *token.key != TOKEN_PROGRAM {
                 return Err(err(8, "deliver accounts"));
             }
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
+            let vb = bounty::vault_bump_for(&j.mint, vauth.key, program_id, (vault_auth, vault_bump))?;
             if j.state != S::Claimed as u8 || *worker.key != j.worker { return Err(err(21, "not worker")); }
             if now > j.deadline { return Err(err(23, "the claim timed out")); }
             let (wo, _) = token_owner_mint(worker_tok)?;
@@ -291,7 +326,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             j.result = arr32(rest, 0)?; j.stake = 0;
             j.state = S::Delivered as u8; j.deadline = now.saturating_add(j.review);
             j.store(&mut job.try_borrow_mut_data()?);
-            if stake > 0 { token_transfer(token, vault_tok, worker_tok, vauth, stake, Some(&[b"vault", &[vault_bump]]))?; }
+            let b = [vb]; let seeds = vseeds(&j.mint, &b);
+            if stake > 0 { token_transfer(token, vault_tok, worker_tok, vauth, stake, Some(&seeds[..]))?; }
             Ok(())
         }
         // 4 Accept: buyer(s), job(w), vault_token(w), vault_auth, worker_token(w), fee_token(w), config2, token, buyer(w)
@@ -302,9 +338,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             let who = next_account_info(it)?; let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
             let worker_tok = next_account_info(it)?; let fee_tok = next_account_info(it)?; let config = next_account_info(it)?; let token = next_account_info(it)?;
             let buyer = next_account_info(it)?;
-            if *job.owner != *program_id || !who.is_signer || *vauth.key != vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(9, "release accounts")); }
+            if *job.owner != *program_id || !who.is_signer || *token.key != TOKEN_PROGRAM { return Err(err(9, "release accounts")); }
             let cfg = Config::load(config, program_id, &config_key)?;
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
+            let vb = bounty::vault_bump_for(&j.mint, vauth.key, program_id, (vault_auth, vault_bump))?;
             if tag == 11 {
                 let (result_hash, proof_root) = (arr32(rest, 0)?, arr32(rest, 32)?);
                 if j.verifier == Pubkey::default() || *who.key != j.verifier { return Err(err(34, "not the job's verifier")); }
@@ -317,7 +354,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
                 if tag == 4 && *who.key != j.buyer { return Err(err(31, "not buyer")); }
                 if tag == 5 && now <= j.deadline { return Err(err(32, "in review")); }
             }
-            pay_out(&mut j, job, &cfg, vault_tok, vauth, worker_tok, fee_tok, token, vault_bump)?;
+            pay_out(&mut j, job, &cfg, vault_tok, vauth, worker_tok, fee_tok, token, vb)?;
             close_job(&j, job, buyer)
         }
         // 6 Reject: buyer(s,w), job(w), vault_token(w), vault_auth, buyer_token(w), token  (inside the review window;
@@ -330,8 +367,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             let who = next_account_info(it)?; let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
             let buyer_tok = next_account_info(it)?; let token = next_account_info(it)?;
             let buyer = if tag == 12 { next_account_info(it)? } else { who };
-            if *job.owner != *program_id || !who.is_signer || *vauth.key != vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(12, "refund accounts")); }
+            if *job.owner != *program_id || !who.is_signer || *token.key != TOKEN_PROGRAM { return Err(err(12, "refund accounts")); }
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
+            let vb = bounty::vault_bump_for(&j.mint, vauth.key, program_id, (vault_auth, vault_bump))?;
             if tag == 12 {
                 if j.verifier == Pubkey::default() || *who.key != j.verifier { return Err(err(34, "not the job's verifier")); }
                 j.proof = arr32(rest, 0)?;
@@ -340,7 +378,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             let ok = if tag == 7 { (j.state == S::Open as u8 || j.state == S::Claimed as u8) && now > j.deadline }
                      else { j.state == S::Delivered as u8 && now <= j.deadline };
             if !ok { return Err(err(41, "not refundable")); }
-            refund_out(&mut j, job, vault_tok, vauth, buyer_tok, token, vault_bump)?;
+            refund_out(&mut j, job, vault_tok, vauth, buyer_tok, token, vb)?;
             close_job(&j, job, buyer)
         }
         // 13 Settle (the deadline crank, anyone): signer(s), job(w), vault_token(w), vault_auth, worker_token(w),
@@ -351,19 +389,24 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             let who = next_account_info(it)?; let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
             let worker_tok = next_account_info(it)?; let fee_tok = next_account_info(it)?; let buyer_tok = next_account_info(it)?;
             let buyer = next_account_info(it)?; let config = next_account_info(it)?; let token = next_account_info(it)?;
-            if *job.owner != *program_id || !who.is_signer || *vauth.key != vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(9, "settle accounts")); }
+            if *job.owner != *program_id || !who.is_signer || *token.key != TOKEN_PROGRAM { return Err(err(9, "settle accounts")); }
             let cfg = Config::load(config, program_id, &config_key)?;
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
+            let vb = bounty::vault_bump_for(&j.mint, vauth.key, program_id, (vault_auth, vault_bump))?;
             if now <= j.deadline { return Err(err(32, "not past the deadline")); }
             if j.state == S::Delivered as u8 {
-                pay_out(&mut j, job, &cfg, vault_tok, vauth, worker_tok, fee_tok, token, vault_bump)?;
+                pay_out(&mut j, job, &cfg, vault_tok, vauth, worker_tok, fee_tok, token, vb)?;
             } else if j.state == S::Open as u8 || j.state == S::Claimed as u8 {
-                refund_out(&mut j, job, vault_tok, vauth, buyer_tok, token, vault_bump)?;
+                refund_out(&mut j, job, vault_tok, vauth, buyer_tok, token, vb)?;
             } else {
                 return Err(err(41, "nothing to settle"));
             }
             close_job(&j, job, buyer)
         }
+        // 20 Faucet, 21 InitFaucetMint (devnet builds only), 22 AddMint: see bounty.rs.
+        20 => bounty::faucet(program_id, accounts, rest),
+        21 => bounty::init_faucet_mint(program_id, accounts, rest, &config_key),
+        22 => bounty::add_mint(program_id, accounts, &config_key),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

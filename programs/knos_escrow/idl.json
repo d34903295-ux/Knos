@@ -2,13 +2,13 @@
  "address": "GwmbMFvyHHwHug5em9dv26oXz2zTgXKGsNdrBxPayRPq",
  "metadata": {
   "name": "knos_escrow",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "spec": "0.1.0",
   "description": "Knos escrow: pay-on-acceptance or pay-on-proof escrow for AI agent jobs (SPL tokens)",
   "repository": "https://github.com/drexthealpha/Knos"
  },
  "docs": [
-  "A native program, not Anchor: each instruction's discriminator is its one-byte tag, accounts carry no discriminator and are told apart by size (Job 225 bytes, 217 for 0.3.4 jobs, 153 before; Config2 124). Layouts are packed little-endian. Every settlement closes the job and returns its rent to the buyer."
+  "A native program, not Anchor: each instruction's discriminator is its one-byte tag, accounts carry no discriminator and are told apart by size (Job 225 bytes, 257 for a job in a registered mint (the job + mint), 217 for 0.3.4 jobs, 153 before; Config2 124). Layouts are packed little-endian. Every settlement closes the job and returns its rent to the buyer."
  ],
  "instructions": [
   {
@@ -972,6 +972,324 @@
     }
    ],
    "args": []
+  },
+  {
+   "name": "faucet",
+   "docs": [
+    "Devnet builds only: mint test USDC from the faucet PDA to the signer's own token account; at most the faucet cap per call, one drip per wallet per hour."
+   ],
+   "discriminator": [
+    20
+   ],
+   "accounts": [
+    {
+     "name": "wallet",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "faucet",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         102,
+         97,
+         117,
+         99,
+         101,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "mint",
+     "writable": true
+    },
+    {
+     "name": "wallet_token",
+     "writable": true
+    },
+    {
+     "name": "drip",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         100,
+         114,
+         105,
+         112
+        ]
+       },
+       {
+        "kind": "account",
+        "path": "wallet"
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": [
+    {
+     "name": "amount",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "init_faucet_mint",
+   "docs": [
+    "Admin, devnet builds only: record the faucet's mint (its mint authority must be the faucet PDA) and the per-call cap."
+   ],
+   "discriminator": [
+    21
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "faucet",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         102,
+         97,
+         117,
+         99,
+         101,
+         116
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "mint"
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": [
+    {
+     "name": "cap",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "add_mint",
+   "docs": [
+    "Admin: register a mint. Its vault is a token account of that mint owned by the PDA [vault, mint]. Jobs posted with the registry store the mint (257 bytes)."
+   ],
+   "discriminator": [
+    22
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "registry",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         109,
+         105,
+         110,
+         116
+        ]
+       },
+       {
+        "kind": "account",
+        "path": "mint"
+       }
+      ]
+     }
+    },
+    {
+     "name": "mint"
+    },
+    {
+     "name": "vault_token"
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": []
+  },
+  {
+   "name": "post_bounty",
+   "docs": [
+    "A bounty (brief {kind: github-bounty, repo, issue}): Post's accounts and args, but the price may be 0. A ninth account, the mint registry, posts in a registered mint (as Post does)."
+   ],
+   "discriminator": [
+    23
+   ],
+   "accounts": [
+    {
+     "name": "buyer",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "job",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         106,
+         111,
+         98
+        ]
+       },
+       {
+        "kind": "arg",
+        "path": "id"
+       }
+      ]
+     }
+    },
+    {
+     "name": "buyer_token",
+     "writable": true
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": [
+    {
+     "name": "id",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "amount",
+     "type": "u64"
+    },
+    {
+     "name": "work",
+     "type": "i64"
+    },
+    {
+     "name": "review",
+     "type": "i64"
+    },
+    {
+     "name": "brief",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "verifier",
+     "type": "pubkey"
+    }
+   ]
   }
  ],
  "accounts": [

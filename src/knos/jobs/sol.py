@@ -30,6 +30,16 @@ Every settlement (4 5 6 7 11 12 13) closes the job account; its rent lamports go
     11 VerifyRelease verifier(s), same accounts as Accept                      data: result_hash[32] proof_root[32]
 
 The fee on release is max(fee_bps of the price, min_fee); the minimum job is min_amount (1 USDC on devnet).
+
+0.3.7 (programs/knos_escrow/src/bounty.rs):
+    20 Faucet         wallet(s,w) faucet mint(w) wallet_token(w) drip(w) token system      data: amount u64
+                      devnet builds only; <= the faucet's cap per call, one drip per wallet per hour (["drip", wallet])
+    21 InitFaucetMint admin(s,w) config faucet(w) mint system                            data: cap u64
+    22 AddMint        admin(s,w) config registry(w) mint vault_token system   registry PDA ["mint", mint]:
+                      mint(32) vault(32) bump; the vault is owned by the PDA ["vault", mint]
+    23 PostBounty     Post's accounts (plus the registry for a registered mint); the price may be 0
+    Post/PostBounty with an 8th account (the registry) post a job in that mint: 257 bytes (the job + mint(32)).
+    Every later builder takes `mint=` for such a job (it picks the ["vault", mint] authority).
 """
 
 from __future__ import annotations
@@ -48,9 +58,10 @@ DEVNET_PROGRAM = os.environ.get("KNOS_ESCROW_PROGRAM", "GwmbMFvyHHwHug5em9dv26oX
 
 STATES = {0: "none", 1: "open", 2: "claimed", 3: "delivered", 4: "released", 5: "refunded"}
 JOB_LEN = 225
+MINT_JOB_LEN = 257            # 0.3.7: a job in a registered mint (the job + mint)
 V034_JOB_LEN = 217            # jobs posted by 0.3.4 (no stake): still parsed, still settle
 LEGACY_JOB_LEN = 153          # jobs posted before 0.3.4 (no verifier, no proof): still parsed, still settle
-JOB_LENS = (JOB_LEN, V034_JOB_LEN, LEGACY_JOB_LEN)
+JOB_LENS = (MINT_JOB_LEN, JOB_LEN, V034_JOB_LEN, LEGACY_JOB_LEN)
 STAKE_BPS = 1_000             # the worker's claim stake: 10% of the price ...
 MIN_STAKE_UNITS = 100_000     # ... at least 0.1 USDC
 
@@ -83,8 +94,34 @@ def legacy_config_pda(pid: Pubkey) -> Pubkey:
     return Pubkey.find_program_address([b"config"], pid)[0]
 
 
-def vault_authority(pid: Pubkey) -> Pubkey:
-    return Pubkey.find_program_address([b"vault"], pid)[0]
+def vault_authority(pid: Pubkey, mint: Pubkey | None = None) -> Pubkey:
+    """The vault authority: ["vault"] for the config mint, ["vault", mint] for a registered mint."""
+    seeds = [b"vault"] if mint is None else [b"vault", bytes(mint)]
+    return Pubkey.find_program_address(seeds, pid)[0]
+
+
+def mint_registry(pid: Pubkey, mint: Pubkey) -> Pubkey:
+    return Pubkey.find_program_address([b"mint", bytes(mint)], pid)[0]
+
+
+def faucet_pda(pid: Pubkey) -> Pubkey:
+    return Pubkey.find_program_address([b"faucet"], pid)[0]
+
+
+def drip_pda(pid: Pubkey, wallet: Pubkey) -> Pubkey:
+    return Pubkey.find_program_address([b"drip", bytes(wallet)], pid)[0]
+
+
+def bounty_brief_json(repo: str, issue: int) -> str:
+    """The brief of a bonded PR bounty (canonical JSON; its sha256 is the job's brief hash)."""
+    import json
+    return json.dumps({"kind": "github-bounty", "repo": repo, "issue": int(issue)}, sort_keys=True,
+                      separators=(",", ":"))
+
+
+def bounty_brief(repo: str, issue: int) -> bytes:
+    import hashlib
+    return hashlib.sha256(bounty_brief_json(repo, issue).encode()).digest()
 
 
 def job_pda(pid: Pubkey, job_id: bytes) -> Pubkey:
@@ -130,16 +167,50 @@ def lower_fee(pid: Pubkey, admin: Pubkey, fee_bps: int) -> Instruction:
 
 
 def post(pid: Pubkey, buyer: Pubkey, job_id: bytes, amount: int, work_s: int, review_s: int, brief_hash: bytes,
-         buyer_token: Pubkey, vault_token: Pubkey, verifier: Pubkey | None = None) -> Instruction:
-    """Post a job. `verifier` (default none) may later release the delivered job on proof (VerifyRelease)."""
+         buyer_token: Pubkey, vault_token: Pubkey, verifier: Pubkey | None = None, mint: Pubkey | None = None,
+         _tag: int = 1) -> Instruction:
+    """Post a job. `verifier` (default none) may later release the delivered job on proof (VerifyRelease).
+    `mint` (default: the config mint) posts in a registered mint; `vault_token` is then that mint's vault."""
     if len(job_id) != 32 or len(brief_hash) != 32:
         raise ValueError("job id and brief hash are 32 bytes")
-    data = bytes([1]) + job_id + struct.pack("<Qqq", amount, work_s, review_s) + brief_hash + \
+    data = bytes([_tag]) + job_id + struct.pack("<Qqq", amount, work_s, review_s) + brief_hash + \
         bytes(verifier or NO_VERIFIER)
     return Instruction(pid, data, [_m(buyer, True, True), _m(job_pda(pid, job_id), False, True),
                                    _m(buyer_token, False, True), _m(vault_token, False, True),
                                    _m(config_pda(pid), False, False), _m(TOKEN, False, False),
-                                   _m(SYSTEM, False, False)])
+                                   _m(SYSTEM, False, False)]
+                       + ([_m(mint_registry(pid, mint), False, False)] if mint is not None else []))
+
+
+def post_bounty(pid: Pubkey, buyer: Pubkey, job_id: bytes, amount: int, work_s: int, review_s: int,
+                brief_hash: bytes, buyer_token: Pubkey, vault_token: Pubkey, verifier: Pubkey | None = None,
+                mint: Pubkey | None = None) -> Instruction:
+    """PostBounty (23): a job whose brief is {kind: "github-bounty", repo, issue}; the price may be 0. The worker
+    still stakes stake_for(price) at claim and gets it back on delivery."""
+    return post(pid, buyer, job_id, amount, work_s, review_s, brief_hash, buyer_token, vault_token, verifier, mint,
+                _tag=23)
+
+
+def faucet(pid: Pubkey, wallet: Pubkey, mint: Pubkey, wallet_token: Pubkey, amount: int) -> Instruction:
+    """Faucet (20, devnet builds only): test USDC to the signer's own token account."""
+    return Instruction(pid, bytes([20]) + struct.pack("<Q", amount),
+                       [_m(wallet, True, True), _m(faucet_pda(pid), False, False), _m(mint, False, True),
+                        _m(wallet_token, False, True), _m(drip_pda(pid, wallet), False, True), _m(TOKEN, False, False),
+                        _m(SYSTEM, False, False)])
+
+
+def init_faucet_mint(pid: Pubkey, admin: Pubkey, mint: Pubkey, cap: int) -> Instruction:
+    """InitFaucetMint (21, admin, devnet only): record the faucet's mint (whose mint authority is faucet_pda)."""
+    return Instruction(pid, bytes([21]) + struct.pack("<Q", cap),
+                       [_m(admin, True, True), _m(config_pda(pid), False, False), _m(faucet_pda(pid), False, True),
+                        _m(mint, False, False), _m(SYSTEM, False, False)])
+
+
+def add_mint(pid: Pubkey, admin: Pubkey, mint: Pubkey, vault_token: Pubkey) -> Instruction:
+    """AddMint (22, admin): register `mint`; `vault_token` is a token account of it owned by vault_authority(pid, mint)."""
+    return Instruction(pid, bytes([22]),
+                       [_m(admin, True, True), _m(config_pda(pid), False, False), _m(mint_registry(pid, mint), False, True),
+                        _m(mint, False, False), _m(vault_token, False, False), _m(SYSTEM, False, False)])
 
 
 def claim(pid: Pubkey, worker: Pubkey, job_id: bytes, worker_token: Pubkey, vault_token: Pubkey) -> Instruction:
@@ -150,30 +221,30 @@ def claim(pid: Pubkey, worker: Pubkey, job_id: bytes, worker_token: Pubkey, vaul
 
 
 def deliver(pid: Pubkey, worker: Pubkey, job_id: bytes, result_hash: bytes, worker_token: Pubkey,
-            vault_token: Pubkey) -> Instruction:
+            vault_token: Pubkey, mint: Pubkey | None = None) -> Instruction:
     """Commit the result hash; the claim's stake goes back to `worker_token`."""
     if len(result_hash) != 32:
         raise ValueError("result hash is 32 bytes")
     return Instruction(pid, bytes([3]) + result_hash,
                        [_m(worker, True, False), _m(job_pda(pid, job_id), False, True), _m(worker_token, False, True),
-                        _m(vault_token, False, True), _m(vault_authority(pid), False, False), _m(TOKEN, False, False)])
+                        _m(vault_token, False, True), _m(vault_authority(pid, mint), False, False), _m(TOKEN, False, False)])
 
 
 def _payout(tag: int, data: bytes, pid: Pubkey, signer: Pubkey, job_id: bytes, vault_token: Pubkey,
-            worker_token: Pubkey, fee_token: Pubkey, buyer: Pubkey) -> Instruction:
+            worker_token: Pubkey, fee_token: Pubkey, buyer: Pubkey, mint: Pubkey | None = None) -> Instruction:
     return Instruction(pid, bytes([tag]) + data,
                        [_m(signer, True, signer == buyer), _m(job_pda(pid, job_id), False, True),
-                        _m(vault_token, False, True), _m(vault_authority(pid), False, False),
+                        _m(vault_token, False, True), _m(vault_authority(pid, mint), False, False),
                         _m(worker_token, False, True), _m(fee_token, False, True), _m(config_pda(pid), False, False),
                         _m(TOKEN, False, False), _m(buyer, signer == buyer, True)])
 
 
 def settle(pid: Pubkey, signer: Pubkey, job_id: bytes, vault_token: Pubkey, worker_token: Pubkey, fee_token: Pubkey,
-           release: bool = False, buyer: Pubkey | None = None) -> Instruction:
+           release: bool = False, buyer: Pubkey | None = None, mint: Pubkey | None = None) -> Instruction:
     """Accept (the buyer) or, with release=True, release by anyone after the review window: worker paid, fee taken.
     The job closes; its rent goes to `buyer` (default: the signer, i.e. Accept)."""
     return _payout(5 if release else 4, b"", pid, signer, job_id, vault_token, worker_token, fee_token,
-                   buyer or signer)
+                   buyer or signer, mint)
 
 
 def accept(pid, buyer, job_id, vault_token, worker_token, fee_token) -> Instruction:
@@ -185,50 +256,52 @@ def release(pid, anyone, job_id, vault_token, worker_token, fee_token, buyer: Pu
 
 
 def verify_release(pid: Pubkey, verifier: Pubkey, job_id: bytes, result_hash: bytes, proof_root: bytes,
-                   vault_token: Pubkey, worker_token: Pubkey, fee_token: Pubkey, buyer: Pubkey) -> Instruction:
+                   vault_token: Pubkey, worker_token: Pubkey, fee_token: Pubkey, buyer: Pubkey,
+                   mint: Pubkey | None = None) -> Instruction:
     """Paid on proof: the job's verifier releases a delivered job whose committed result is `result_hash`, recording
     `proof_root`. The program refuses any other hash ("verifier releases unproven work"). The job closes (rent to
     `buyer`)."""
     if len(result_hash) != 32 or len(proof_root) != 32:
         raise ValueError("result hash and proof root are 32 bytes")
-    return _payout(11, result_hash + proof_root, pid, verifier, job_id, vault_token, worker_token, fee_token, buyer)
+    return _payout(11, result_hash + proof_root, pid, verifier, job_id, vault_token, worker_token, fee_token, buyer,
+                   mint)
 
 
 def _refundish(tag: int, pid: Pubkey, buyer: Pubkey, job_id: bytes, vault_token: Pubkey,
-               buyer_token: Pubkey) -> Instruction:
+               buyer_token: Pubkey, mint: Pubkey | None = None) -> Instruction:
     return Instruction(pid, bytes([tag]), [_m(buyer, True, True), _m(job_pda(pid, job_id), False, True),
-                                           _m(vault_token, False, True), _m(vault_authority(pid), False, False),
+                                           _m(vault_token, False, True), _m(vault_authority(pid, mint), False, False),
                                            _m(buyer_token, False, True), _m(TOKEN, False, False)])
 
 
-def reject(pid, buyer, job_id, vault_token, buyer_token) -> Instruction:
+def reject(pid, buyer, job_id, vault_token, buyer_token, mint: Pubkey | None = None) -> Instruction:
     """The buyer rejects delivered work inside the review window (never a job that names a verifier)."""
-    return _refundish(6, pid, buyer, job_id, vault_token, buyer_token)
+    return _refundish(6, pid, buyer, job_id, vault_token, buyer_token, mint)
 
 
-def refund(pid, buyer, job_id, vault_token, buyer_token) -> Instruction:
-    return _refundish(7, pid, buyer, job_id, vault_token, buyer_token)
+def refund(pid, buyer, job_id, vault_token, buyer_token, mint: Pubkey | None = None) -> Instruction:
+    return _refundish(7, pid, buyer, job_id, vault_token, buyer_token, mint)
 
 
 def verify_reject(pid: Pubkey, verifier: Pubkey, job_id: bytes, proof_root: bytes, vault_token: Pubkey,
-                  buyer_token: Pubkey, buyer: Pubkey) -> Instruction:
+                  buyer_token: Pubkey, buyer: Pubkey, mint: Pubkey | None = None) -> Instruction:
     """The job's verifier fails the delivered work inside the review window: the buyer is refunded, the job closes."""
     if len(proof_root) != 32:
         raise ValueError("proof root is 32 bytes")
     return Instruction(pid, bytes([12]) + proof_root,
                        [_m(verifier, True, False), _m(job_pda(pid, job_id), False, True), _m(vault_token, False, True),
-                        _m(vault_authority(pid), False, False), _m(buyer_token, False, True), _m(TOKEN, False, False),
+                        _m(vault_authority(pid, mint), False, False), _m(buyer_token, False, True), _m(TOKEN, False, False),
                         _m(buyer, False, True)])
 
 
 def crank(pid: Pubkey, anyone: Pubkey, job_id: bytes, vault_token: Pubkey, worker_token: Pubkey, fee_token: Pubkey,
-          buyer_token: Pubkey, buyer: Pubkey) -> Instruction:
+          buyer_token: Pubkey, buyer: Pubkey, mint: Pubkey | None = None) -> Instruction:
     """Settle (tag 13), the deadline crank, by anyone: delivered past the review deadline -> the worker is paid; open
     or claimed past the work deadline -> the buyer is refunded (with a timed-out claim's stake). The job closes.
     For an unclaimed job `worker_token` is unused: pass any token account (e.g. the buyer's)."""
     return Instruction(pid, bytes([13]),
                        [_m(anyone, True, anyone == buyer), _m(job_pda(pid, job_id), False, True),
-                        _m(vault_token, False, True), _m(vault_authority(pid), False, False),
+                        _m(vault_token, False, True), _m(vault_authority(pid, mint), False, False),
                         _m(worker_token, False, True), _m(fee_token, False, True), _m(buyer_token, False, True),
                         _m(buyer, anyone == buyer, True), _m(config_pda(pid), False, False), _m(TOKEN, False, False)])
 
@@ -247,6 +320,7 @@ class Job:
     verifier: Pubkey | None = None
     proof: bytes | None = None
     stake: int = 0                 # the claim's stake held in the vault (0 once delivered or settled)
+    mint: Pubkey | None = None     # a registered mint's job (257 bytes); None = the config mint
 
 
 def parse_job(address: Pubkey, raw: bytes) -> Job:
@@ -261,11 +335,14 @@ def parse_job(address: Pubkey, raw: bytes) -> Job:
         v = Pubkey.from_bytes(raw[153:185])
         verifier = None if v == NO_VERIFIER else v
         proof = None if raw[185:217] == bytes(32) else bytes(raw[185:217])
-    if len(raw) == JOB_LEN:
+    mint = None
+    if len(raw) >= JOB_LEN:
         stake, = struct.unpack_from("<Q", raw, 217)
+    if len(raw) == MINT_JOB_LEN:
+        mint = Pubkey.from_bytes(raw[225:257])
     return Job(address, STATES.get(state, "unknown"), Pubkey.from_bytes(raw[1:33]),
                None if worker == Pubkey.default() else worker, amount, deadline, review, bytes(raw[89:121]),
-               None if result == bytes(32) else result, verifier, proof, stake)
+               None if result == bytes(32) else result, verifier, proof, stake, mint)
 
 
 def parse_config(raw: bytes) -> dict:
