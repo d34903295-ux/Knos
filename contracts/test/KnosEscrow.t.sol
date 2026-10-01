@@ -62,7 +62,7 @@ contract KnosEscrowTest {
             _reverts(worker, abi.encodeCall(e.accept, (id)));                     // accept by the worker
             _reverts(attacker, abi.encodeCall(e.accept, (id)));                   // accept by an outsider
             _reverts(attacker, abi.encodeCall(e.release, (id)));                  // early release
-            _reverts(worker, abi.encodeCall(e.reject, (id)));                     // reject by the worker
+            _reverts(worker, abi.encodeWithSignature("reject(bytes32)", id));     // reject by the worker
             _reverts(attacker, abi.encodeCall(e.verifyRelease, (id, bytes32("r"), bytes32("p")))); // no verifier named
             vm.prank(buyer); e.accept(id);
             _reverts(buyer, abi.encodeCall(e.accept, (id)));                      // double accept
@@ -172,7 +172,7 @@ contract KnosEscrowTest {
         else if (a == 3) address(e).call(abi.encodeCall(e.deliver, (id, bytes32("r"))));
         else if (a == 4) address(e).call(abi.encodeCall(e.accept, (id)));
         else if (a == 5) address(e).call(abi.encodeCall(e.release, (id)));
-        else if (a == 6) address(e).call(abi.encodeCall(e.reject, (id)));
+        else if (a == 6) address(e).call(abi.encodeWithSignature("reject(bytes32)", id));
         else if (a == 7) address(e).call(abi.encodeCall(e.refund, (id)));
         else if (a == 8) address(e).call(abi.encodeCall(e.verifyRelease, (id, x % 2 == 0 ? bytes32("r") : bytes32("x"), bytes32("p"))));
         else vm.warp(block.timestamp + 35);
@@ -184,6 +184,126 @@ contract KnosEscrowTest {
         if (s == KnosEscrow.S.Open || s == KnosEscrow.S.Claimed) { vm.prank(b); e.refund(id); return 0; }
         return s == KnosEscrow.S.Released ? e.fee(amount) : 0;
     }
+    // ---- ERC-8183 (0.3.6) ----
+    // createJob (client = buyer, provider = worker, evaluator = verifier) -> setBudget -> fund -> submit.
+    function _acp(address evaluator) internal returns (uint256 id) {
+        vm.prank(buyer); id = e.createJob(worker, evaluator, block.timestamp + 600, "job", address(0));
+        vm.prank(worker); e.setBudget(id, P, "");
+        vm.prank(buyer); e.fund(id, "");
+        vm.prank(worker); e.submit(id, bytes32("deliv"), "");
+    }
+    function _status(uint256 id) internal view returns (KnosEscrow.JobStatus) { return e.getJob(id).status; }
+    function _acpReject(uint256 id) internal pure returns (bytes memory) {
+        return abi.encodeWithSignature("reject(uint256,bytes32,bytes)", id, bytes32("no"), bytes(""));
+    }
+
+    function test_erc8183_evaluator_only_complete() public {
+        uint256 id = _acp(verifier);
+        _reverts(buyer, abi.encodeCall(e.complete, (id, bytes32("ok"), "")));      // client cannot complete
+        _reverts(worker, abi.encodeCall(e.complete, (id, bytes32("ok"), "")));     // provider cannot complete
+        _reverts(attacker, abi.encodeCall(e.complete, (id, bytes32("ok"), "")));
+        vm.prank(verifier); e.complete(id, bytes32("proof-root"), "");
+        require(_status(id) == KnosEscrow.JobStatus.Completed, "completed");
+        require(t.balanceOf(worker) == uint256(P) * 95 / 100 && t.balanceOf(fee) == uint256(P) * 5 / 100, "95/5");
+        _reverts(verifier, abi.encodeCall(e.complete, (id, bytes32("ok"), "")));   // double complete
+        _reverts(verifier, _acpReject(id));                                        // reject after complete
+        vm.warp(block.timestamp + 601);
+        _reverts(buyer, abi.encodeCall(e.claimRefund, (id)));                      // refund after complete
+        require(t.balanceOf(address(e)) == 0, "stuck");
+    }
+    function test_erc8183_evaluator_only_reject_client_cannot() public {
+        uint256 b0 = t.balanceOf(buyer);
+        uint256 id = _acp(verifier);
+        _reverts(buyer, _acpReject(id));                    // client cannot reject once an evaluator holds it
+        _reverts(worker, _acpReject(id));
+        _reverts(attacker, _acpReject(id));
+        vm.prank(verifier); e.reject(id, bytes32("bad"), "");
+        require(_status(id) == KnosEscrow.JobStatus.Rejected && t.balanceOf(buyer) == b0, "full refund");
+        require(t.balanceOf(fee) == 0, "no fee on reject");
+        // the evaluator may also reject a funded job before submission; the client cannot
+        vm.prank(buyer); uint256 f = e.createJob(worker, verifier, block.timestamp + 600, "f", address(0));
+        vm.prank(worker); e.setBudget(f, P, ""); vm.prank(buyer); e.fund(f, "");
+        _reverts(buyer, _acpReject(f));
+        vm.prank(verifier); e.reject(f, bytes32("x"), "");
+        // while Open (nothing escrowed) the client may withdraw the job
+        vm.prank(buyer); uint256 o = e.createJob(worker, verifier, block.timestamp + 600, "o", address(0));
+        _reverts(verifier, _acpReject(o));
+        vm.prank(buyer); e.reject(o, bytes32("cancel"), "");
+        require(_status(o) == KnosEscrow.JobStatus.Rejected && t.balanceOf(buyer) == b0, "nothing moved");
+    }
+    function test_erc8183_provider_is_never_evaluator() public {
+        _reverts(buyer, abi.encodeCall(e.createJob, (worker, worker, block.timestamp + 600, "s", address(0))));
+        _reverts(buyer, abi.encodeCall(e.createJob, (worker, address(0), block.timestamp + 600, "z", address(0))));
+        vm.prank(buyer); uint256 id = e.createJob(address(0), verifier, block.timestamp + 600, "later", address(0));
+        _reverts(buyer, abi.encodeCall(e.setProvider, (id, verifier)));            // evaluator as provider, later
+        _reverts(attacker, abi.encodeCall(e.setProvider, (id, worker)));           // only the client sets it
+        _reverts(buyer, abi.encodeCall(e.fund, (id, "")));                         // no provider yet
+        vm.prank(buyer); e.setProvider(id, worker);
+        _reverts(buyer, abi.encodeCall(e.setProvider, (id, rival)));               // set once
+        // other ERC-8183 rules: 5-minute expiry floor, no unlisted hook, budget by provider, minimum job
+        _reverts(buyer, abi.encodeCall(e.createJob, (worker, verifier, block.timestamp + 300, "e", address(0))));
+        _reverts(buyer, abi.encodeCall(e.createJob, (worker, verifier, block.timestamp + 600, "h", address(0xF00))));
+        _reverts(buyer, abi.encodeCall(e.setBudget, (id, P, "")));
+        vm.prank(worker); e.setBudget(id, MIN - 1, "");
+        _reverts(buyer, abi.encodeCall(e.fund, (id, "")));                         // below the minimum job
+        vm.prank(worker); e.setBudget(id, P, "");
+        _reverts(worker, abi.encodeCall(e.submit, (id, bytes32("d"), "")));        // not funded
+        vm.prank(buyer); e.fund(id, "");
+        _reverts(worker, abi.encodeCall(e.setBudget, (id, 2 * P, "")));            // budget fixed once funded
+        _reverts(rival, abi.encodeCall(e.submit, (id, bytes32("d"), "")));         // only the provider submits
+        vm.prank(guardian); e.setPaused(true);
+        vm.prank(worker); e.submit(id, bytes32("d"), "");                          // a pause never traps a funded job
+        vm.prank(verifier); e.complete(id, bytes32("ok"), "");
+    }
+    function test_erc8183_claimRefund_after_expiry_cannot_be_blocked() public {
+        uint256 b0 = t.balanceOf(buyer);
+        uint256 s = _acp(verifier);                                                // submitted, evaluator silent
+        vm.prank(buyer); uint256 f = e.createJob(worker, verifier, block.timestamp + 600, "f", address(0));
+        vm.prank(worker); e.setBudget(f, P, ""); vm.prank(buyer); e.fund(f, "");   // funded, provider silent
+        _reverts(attacker, abi.encodeCall(e.claimRefund, (s)));                   // not before expiry
+        _reverts(buyer, abi.encodeCall(e.claimRefund, (f)));
+        vm.warp(block.timestamp + 600);
+        _reverts(worker, abi.encodeCall(e.submit, (f, bytes32("late"), "")));      // too late to submit
+        vm.prank(guardian); e.setPaused(true);                                     // even paused
+        vm.prank(attacker); e.claimRefund(s);                                      // anyone, to the client
+        vm.prank(rival); e.claimRefund(f);
+        require(_status(s) == KnosEscrow.JobStatus.Expired && _status(f) == KnosEscrow.JobStatus.Expired, "expired");
+        require(t.balanceOf(buyer) == b0 && t.balanceOf(fee) == 0 && t.balanceOf(address(e)) == 0, "refunded, no fee");
+        _reverts(buyer, abi.encodeCall(e.claimRefund, (s)));                       // only once
+        _reverts(verifier, abi.encodeCall(e.complete, (s, bytes32("ok"), "")));
+    }
+    function test_erc8183_fee_only_on_complete() public {
+        uint256 c = _acp(verifier); vm.prank(verifier); e.complete(c, bytes32("ok"), "");
+        uint256 r = _acp(verifier); vm.prank(verifier); e.reject(r, bytes32("no"), "");
+        uint256 x = _acp(verifier); vm.warp(block.timestamp + 601); e.claimRefund(x);
+        require(t.balanceOf(fee) == e.fee(P) && t.balanceOf(worker) == P - e.fee(P), "one fee, from the completed job");
+        require(t.balanceOf(address(e)) == 0, "stuck");
+    }
+    function testFuzz_erc8183_conservation(uint8[16] calldata acts, uint8[16] calldata who) public {
+        address[4] memory ppl = [buyer, worker, verifier, attacker];
+        for (uint256 k = 1; k < 4; k++) { t.mint(ppl[k], 1e12); vm.prank(ppl[k]); t.approve(address(e), type(uint256).max); }
+        uint256 total = _sum(ppl);
+        for (uint256 k; k < 16; k++) {
+            uint256 id = 1 + (who[k] >> 2) % 3; uint8 a = acts[k] % 9; address w = ppl[who[k] % 4];
+            vm.prank(w);
+            if (a == 0) address(e).call(abi.encodeCall(e.createJob, (worker, verifier, block.timestamp + 400, "j", address(0))));
+            else if (a == 1) address(e).call(abi.encodeCall(e.setBudget, (id, MIN + acts[k], "")));
+            else if (a == 2) address(e).call(abi.encodeCall(e.fund, (id, "")));
+            else if (a == 3) address(e).call(abi.encodeCall(e.submit, (id, bytes32("d"), "")));
+            else if (a == 4) address(e).call(abi.encodeCall(e.complete, (id, bytes32("ok"), "")));
+            else if (a == 5) address(e).call(_acpReject(id));
+            else if (a == 6) address(e).call(abi.encodeCall(e.claimRefund, (id)));
+            else vm.warp(block.timestamp + 200);
+            require(_sum(ppl) == total, "tokens created or destroyed");
+        }
+        vm.warp(block.timestamp + 1000);
+        for (uint256 i = 1; i <= e.jobCount(); i++) {
+            KnosEscrow.JobStatus s = _status(i);
+            if (s == KnosEscrow.JobStatus.Funded || s == KnosEscrow.JobStatus.Submitted) e.claimRefund(i);
+        }
+        require(t.balanceOf(address(e)) == 0, "funds stuck in escrow");
+    }
+
     function _sum(address[4] memory ppl) internal view returns (uint256 s) {
         for (uint256 k; k < 4; k++) s += t.balanceOf(ppl[k]);
         s += t.balanceOf(fee) + t.balanceOf(address(e));
