@@ -232,9 +232,9 @@ PER_COMMAND = {
     "restore": "  knos restore\n\n  Reads .knos/decisions.md back. Claims are not restored.",
     "who": "  knos who\n\n  Which agents close what they claim, and the hold that has earned them.",
     "memory": """\
-  knos memory export [--out FILE]   every Sibyl record here, versioned JSON + sha256
+  knos memory export [--out FILE]   every Sibyl record here: JSON + sha256
   knos memory import FILE           merge one back; safe to run twice
-  knos memory note "..."            the continuity note the next session starts with""",
+  knos memory note "..."            what the next session here starts with""",
 }
 PER_COMMAND["connect"] = PER_COMMAND["init"]
 PER_COMMAND["guard"] = PER_COMMAND["init"]
