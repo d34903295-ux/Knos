@@ -50,6 +50,65 @@ adopted when 0.13 is final.
 - **The verifier key itself.** It is a hot key on the verifier's machine; a stolen verifier key can release jobs that
   name it until those jobs settle.
 
+## What a Knos proof proves
+
+A GitHub-posted job (0.3.8) is paid on a proof with these parts:
+
+- **GitHub's OIDC token for the pinned workflow.** The token is minted by GitHub Actions for a run of Knos's
+  `.github/workflows/prove.yml` at a pinned commit (its `job_workflow_ref`), and is issued by
+  `https://token.actions.githubusercontent.com`. A pull request cannot mint it from a workflow of its own.
+- **Run on the PR head, with the funder's checks.** The run checks out the pull request's head commit, then overlays
+  `tests/`, the CI configuration and `.knos/proof.toml` from the base branch. The pull request cannot rewrite the
+  tests or checks it is judged by.
+- **Held-out acceptance tests, fail to pass.** The funder's acceptance tests fail on the base commit and pass on the
+  PR head. A change that leaves them failing, or tests that already passed before the change, prove nothing and are
+  refused.
+- **Test count and sentinel.** The run records how many tests ran and checks a sentinel, so a suite that silently
+  collects zero tests, or a run that skips the acceptance tests, does not pass.
+- **Verified on chain.** The escrow program verifies GitHub's RSA signature over the token on Solana, against
+  GitHub's JWKS keys registered with the escrow. No Knos server, maintainer or LLM sits between the token and the
+  payout.
+- **The audience binds the payment.** The token's `aud` binds the job, the head commit SHA, the hash of the checks
+  that ran, and the payout account. A token minted for one job, commit, check set or recipient cannot pay another.
+
+## What it does not prove
+
+- **Code quality beyond the tests.** Readability, design, performance and security are not checked unless a test or
+  a `.knos/proof.toml` check asserts them.
+- **Tests the funder didn't write.** Only the funder's held-out tests and checks are evidence. Tests the PR adds can
+  run, but they are not what the payment rests on.
+- **That GitHub, or its signing keys, is honest.** The proof trusts GitHub Actions to have run the workflow it says
+  it ran, and trusts GitHub's OIDC keys. A compromised or dishonest GitHub, or a leaked GitHub signing key, can forge
+  a proof.
+- **That the implementation is real.** A stub that special-cases weak tests (returns the expected values, detects
+  the test harness) satisfies them. The defence is stronger held-out tests, not the proof.
+- **That the runner was not compromised.** The checks run on a GitHub-hosted runner. Code running on that runner
+  during the check job, including the pull request's own code under test, could interfere with the run. The token is
+  minted in a separate job that does not run PR code, but a compromised runner image or a GitHub-side compromise is
+  outside the proof.
+
+## The Stop hook offline
+
+`knos hook proof` (`src/knos/proof/hook.py`) runs when an agent tries to stop. With no network, it behaves as follows:
+
+- **Nothing to prove: allowed.** If the agent's last message does not claim the work is done, or the directory is not
+  a git repository, the stop is allowed with no checks run, online or offline.
+- **No check is skipped for being offline.** Only the checks the agent's claim calls for run (plus the repo's rules
+  and `.knos/proof.toml` checks). A network check that cannot reach the network fails; it does not pass:
+  - `ci` (`gh run list` for HEAD) fails with "gh could not list runs" (60 s timeout per `gh` call);
+  - `pypi` fails with HTTP 0 (20 s timeout);
+  - `urls` fails for each URL with code 0 (20 s timeout each);
+  - `tests` fails if the project cannot be installed into a fresh venv without the network (280 s timeout). It can
+    pass if every dependency is already in the local uv or pip cache.
+  - Local checks run as usual: `deleted`, `author`, the repo's rules (from the local Sibyl store, or none if it
+    cannot open), and custom `[[check]]` commands.
+- **It never blocks forever.** Each block records a digest of the failing evidence for the session. Offline failures
+  give the same evidence each time (the same HTTP 0, the same SHA, the same exit code), so the digest does not change.
+  After `MAX_BLOCKS` = 3 blocks on unchanged evidence, the next stop is allowed, with a warning that names the
+  unproven claim and asks the agent to say plainly what is not done.
+- **A Knos error allows.** Any exception in the hook is logged to `~/.knos/hook.log` and the stop is allowed. A broken
+  install must never trap an agent.
+
 ## Keys
 
 | key | where | protection | what it can do |
