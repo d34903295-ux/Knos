@@ -112,6 +112,7 @@ def stop(payload: dict, store=None, runners=None) -> tuple[str, str]:
 
 
 RECEIPT_MARK = "knos-receipt:"
+BOT_LOGINS = ("github-actions", "github-actions[bot]", "app/github-actions")
 
 
 def _gh(repo: Path, *args: str, inp: str | None = None) -> str | None:
@@ -130,7 +131,7 @@ def pr_receipt(repo: Path, v, claim: str, gh=_gh, publish=None) -> str | None:
     root instead. Idempotent per evidence root. Off with KNOS_PR_RECEIPT=0. Returns the line added, or None."""
     if os.environ.get("KNOS_PR_RECEIPT", "1") == "0":
         return None
-    out = gh(repo, "pr", "view", "--json", "number,body,state")
+    out = gh(repo, "pr", "view", "--json", "number,body,state,comments")
     if not out:
         return None
     pr = json.loads(out)
@@ -142,6 +143,12 @@ def pr_receipt(repo: Path, v, claim: str, gh=_gh, publish=None) -> str | None:
     body = pr.get("body") or ""
     if root.hex() in body:
         return None
+    paid = [m.group(0) for c in pr.get("comments") or [] if c.get("author", {}).get("login") in BOT_LOGINS
+            for m in [re.search(r"https://\S+/receipt\.html\?a=\w+", c.get("body") or "")] if m]
+    if paid and paid[-1] in body:
+        return None
+    if paid:   # the escrow paid this PR: link the payment's receipt (the relay attested it), no new attestation
+        publish = lambda: paid[-1].rsplit("=", 1)[1]  # noqa: E731
     if publish is None:
         def publish():
             from ..jobs import net

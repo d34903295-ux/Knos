@@ -143,6 +143,23 @@ def test_hook_adds_receipt_line_to_open_pr(tmp_path, monkeypatch):
     assert hook.pr_receipt(tmp_path, v, "x", gh=lambda *a, **k: None) is None
 
 
+def test_hook_links_the_paid_receipt(tmp_path, monkeypatch):
+    from knos.proof import checks
+    monkeypatch.setattr(checks, "head", lambda repo: "f" * 40)
+    v = SimpleNamespace(results=[checks.Result("tests", True, "3 passed")])
+    url = "https://drexthealpha.github.io/Knos/receipt.html?a=Paid111"
+    edits = []
+
+    def gh(repo, *args, inp=None):
+        if args[:2] == ("pr", "view"):
+            return json.dumps({"number": 2, "body": "Fixes #1", "state": "OPEN", "comments": [
+                {"author": {"login": "github-actions"}, "body": f"Knos: paid. Job x.\nReceipt: {url}"}]})
+        edits.append(inp)
+        return "ok"
+    line = hook.pr_receipt(tmp_path, v, "all tests pass", gh=gh, publish=lambda: "NEVER")
+    assert url in line and url in edits[0]
+
+
 def test_judge_learns_a_contributing_violation_and_requires_it_next(tmp_path):
     from knos.jobs import prove
     from knos.proof import history
