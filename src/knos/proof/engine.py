@@ -80,11 +80,13 @@ def _cache_path() -> Path:
     return paths.home() / "proof-cache.json"
 
 
-def needed(claim: claims.Claim, cfg: dict, store, repo: Path | None = None) -> tuple[list[str], set[str]]:
+def needed(claim: claims.Claim, cfg: dict, store, repo: Path | None = None,
+           agent: str | None = None) -> tuple[list[str], set[str]]:
     names = {KIND_CHECKS[k] for k in claim.kinds if k in KIND_CHECKS}
     if repo is not None and any(r.get("origin") == "contributing" for r in history.repo_rules(store, repo)):
         names.add("repo-rules")
     learned = history.required(store, claim.kinds | ({"release"} if "pypi" in claim.kinds else set()))
+    learned |= history.tamper_checks_required(store, repo, agent)   # tampering caught on this repo or by this agent
     for c in cfg.get("check", []) or []:
         if c.get("name") and (not c.get("when") or re.search(c["when"], claim.text, re.I)):
             names.add(f"custom:{c['name']}")
@@ -157,17 +159,20 @@ def run_check(name: str, repo: Path, claim: claims.Claim, cfg: dict, runners: di
     if name.startswith("custom:"):
         spec = next((c for c in cfg.get("check", []) if f"custom:{c.get('name')}" == name), {})
         return checks.custom(repo, spec.get("name", name), spec.get("run", "false"))
+    if name.startswith("tamper:"):   # fail closed: only the prove judge (passed in as a runner) can clear it
+        return checks.Result(name, False, f"required since {name[7:]} was caught here; run by knos.jobs.prove.judge")
     return checks.Result(name, False, "unknown check")
 
 
-def evaluate(repo: Path, text: str, store=None, runners: dict | None = None, use_cache: bool = True) -> Verdict:
+def evaluate(repo: Path, text: str, store=None, runners: dict | None = None, use_cache: bool = True,
+             agent: str | None = None) -> Verdict:
     repo = Path(repo)
     store = store if store is not None else history.NullStore()
     claim = claims.read(text)
     if not claim.says_done:
         return Verdict(True, claim)
     cfg = config(repo)
-    names, learned = needed(claim, cfg, store, repo)
+    names, learned = needed(claim, cfg, store, repo, agent)
     gate = [n for n in names if n == "repo-rules" or n.startswith("rule:")]
     names = gate + [n for n in names if n not in gate]   # the repo's rules first: nothing runs past a violation
     state = _tree_state(repo)
