@@ -68,7 +68,7 @@ struct Job {
 }
 impl Job {
     fn load(d: &[u8]) -> Result<Job, ProgramError> {
-        if d.len() != MINT_JOB_LEN && d.len() != github::GH_JOB_LEN && d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
+        if d.len() != MINT_JOB_LEN && d.len() != github::GH_JOB_LEN && d.len() != github::GH_V037_JOB_LEN && d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
         let pk = |o: usize| Pubkey::new_from_array(d[o..o + 32].try_into().unwrap());
         let u = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
         let full = d.len() >= V034_JOB_LEN;
@@ -309,6 +309,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             if j.state != S::Open as u8 || now > j.deadline { return Err(err(20, "not open")); }
             if *worker.key == j.buyer { return Err(err(22, "a buyer cannot claim its own job")); }
             if *worker.key == j.verifier { return Err(err(36, "a worker cannot verify its own work")); }
+            if job.data_len() == github::GH_JOB_LEN && job.try_borrow_data()?[github::GH_STAKE_REQ] == 0 {
+                return Err(err(78, "no claim on this github job: proofs are permissionless"));
+            }
             let (vo, vm) = token_owner_mint(vault_tok)?; let (_, wm) = token_owner_mint(worker_tok)?;
             let jm = if j.mint == Pubkey::default() { cfg.mint } else { j.mint };
             bounty::vault_bump_for(&j.mint, &vo, program_id, (vault_auth, vault_bump))?;
@@ -330,7 +333,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
             let vb = bounty::vault_bump_for(&j.mint, vauth.key, program_id, (vault_auth, vault_bump))?;
             if j.state != S::Claimed as u8 || *worker.key != j.worker { return Err(err(21, "not worker")); }
-            if job.data_len() == github::GH_JOB_LEN { return Err(err(77, "a github job settles by proof, not delivery")); }
+            if job.data_len() == github::GH_JOB_LEN || job.data_len() == github::GH_V037_JOB_LEN { return Err(err(77, "a github job settles by proof, not delivery")); }
             if now > j.deadline { return Err(err(23, "the claim timed out")); }
             let (wo, _) = token_owner_mint(worker_tok)?;
             if wo != j.worker { return Err(err(33, "stake back to the worker only")); }

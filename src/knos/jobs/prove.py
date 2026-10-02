@@ -34,18 +34,21 @@ def claims(jwt: str) -> dict:
 def precheck(c: dict, job_id: bytes, now: float | None = None) -> None:
     """Raise ValueError naming the first claim the on-chain check would refuse."""
     now = time.time() if now is None else now
-    want = "knos:" + job_id.hex()
+    want = "knos:" + job_id.hex() + ":"
     aud = c.get("aud")
-    if (aud if isinstance(aud, list) else [aud]) != [want]:
-        raise ValueError(f"audience is {aud!r}, not {want!r}: this token was minted for another job")
+    if not isinstance(aud, str) or not aud.startswith(want) or aud.count(":") != 4:
+        raise ValueError(f"audience is {aud!r}, not {want}<head sha>:<checks hash>:<payout>: "
+                         "this token was minted for another job")
+    if aud.split(":")[2] != c.get("sha"):
+        raise ValueError(f"the audience's head sha is not the run's sha {c.get('sha')!r}")
     if c.get("iss") != ISSUER:
         raise ValueError(f"issuer is {c.get('iss')!r}, not GitHub Actions ({ISSUER})")
     exp = c.get("exp")
     if not isinstance(exp, (int, float)) or exp <= now:
         raise ValueError("the token has expired: mint a new one (they last minutes)")
-    ref = str(c.get("job_workflow_ref", ""))
-    if not ref.startswith(WORKFLOW):
-        raise ValueError(f"job_workflow_ref is {ref!r}: the token must come from Knos's prove.yml at a release tag")
+    wsha = str(c.get("job_workflow_sha", ""))
+    if len(wsha) != 40 or any(ch not in "0123456789abcdef" for ch in wsha):
+        raise ValueError(f"job_workflow_sha is {wsha!r}: the token must come from a pinned prove.yml commit")
 
 
 def prove(ledger, payer, job_id: bytes, jwt: str) -> tuple[str, str]:

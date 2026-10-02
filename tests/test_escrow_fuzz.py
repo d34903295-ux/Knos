@@ -57,7 +57,8 @@ GH_WF_SHA = "ab" * 20
 def gh_prove(e, who, jid: bytes, worker_tok, good: bool) -> bool:
     """Write a GitHub-style OIDC token for `jid` (signed by the fuzz key; `good` False: audience of another job) and run
     BufferWrite, VerifyStep1, VerifyStep2. True if all of them succeeded."""
-    claims = {"aud": sol.gh_audience(jid if good else bytes(32)), "ref": GH_REF, "repository": GH_REPO,
+    payout = sol.Pubkey.from_bytes(bytes(e.svm.get_account(worker_tok).data)[32:64])
+    claims = {"aud": sol.gh_audience(jid if good else bytes(32), "cd" * 20, bytes(32), payout), "sha": "cd" * 20, "ref": GH_REF, "repository": GH_REPO,
               "job_workflow_sha": GH_WF_SHA, "iss": sol.GH_ISSUER, "exp": 4_000_000_000}
     head = _b64(json.dumps({"alg": "RS256", "kid": GH_KID}).encode())
     body = _b64(json.dumps(claims).encode())
@@ -142,7 +143,7 @@ def _step(rng: random.Random, m: Model, ids: list[bytes]) -> None:
               and (m.cap == 0 or amount <= m.cap))
         if gh:
             got = e.send([sol.post_github(e.pid, who.pubkey(), jid, amount, work, review, bytes(32), GH_REPO, GH_REF,
-                                          tok, e.vault)], who, [who])
+                                          tok, e.vault, stake_required=True)], who, [who])
         else:
             got = e.post(who, tok, jid, amount, work=work, review=review, verifier=ver.pubkey() if ver else None)
         if ok:

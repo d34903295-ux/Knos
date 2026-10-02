@@ -373,8 +373,9 @@ def parse_config(raw: bytes) -> dict:
 #                    config token                      data: job_id[32]
 #    19 PostGithub   buyer(s,w) job(w) buyer_token(w) vault_token(w) config token system
 #                    data: id[32] amount u64 work i64 review i64 brief[32] repo_hash[32] ref_hash[32]
-GH_JOB_LEN = JOB_LEN + 64      # a github job: the job, then sha256(repository), sha256(ref)
-JOB_LENS = JOB_LENS + (GH_JOB_LEN,)
+GH_V037_JOB_LEN = JOB_LEN + 64  # a 0.3.7 github job: the job, sha256(repository), sha256(ref) (refund only now)
+GH_JOB_LEN = JOB_LEN + 64 + 33  # 0.3.8: ... then checks_hash[32], stake_required u8
+JOB_LENS = JOB_LENS + (GH_JOB_LEN, GH_V037_JOB_LEN)
 GH_BUF_LEN = 291 + 2048
 GH_MAX_JWT = 2048
 GH_ISSUER = "https://token.actions.githubusercontent.com"
@@ -392,8 +393,19 @@ def gh_buffer_pda(pid: Pubkey, job_id: bytes, prover: Pubkey) -> Pubkey:
     return Pubkey.find_program_address([b"ghproof", job_id, bytes(prover)], pid)[0]
 
 
-def gh_audience(job_id: bytes) -> str:
-    return "knos:" + job_id.hex()
+def gh_audience(job_id: bytes, head_sha: str = "0" * 40, checks_hash: bytes = bytes(32),
+                payout: Pubkey | str = "11111111111111111111111111111111") -> str:
+    """The proof audience: knos:<job hex>:<head sha>:<checks hash hex>:<payout base58>. The token's sha claim must be
+    head_sha, checks_hash the job's (fixed at funding), and the payout is who gets paid."""
+    return f"knos:{job_id.hex()}:{head_sha}:{checks_hash.hex()}:{payout}"
+
+
+def parse_gh_audience(aud: str) -> tuple[bytes, str, bytes, str]:
+    """(job id, head sha, checks hash, payout base58) from a 5-part proof audience; ValueError otherwise."""
+    parts = aud.split(":")
+    if len(parts) != 5 or parts[0] != "knos" or len(parts[1]) != 64 or len(parts[2]) != 40 or len(parts[3]) != 64:
+        raise ValueError(f"not a knos proof audience: {aud!r}")
+    return bytes.fromhex(parts[1]), parts[2], bytes.fromhex(parts[3]), parts[4]
 
 
 def rsa_r2_n0inv(n: int) -> tuple[int, int]:
@@ -473,14 +485,18 @@ def verify_step2(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey, vault_
 
 
 def post_github(pid: Pubkey, buyer: Pubkey, job_id: bytes, amount: int, work_s: int, review_s: int, brief_hash: bytes,
-                repository: str, ref: str, buyer_token: Pubkey, vault_token: Pubkey) -> Instruction:
+                repository: str, ref: str, buyer_token: Pubkey, vault_token: Pubkey, checks_hash: bytes = bytes(32),
+                stake_required: bool = False) -> Instruction:
     """PostGithub (19): a job paid on a GitHub Actions proof for `repository` at `ref`. amount 0 = a bounty with no
     money (the claim stake only)."""
     import hashlib
     if len(job_id) != 32 or len(brief_hash) != 32:
         raise ValueError("job id and brief hash are 32 bytes")
     data = bytes([19]) + job_id + struct.pack("<Qqq", amount, work_s, review_s) + brief_hash + \
-        hashlib.sha256(repository.encode()).digest() + hashlib.sha256(ref.encode()).digest()
+        hashlib.sha256(repository.encode()).digest() + hashlib.sha256(ref.encode()).digest() + checks_hash + \
+        bytes([int(stake_required)])
+    if len(checks_hash) != 32:
+        raise ValueError("checks hash is 32 bytes")
     return Instruction(pid, data, [_m(buyer, True, True), _m(job_pda(pid, job_id), False, True),
                                    _m(buyer_token, False, True), _m(vault_token, False, True),
                                    _m(config_pda(pid), False, False), _m(TOKEN, False, False),

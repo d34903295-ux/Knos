@@ -40,7 +40,7 @@ class Ledger:
         the 0.3.4 ones still open. Settled jobs are closed (their accounts are gone), so they are not listed."""
         from ..team import rpc
         got: list = []
-        for size in (sol.JOB_LEN, sol.GH_JOB_LEN, sol.V034_JOB_LEN):
+        for size in (sol.JOB_LEN, sol.GH_JOB_LEN, sol.GH_V037_JOB_LEN, sol.V034_JOB_LEN):
             filters: list[dict] = [{"dataSize": size}]
             if state:
                 code = {v: k for k, v in sol.STATES.items()}[state]

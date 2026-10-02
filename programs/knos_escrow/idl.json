@@ -1483,6 +1483,19 @@
        32
       ]
      }
+    },
+    {
+     "name": "checks_hash",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
+    },
+    {
+     "name": "stake_required",
+     "type": "u8"
     }
    ]
   },
