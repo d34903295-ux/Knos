@@ -6,6 +6,19 @@ team bars on a local validator. The methods are in `src/knos/bench.py` and `src/
 ## How often agents say "tests pass" when CI failed (0.3.4)
 
 <!-- bench:market -->
+**Agent PR Index, 2026-10-02:** 2,431 PRs by AI coding agents claiming tests or CI pass (created 2026-06-04 – 2026-10-01); 9,207 PRs on repos owned by the PR's author or the human who assigned the agent were excluded. Of the 2,431 whose CI had finished at the head commit, **660 (27.2%) had a failing check** (95% Wilson interval 25.4%–28.9%). Published as `index.json` on the Pages site; built every 6 hours by `.github/workflows/index.yml`.
+
+| agent | claiming PRs with finished CI | CI failed | 95% interval |
+|---|---|---|---|
+| GitHub Copilot coding agent | 787 | 194 (24.6%) | 21.8%–27.8% |
+| Devin | 520 | 270 (51.9%) | 47.6%–56.2% |
+| Claude GitHub app | 716 | 68 (9.5%) | 7.6%–11.9% |
+| Claude Code | 206 | 17 (8.2%) | 5.2%–12.8% |
+| OpenAI Codex | 202 | 111 (54.9%) | 48.1%–61.7% |
+| **all** | **2,431** | **660 (27.2%)** | **25.4%–28.9%** |
+
+Earlier sample (0.3.4):
+
 Of 303 pull requests by AI coding agents (GitHub Copilot, Devin, OpenAI Codex, Claude) whose description says tests or CI pass, and whose CI had finished at the PR's head commit, **55 (18.2%) had a failing check at that commit** (95% interval 14.2%–22.9%); counting only test and build checks, 34 (11.2%). 30 of the 55 were merged anyway. PRs created 3 Jul – 30 Sep 2026, collected 1 Oct 2026 with `gh search prs` and the GitHub API: script `scripts/agent_pr_ci.py`, every PR in `docs/agent_pr_ci.json`.
 
 | agent | claiming PRs with finished CI | CI failed |

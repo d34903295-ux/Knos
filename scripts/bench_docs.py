@@ -26,8 +26,31 @@ def blocks(src: dict) -> dict[str, str]:
     out = {"recall-table": "\n".join(recall)}
     if src.get("market"):
         m = src["market"]
-        out["market"] = m["sentence"]
+        out["market"] = (market_index(m["index"]) + "\n\n" if m.get("index") else "") + m["sentence"]
     return out
+
+
+def _pct(x: float) -> str:
+    return f"{100 * x:.1f}%"
+
+
+def market_index(ix: dict) -> str:
+    """The Agent PR Index scan (scripts/agent_pr_index.py): shares with 95% Wilson intervals, per agent and overall."""
+    o = ix["overall"]
+    lines = [f"**Agent PR Index, {ix['date']}:** {ix['n_prs']:,} PRs by AI coding agents claiming tests or CI pass "
+             f"(created {ix['window'][0]} – {ix['window'][1]}); {ix['excluded_self_repo']:,} PRs on repos owned by "
+             f"the PR's author or the human who assigned the agent were excluded. Of the {o['claimed_green']:,} whose "
+             f"CI had finished at the head commit, **{o['actually_failed']:,} ({_pct(o['share'])}) had a failing "
+             f"check** (95% Wilson interval {_pct(o['ci95'][0])}–{_pct(o['ci95'][1])}). Published as `index.json` "
+             f"on the Pages site; built every 6 hours by `.github/workflows/index.yml`.", "",
+             "| agent | claiming PRs with finished CI | CI failed | 95% interval |", "|---|---|---|---|"]
+    for label, a in ix["agents"]:
+        if a["claimed_green"]:
+            lines.append(f"| {label} | {a['claimed_green']:,} | {a['actually_failed']:,} ({_pct(a['share'])}) | "
+                         f"{_pct(a['ci95'][0])}–{_pct(a['ci95'][1])} |")
+    lines.append(f"| **all** | **{o['claimed_green']:,}** | **{o['actually_failed']:,} ({_pct(o['share'])})** | "
+                 f"**{_pct(o['ci95'][0])}–{_pct(o['ci95'][1])}** |")
+    return "\n".join(lines) + "\n\nEarlier sample (0.3.4):"
 
 
 def apply(text: str, gen: dict[str, str]) -> str:

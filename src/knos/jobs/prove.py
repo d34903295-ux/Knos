@@ -123,6 +123,42 @@ def checks_hash(folder: Path) -> str:
     return hashlib.sha256(lines.encode()).hexdigest()
 
 
+# ---- the repo's own rules and learned tampering, before the judge (Sibyl memory, kept in the caller's cache) --------
+
+def judge_with_rules(base_dir, pr_dir, cfg: dict, changed: list[str] | None, diff_text: str | None, store,
+                     repo: str | None = None, agent: str | None = None) -> dict:
+    """judge(), gated by the base's CONTRIBUTING rules (knos.proof.history.parse_contributing) on the PR's diff, run
+    first: a violation refuses the PR before any test runs or any token is minted, and is learned
+    (history.learn_tamper): `tamper:rule:<kind>` is then required for every later PR to this repo or by this agent,
+    and the evidence names it (`required_by_history`). A protected-path refusal is learned the same way."""
+    from ..proof import history
+    base = Path(base_dir)
+    required = sorted(history.tamper_checks_required(store, repo, agent))
+    contributing = [r for r in history.repo_rules(store, base) if r.get("origin") == "contributing"]
+    violations = history.lint_pr(store, base, diff_text, (), {r["id"] for r in contributing}) \
+        if diff_text is not None and contributing else []
+    if violations:
+        try:
+            h = checks_hash(base / ".knos" / "acceptance" / str(cfg.get("issue", "")))
+        except ValueError:
+            h = ""
+        for kind in sorted({x.rule["kind"] for x in violations}):
+            first = next(x for x in violations if x.rule["kind"] == kind)
+            history.learn_tamper(store, repo, agent, f"rule:{kind}", str(first))
+        v = {"passed": False, "checks_hash": h, "reasons": [f"repo rule: {x}" for x in violations],
+             "evidence": {"issue": str(cfg.get("issue", "")), "repo_rules": [str(x) for x in violations]}}
+    else:
+        v = judge(base_dir, pr_dir, cfg, changed)
+        bad = [r for r in v["reasons"] if r.startswith("touches protected path")]
+        if bad:
+            history.learn_tamper(store, repo, agent, "protected-path", bad[0])
+        if contributing:
+            v["evidence"]["repo_rules"] = []
+    v["evidence"]["required_by_history"] = required
+    v["evidence"]["learned"] = sorted(history.tamper_checks_required(store, repo, agent))
+    return v
+
+
 # ---- judge: the check job's verdict --------------------------------------------------------------------------------
 #
 # judge(base, pr, cfg) decides whether the pull request at `pr` delivers issue cfg["issue"] against the base checkout

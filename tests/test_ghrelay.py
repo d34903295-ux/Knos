@@ -101,13 +101,17 @@ def test_found_and_discover():
 def test_caller_workflow_has_no_secret_and_front_matches():
     wf = (ROOT / "examples" / "knos-workflow.yml").read_text(encoding="utf-8")
     assert "secrets." not in wf and "secrets:" not in wf
-    shas = set(re.findall(r"drexthealpha/Knos/\.github/workflows/\w+\.yml@([0-9a-f]+)", wf))
-    assert len(shas) == 1 and len(next(iter(shas))) == 40
-    for name in ("prove.yml", "fund.yml", "relay.yml"):
-        assert f"workflows/{name}@" in wf
+    # fund.yml and prove.yml at the one sha the escrow registered (job_workflow_sha); relay.yml mints nothing
+    reg = set(re.findall(r"drexthealpha/Knos/\.github/workflows/(?:fund|prove)\.yml@([0-9a-f]+)", wf))
+    rel = set(re.findall(r"drexthealpha/Knos/\.github/workflows/relay\.yml@([0-9a-f]+)", wf))
+    assert len(reg) == 1 and len(rel) == 1 and all(len(s) == 40 for s in reg | rel)
+    assert "kind: refused" in wf
     assert "pull_request_target" in wf and "issue_comment" in wf
     js = (ROOT / "web" / "front.js").read_text(encoding="utf-8")
-    assert f'KNOS_SHA = "{next(iter(shas))}"' in js
+    assert f'KNOS_SHA = "{next(iter(reg))}"' in js and f'KNOS_RELAY_SHA = "{next(iter(rel))}"' in js
+    wf_js = re.search(r"export const WORKFLOW = `(.*?)`;\n", js, re.DOTALL).group(1)
+    wf_js = wf_js.replace("${KNOS_SHA}", next(iter(reg))).replace("${KNOS_RELAY_SHA}", next(iter(rel)))
+    assert wf_js.replace("\\${{", "${{").replace("\\\\", "\\") == wf
     assert "settings/rules/new?target=branch&enforcement=active" in js
     fund = (ROOT / ".github" / "workflows" / "fund.yml").read_text(encoding="utf-8")
     assert '"OWNER","MEMBER","COLLABORATOR"' in fund and "id-token: write" in fund and "name: knos-fund" in fund
@@ -137,3 +141,21 @@ def test_hook_adds_receipt_line_to_open_pr(tmp_path, monkeypatch):
     inp_body = inp
     assert hook.pr_receipt(tmp_path, v, "all tests pass", gh=gh2, publish=lambda: "ATT") is None
     assert hook.pr_receipt(tmp_path, v, "x", gh=lambda *a, **k: None) is None
+
+
+def test_judge_learns_a_contributing_violation_and_requires_it_next(tmp_path):
+    from knos.jobs import prove
+    from knos.proof import history
+    base = tmp_path / "base"
+    (base / ".knos" / "acceptance" / "1").mkdir(parents=True)
+    (base / ".knos" / "acceptance" / "1" / "test_accept.py").write_bytes(b"def test_a():\n    assert 1\n")
+    (base / "CONTRIBUTING.md").write_bytes(b"# Rules\n\n- Do not leave print() debug statements in code.\n")
+    diff = ("diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,3 @@\n def add(a, b):\n"
+            "+    print(a, b)\n     return a + b\n")
+    store = history.JsonStore(tmp_path / "store")
+    v = prove.judge_with_rules(base, tmp_path / "pr", {"issue": "1"}, ["calc.py"], diff, store, "o/r", "bot")
+    assert not v["passed"] and v["reasons"][0].startswith("repo rule: calc.py:2")
+    assert v["evidence"]["required_by_history"] == [] and v["evidence"]["learned"] == ["tamper:rule:no_debug"]
+    again = history.JsonStore(tmp_path / "store")   # a later run: the memory restored from the cache
+    v2 = prove.judge_with_rules(base, tmp_path / "pr", {"issue": "1"}, ["calc.py"], diff, again, "o/r", "other")
+    assert v2["evidence"]["required_by_history"] == ["tamper:rule:no_debug"]

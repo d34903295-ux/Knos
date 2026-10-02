@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 const API = "https://api.github.com";
 // Knos's reusable workflows, pinned by full commit sha (the escrow checks the token's job_workflow_sha).
 export const KNOS_SHA = "81d40cda2d0d40636c881befbdf07008665ff288";
+export const KNOS_RELAY_SHA = "f3414b39cfccf0931e0344ea92f6c74f322708b1";
 
 // ---- claim detection (port of scripts/agent_pr_ci.py) -----------------------------------------------------------
 const PASS = String.raw`(?:pass(?:es|ed|ing)?|green)`;
@@ -141,7 +142,7 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_SHA}
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_RELAY_SHA}
     with:
       kind: fund
       number: \${{ fromJSON(needs.fund.outputs.issue) }}
@@ -186,15 +187,27 @@ jobs:
     with:
       job: \${{ needs.job.outputs.id }}
       issue: \${{ needs.job.outputs.issue }}
+      knos-ref: ${KNOS_SHA}
 
   prove-relay:
     needs: prove
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_SHA}
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_RELAY_SHA}
     with:
       kind: proof
+      number: \${{ github.event.pull_request.number }}
+
+  prove-refused:
+    needs: [job, prove]
+    if: always() && needs.job.outputs.id != '' && needs.prove.result == 'failure'
+    permissions:
+      issues: write
+      pull-requests: write
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_RELAY_SHA}
+    with:
+      kind: refused
       number: \${{ github.event.pull_request.number }}
 `;
 
@@ -227,10 +240,14 @@ function agentRecord(index, agent) {
   if (!index) return `<p class="fine">Agent PR Index not loaded here (it is built with the site).</p>`;
   const a = agent && index.agents?.[agent];
   if (!a) return `<p class="fine">No record for ${agent ? esc(agent) : "this author"} in the Agent PR Index (${esc(index.date || "")}).</p>`;
-  const pct = a.share == null ? "n/a" : `${Math.round(a.share * 100)}%`;
+  const pct = (x) => `${(x * 100).toFixed(1)}%`;
+  const share = a.share == null ? "n/a" : pct(a.share);
+  const ci = a.ci95 ? `, 95% interval ${pct(a.ci95[0])}–${pct(a.ci95[1])}` : "";
   return `<p><strong>${esc(agent)}</strong> in the Agent PR Index (${esc(index.date)}): claimed tests pass on
     <strong>${a.claimed_green}</strong> PRs with CI; CI actually failed on <strong>${a.actually_failed}</strong>
-    (<strong>${pct}</strong>).</p>`;
+    (<strong>${share}</strong>${ci}). Paid on a verified proof by <strong>${a.proven ?? 0}</strong> distinct
+    funder${a.proven === 1 ? "" : "s"}.${index.excluded_self_repo ? ` PRs on the author's own repos are excluded
+    (${index.excluded_self_repo}).` : ""}</p>`;
 }
 
 async function check(ev) {

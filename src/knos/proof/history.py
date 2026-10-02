@@ -37,6 +37,35 @@ class NullStore:
         return []
 
 
+class JsonStore:
+    """A directory of JSON files, one per category: what prove.yml's judge keeps between runs in the caller repo's
+    Actions cache (no secret, no Sibyl service on a runner)."""
+
+    def __init__(self, root):
+        from pathlib import Path
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _file(self, category: str):
+        return self.root / (re.sub(r"[^\w.-]", "_", category) + ".json")
+
+    def _load(self, category: str) -> dict:
+        import json
+        try:
+            return json.loads(self._file(category).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def put(self, category: str, name: str, body: dict) -> None:
+        import json
+        d = self._load(category)
+        d[name] = body
+        self._file(category).write_text(json.dumps(d, indent=1), encoding="utf-8")
+
+    def all(self, category: str) -> list[dict]:
+        return list(self._load(category).values())
+
+
 class SibylStore:
     """The repo's Sibyl store (the same one Knos's memory uses), through the public MemoryClient API."""
 
