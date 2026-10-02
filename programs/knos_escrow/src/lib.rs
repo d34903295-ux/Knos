@@ -421,6 +421,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         20 => bounty::faucet(program_id, accounts, rest),
         21 => bounty::init_faucet_mint(program_id, accounts, rest, &config_key),
         22 => bounty::add_mint(program_id, accounts, &config_key),
+        24 => github::set_workflow(program_id, accounts, rest, &config_key),
         // 27 SetAdmin: admin(s), config2(w). data: new_admin[32] (non-zero; e.g. a Squads vault PDA). The current
         //   admin signs; from then on only the new admin passes any admin check.
         // 28 SetFeeAccount: admin(s), config2(w), fee_token. The new fee account must be a token account of the

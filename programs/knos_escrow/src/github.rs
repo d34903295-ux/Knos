@@ -27,7 +27,47 @@ use solana_program::{
 
 pub const GH_JOB_LEN: usize = JOB_LEN + 32 + 32; // a github job: the job, then sha256(repository), sha256(ref)
 pub const ISSUER: &[u8] = b"https://token.actions.githubusercontent.com";
-pub const WORKFLOW_PREFIX: &[u8] = b"drexthealpha/Knos/.github/workflows/prove.yml@refs/tags/";
+pub const WF_PROVE: u8 = 0; // prove.yml
+pub const WF_FUND: u8 = 1;  // fund.yml
+pub const WF_LEN: usize = 1 + 40; // kind, sha (40 lowercase hex)
+
+fn is_sha40(s: &[u8]) -> bool { s.len() == 40 && s.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) }
+
+/// The workflow registry entry ["workflow", kind, sha] exists (owned by the program) for this sha.
+fn workflow_registered(program_id: &Pubkey, wf: &AccountInfo, kind: u8, sha: &[u8]) -> bool {
+    if !is_sha40(sha) { return false; }
+    let (k, _) = Pubkey::find_program_address(&[b"workflow", &[kind], &sha[..20], &sha[20..]], program_id);
+    *wf.key == k && wf.owner == program_id && wf.data_len() == WF_LEN
+}
+
+/// 24 SetWorkflow  admin(s,w) config2 workflow(w) system      data: kind u8 (0 prove.yml, 1 fund.yml) add u8 sha[40]
+/// Adds (creates ["workflow", kind, sha]) or removes (closes it, rent to the admin) an allowed workflow commit sha.
+pub fn set_workflow(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8], config_key: &Pubkey) -> ProgramResult {
+    let it = &mut accounts.iter();
+    let admin = next_account_info(it)?; let config = next_account_info(it)?; let wf = next_account_info(it)?;
+    let sys = next_account_info(it)?;
+    let cfg = Config::load(config, program_id, config_key)?;
+    if !admin.is_signer || !admin.is_writable || *admin.key != cfg.admin { return Err(err(15, "admin only")); }
+    if *sys.key != system_program::ID || rest.len() != 2 + 40 { return Err(ProgramError::InvalidInstructionData); }
+    let (kind, add, sha) = (rest[0], rest[1] != 0, &rest[2..42]);
+    if kind > WF_FUND || !is_sha40(sha) { return Err(err(73, "workflow kind or sha")); }
+    let (k, bump) = Pubkey::find_program_address(&[b"workflow", &[kind], &sha[..20], &sha[20..]], program_id);
+    if *wf.key != k { return Err(err(5, "workflow address")); }
+    if add {
+        if !wf.data_is_empty() || *wf.owner != system_program::ID { return Err(err(6, "workflow exists")); }
+        create_pda(admin, wf, sys, program_id, WF_LEN, &[b"workflow", &[kind], &sha[..20], &sha[20..], &[bump]])?;
+        let mut d = wf.try_borrow_mut_data()?;
+        d[0] = kind; d[1..].copy_from_slice(sha);
+    } else {
+        if wf.owner != program_id { return Err(err(73, "workflow not registered")); }
+        let lamports = wf.lamports();
+        **admin.try_borrow_mut_lamports()? = admin.lamports().checked_add(lamports).ok_or(ProgramError::ArithmeticOverflow)?;
+        **wf.try_borrow_mut_lamports()? = 0;
+        wf.resize(0)?;
+        wf.assign(&system_program::ID);
+    }
+    Ok(())
+}
 const L: usize = 64; // 32-bit limbs of an RSA-2048 number
 type Big = [u32; L];
 const KEY_LEN: usize = 256 + 4 + 256; // n limbs (LE), n0inv, r2 limbs
@@ -368,7 +408,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
             }
             let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
             let worker_tok = next_account_info(it)?; let fee_tok = next_account_info(it)?; let buyer = next_account_info(it)?;
-            let config = next_account_info(it)?; let token = next_account_info(it)?;
+            let config = next_account_info(it)?; let token = next_account_info(it)?; let wf = next_account_info(it)?;
             if !prover.is_writable || *vauth.key != *vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(9, "verify accounts")); }
             let cfg = Config::load(config, program_id, config_key)?;
             let (jk, _) = Pubkey::find_program_address(&[b"job", &job_id], program_id);
@@ -399,10 +439,13 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
                 if !ok { return Err(err(71, "bad signature")); }
                 // the claims
                 let payload = b64url(p64)?;
-                let [iss, wf, repo, rf, aud, exp] =
-                    fields(&payload, [b"iss", b"job_workflow_ref", b"repository", b"ref", b"aud", b"exp"])?;
+                let [iss, wsha, repo, rf, aud, exp] =
+                    fields(&payload, [b"iss", b"job_workflow_sha", b"repository", b"ref", b"aud", b"exp"])?;
                 if want_str(iss, "iss")? != ISSUER { return Err(err(72, "issuer")); }
-                if !want_str(wf, "job_workflow_ref")?.starts_with(WORKFLOW_PREFIX) { return Err(err(73, "workflow")); }
+                // the run's workflow file is pinned by commit: its sha must be in the registry (SetWorkflow, kind 0)
+                if !workflow_registered(program_id, wf, WF_PROVE, want_str(wsha, "job_workflow_sha")?) {
+                    return Err(err(73, "workflow sha not registered"));
+                }
                 let jd = job.try_borrow_data()?;
                 if hashv(&[want_str(repo, "repository")?]).to_bytes()[..] != jd[JOB_LEN..JOB_LEN + 32] { return Err(err(74, "repository")); }
                 if hashv(&[want_str(rf, "ref")?]).to_bytes()[..] != jd[JOB_LEN + 32..JOB_LEN + 64] { return Err(err(74, "ref")); }

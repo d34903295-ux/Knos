@@ -388,6 +388,15 @@ def _jwt_kid(jwt: str) -> str:
     return json.loads(base64.urlsafe_b64decode(head + "=" * (-len(head) % 4)))["kid"]
 
 
+def _jwt_workflow_sha(jwt: str) -> str:
+    """The token's job_workflow_sha (a malformed one maps to a registry entry that does not exist: refused on chain)."""
+    try:
+        sha = sol.jwt_claims(jwt).get("job_workflow_sha", "")
+    except (ValueError, IndexError):
+        sha = ""
+    return sha if isinstance(sha, str) and len(sha) == 40 else "0" * 40
+
+
 def prove_github(ledger, payer: Keypair, job_id: bytes, jwt: str) -> tuple[str, str]:
     """Prove a claimed github job with a GitHub Actions OIDC token: write it to the proof buffer, then VerifyStep1 and
     VerifyStep2 (1.4M CU each). On success the job's worker is paid (price - fee + the stake back) and the job and
@@ -410,6 +419,7 @@ def prove_github(ledger, payer: Keypair, job_id: bytes, jwt: str) -> tuple[str, 
     worker_tok = stake_account_for(ledger, j.worker, mint)
     sig2 = ledger.send(pre + [sol.compute_limit(), sol.verify_step2(pid, payer.pubkey(), job_id, key,
                                                                     vault_for(ledger, mint), worker_tok,
-                                                                    cfg["fee_token"], j.buyer)], payer)
+                                                                    cfg["fee_token"], j.buyer,
+                                                                    _jwt_workflow_sha(jwt))], payer)
     _record(ledger, j, "released")
     return sig1, sig2

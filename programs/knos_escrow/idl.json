@@ -1296,6 +1296,12 @@
     {
      "name": "token_program",
      "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "workflow",
+     "docs": [
+      "The registry entry [\"workflow\", 0, sha[0..20], sha[20..40]] for the token's job_workflow_sha (SetWorkflow)."
+     ]
     }
    ],
    "args": [
@@ -1305,6 +1311,68 @@
       "array": [
        "u8",
        32
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "set_workflow",
+   "docs": [
+    "Admin: add or remove an allowed workflow commit sha (kind 0 prove.yml, 1 fund.yml) at PDA [\"workflow\", kind, sha[0..20], sha[20..40]]. A proof's job_workflow_sha must be registered."
+   ],
+   "discriminator": [
+    24
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "signer": true,
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "workflow",
+     "writable": true
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": [
+    {
+     "name": "kind",
+     "type": "u8"
+    },
+    {
+     "name": "add",
+     "type": "u8"
+    },
+    {
+     "name": "sha",
+     "type": {
+      "array": [
+       "u8",
+       40
       ]
      }
     }

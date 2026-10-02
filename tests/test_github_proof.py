@@ -24,6 +24,7 @@ from knos.jobs.relay import DirRelay  # noqa: E402
 PRICE = 5_000_000
 REPO, REF = "octo/widgets", "refs/heads/main"
 KID = "fake-github-kid-1"
+WF_SHA = "0123456789abcdef0123456789abcdef01234567"
 CU = {}
 
 
@@ -45,13 +46,14 @@ def env(key, tmp_path_factory):
     e.relay = DirRelay(tmp_path_factory.mktemp("relay"))
     n = key.public_key().public_numbers().n
     assert e.send([sol.register_key(e.pid, e.admin.pubkey(), KID, n)], e.admin, [e.admin])
+    assert e.send([sol.set_workflow(e.pid, e.admin.pubkey(), WF_SHA)], e.admin, [e.admin])
     return e
 
 
 def jwt(key, job_id: bytes, kid: str = KID, sign_key=None, **over) -> str:
     claims = {"jti": "x", "sub": f"repo:{REPO}:ref:{REF}", "aud": sol.gh_audience(job_id), "ref": REF,
               "repository": REPO, "repository_owner": "octo", "run_id": "1", "event_name": "workflow_dispatch",
-              "job_workflow_ref": sol.GH_WORKFLOW_PREFIX + "v0.3.7", "iss": sol.GH_ISSUER,
+              "job_workflow_sha": WF_SHA, "iss": sol.GH_ISSUER,
               "nbf": 1, "iat": 1, "exp": 4_000_000_000}
     claims.update(over)
     head = b64(json.dumps({"typ": "JWT", "alg": "RS256", "x5t": "abc", "kid": kid}, separators=(",", ":")).encode())
@@ -92,7 +94,7 @@ def test_valid_proof_pays_the_worker_and_closes(env, key):
     assert env.send([sol.compute_limit(), sol.verify_step1(pid, w.pubkey(), jid, k)], w, [w]), env.last_logs[-5:]
     CU["step1"] = env.last_cu
     assert env.send([sol.compute_limit(), sol.verify_step2(pid, w.pubkey(), jid, k, env.vault, stake_acct,
-                                                           env.fee_token, env.buyer.pubkey())], w, [w]), env.last_logs[-5:]
+                                                           env.fee_token, env.buyer.pubkey(), WF_SHA)], w, [w]), env.last_logs[-5:]
     CU["step2"] = env.last_cu
     print(f"\nVerifyStep1 CU: {CU['step1']}  VerifyStep2 CU: {CU['step2']}")
     assert CU["step1"] < 1_400_000 and CU["step2"] < 1_400_000
@@ -142,7 +144,7 @@ def test_bad_proofs_are_refused(env, key, case):
         "tampered_signature": lambda: _tamper_sig(jwt(key, jid)),
         "unregistered_kid": lambda: jwt(key, jid, kid="not-registered"),
         "other_key_same_kid": lambda: jwt(key, jid, sign_key=other),
-        "wrong_workflow": lambda: jwt(key, jid, job_workflow_ref="evil/Knos/.github/workflows/prove.yml@refs/tags/v1"),
+        "wrong_workflow": lambda: jwt(key, jid, job_workflow_sha="f" * 40),
         "wrong_aud": lambda: jwt(key, jid, aud=sol.gh_audience(bytes(32))),
         "wrong_repo": lambda: jwt(key, jid, repository="octo/other"),
         "wrong_ref": lambda: jwt(key, jid, ref="refs/heads/dev"),
@@ -186,3 +188,17 @@ def test_no_proof_by_deadline_refunds_buyer_with_stake(env, key):
     assert env.settle(env.worker, jid)
     assert env.job(jid) is None
     assert env.balance(env.b_tok) - b0 == stake                          # the price back, plus the stake
+
+
+def test_workflow_sha_registry_add_remove_admin_only(env, key):
+    a, w = env.admin, env.worker
+    other = "fedcba9876543210fedcba9876543210fedcba98"
+    assert not env.send([sol.set_workflow(env.pid, w.pubkey(), other)], w, [w])            # admin only
+    jid = job(env)
+    assert not prove(env, jid, jwt(key, jid, job_workflow_sha=other))                      # sha not registered
+    assert env.send([sol.set_workflow(env.pid, a.pubkey(), other)], a, [a])
+    assert not env.send([sol.set_workflow(env.pid, a.pubkey(), other)], a, [a])            # no double add
+    assert env.send([sol.set_workflow(env.pid, a.pubkey(), other, add=False)], a, [a])     # removed again
+    assert not prove(env, jid, jwt(key, jid, job_workflow_sha=other))
+    assert not prove(env, jid, jwt(key, jid, job_workflow_sha=WF_SHA.upper()))             # lowercase hex only
+    assert prove(env, jid, jwt(key, jid))                                                   # the pinned sha: paid

@@ -434,8 +434,34 @@ def verify_step1(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey) -> Ins
                                                    _m(key, False, False)])
 
 
+WF_PROVE, WF_FUND = 0, 1      # workflow registry kinds: prove.yml, fund.yml
+
+
+def workflow_pda(pid: Pubkey, sha: str, kind: int = WF_PROVE) -> Pubkey:
+    """The registry entry ["workflow", kind, sha] that pins a workflow file by its 40-hex commit sha."""
+    s = sha.encode()[:40].ljust(40, b"0")
+    return Pubkey.find_program_address([b"workflow", bytes([kind]), s[:20], s[20:]], pid)[0]
+
+
+def set_workflow(pid: Pubkey, admin: Pubkey, sha: str, add: bool = True, kind: int = WF_PROVE) -> Instruction:
+    """SetWorkflow (24, admin): add or remove an allowed job_workflow_sha (kind 0 prove.yml, 1 fund.yml)."""
+    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+        raise ValueError("a 40-hex lowercase commit sha")
+    return Instruction(pid, bytes([24, kind, int(add)]) + sha.encode(),
+                       [_m(admin, True, True), _m(config_pda(pid), False, False),
+                        _m(workflow_pda(pid, sha, kind), False, True), _m(SYSTEM, False, False)])
+
+
+def jwt_claims(jwt: str) -> dict:
+    """The (unverified) payload of a JWT: the program checks it; clients read it to pick accounts."""
+    import base64
+    import json
+    p = jwt.strip().split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
+
+
 def verify_step2(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey, vault_token: Pubkey, worker_token: Pubkey,
-                 fee_token: Pubkey, buyer: Pubkey) -> Instruction:
+                 fee_token: Pubkey, buyer: Pubkey, workflow_sha: str = "0" * 40) -> Instruction:
     """VerifyStep2 (18): 8 squarings, * s, the PKCS#1 v1.5 check and the claims; on success the worker is paid and the
     job and the buffer close."""
     return Instruction(pid, bytes([18]) + job_id,
@@ -443,7 +469,7 @@ def verify_step2(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey, vault_
                         _m(key, False, False), _m(job_pda(pid, job_id), False, True), _m(vault_token, False, True),
                         _m(vault_authority(pid), False, False), _m(worker_token, False, True),
                         _m(fee_token, False, True), _m(buyer, False, True), _m(config_pda(pid), False, False),
-                        _m(TOKEN, False, False)])
+                        _m(TOKEN, False, False), _m(workflow_pda(pid, workflow_sha), False, False)])
 
 
 def post_github(pid: Pubkey, buyer: Pubkey, job_id: bytes, amount: int, work_s: int, review_s: int, brief_hash: bytes,
