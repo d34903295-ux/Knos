@@ -107,7 +107,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: solana-verify build (docker)
         run: |
-          solana-verify build programs/knos_escrow --library-name knos_escrow
+          solana-verify build "$GITHUB_WORKSPACE/programs/knos_escrow" --library-name knos_escrow
           echo "executable hash: $(solana-verify get-executable-hash programs/knos_escrow/target/deploy/knos_escrow.so)"
       - uses: actions/upload-artifact@v4
         with:
