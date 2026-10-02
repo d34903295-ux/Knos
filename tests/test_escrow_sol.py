@@ -287,6 +287,22 @@ def test_cap_enforced_and_only_lowered_by_the_admin():
     assert e.lower_cap(5 * U) and not e.post(buyer, btok, jid("cap-6"), 6 * U)
 
 
+def test_set_admin_then_the_old_admin_is_refused_and_set_fee_account():
+    e = Escrow()
+    new, _ = e.party()
+    stranger, stok = e.party()
+    old = e.admin
+    assert not e.send([sol.set_admin(e.pid, stranger.pubkey(), stranger.pubkey())], stranger, [stranger])  # admin only
+    assert not e.send([sol.set_admin(e.pid, old.pubkey(), sol.Pubkey.default())], old, [old])             # never zero
+    assert e.send([sol.set_admin(e.pid, old.pubkey(), new.pubkey())], old, [old])
+    assert e.config()["admin"] == new.pubkey()
+    assert not e.set_pause(True)                                                          # the old admin: refused
+    assert not e.send([sol.set_fee_account(e.pid, old.pubkey(), stok)], old, [old])
+    assert e.send([sol.set_fee_account(e.pid, new.pubkey(), stok)], new, [new])
+    assert e.config()["fee_token"] == stok
+    assert e.set_pause(True, admin=new) and e.config()["paused"]
+
+
 def test_init_is_once_and_the_retired_init_is_refused(env):
     from solders.instruction import Instruction
     e = env

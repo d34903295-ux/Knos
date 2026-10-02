@@ -31,6 +31,15 @@ pub mod github;
 #[cfg(not(feature = "no-entrypoint"))]
 solana_program::entrypoint!(process);
 
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "Knos",
+    project_url: "https://github.com/drexthealpha/Knos",
+    contacts: "link:https://github.com/drexthealpha/Knos/security/advisories/new",
+    policy: "https://github.com/drexthealpha/Knos/blob/main/SECURITY.md",
+    source_code: "https://github.com/drexthealpha/Knos"
+}
+
 mod bounty;
 
 pub const TOKEN_PROGRAM: Pubkey = solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -59,7 +68,7 @@ struct Job {
 }
 impl Job {
     fn load(d: &[u8]) -> Result<Job, ProgramError> {
-        if d.len() != MINT_JOB_LEN && d.len() != github::GH_JOB_LEN && d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
+        if d.len() != MINT_JOB_LEN && d.len() != github::GH_JOB_LEN && d.len() != github::GH_V037_JOB_LEN && d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
         let pk = |o: usize| Pubkey::new_from_array(d[o..o + 32].try_into().unwrap());
         let u = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
         let full = d.len() >= V034_JOB_LEN;
@@ -300,6 +309,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             if j.state != S::Open as u8 || now > j.deadline { return Err(err(20, "not open")); }
             if *worker.key == j.buyer { return Err(err(22, "a buyer cannot claim its own job")); }
             if *worker.key == j.verifier { return Err(err(36, "a worker cannot verify its own work")); }
+            if job.data_len() == github::GH_JOB_LEN && job.try_borrow_data()?[github::GH_STAKE_REQ] == 0 {
+                return Err(err(78, "no claim on this github job: proofs are permissionless"));
+            }
             let (vo, vm) = token_owner_mint(vault_tok)?; let (_, wm) = token_owner_mint(worker_tok)?;
             let jm = if j.mint == Pubkey::default() { cfg.mint } else { j.mint };
             bounty::vault_bump_for(&j.mint, &vo, program_id, (vault_auth, vault_bump))?;
@@ -321,7 +333,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
             let vb = bounty::vault_bump_for(&j.mint, vauth.key, program_id, (vault_auth, vault_bump))?;
             if j.state != S::Claimed as u8 || *worker.key != j.worker { return Err(err(21, "not worker")); }
-            if job.data_len() == github::GH_JOB_LEN { return Err(err(77, "a github job settles by proof, not delivery")); }
+            if job.data_len() == github::GH_JOB_LEN || job.data_len() == github::GH_V037_JOB_LEN { return Err(err(77, "a github job settles by proof, not delivery")); }
             if now > j.deadline { return Err(err(23, "the claim timed out")); }
             let (wo, _) = token_owner_mint(worker_tok)?;
             if wo != j.worker { return Err(err(33, "stake back to the worker only")); }
@@ -412,6 +424,27 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         20 => bounty::faucet(program_id, accounts, rest),
         21 => bounty::init_faucet_mint(program_id, accounts, rest, &config_key),
         22 => bounty::add_mint(program_id, accounts, &config_key),
+        24 => github::set_workflow(program_id, accounts, rest, &config_key),
+        // 27 SetAdmin: admin(s), config2(w). data: new_admin[32] (non-zero; e.g. a Squads vault PDA). The current
+        //   admin signs; from then on only the new admin passes any admin check.
+        // 28 SetFeeAccount: admin(s), config2(w), fee_token. The new fee account must be a token account of the
+        //   config mint.
+        27 | 28 => {
+            let admin = next_account_info(it)?; let config = next_account_info(it)?;
+            let cfg = Config::load(config, program_id, &config_key)?;
+            if !admin.is_signer || *admin.key != cfg.admin { return Err(err(15, "admin only")); }
+            if tag == 27 {
+                let new_admin = arr32(rest, 0)?;
+                if new_admin == [0u8; 32] { return Err(err(2, "admin cannot be zero")); }
+                config.try_borrow_mut_data()?[0..32].copy_from_slice(&new_admin);
+            } else {
+                let fee_token = next_account_info(it)?;
+                let (_, fm) = token_owner_mint(fee_token)?;
+                if fm != cfg.mint { return Err(err(7, "fee account mint")); }
+                config.try_borrow_mut_data()?[64..96].copy_from_slice(fee_token.key.as_ref());
+            }
+            Ok(())
+        }
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

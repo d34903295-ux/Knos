@@ -25,9 +25,78 @@ use solana_program::{
     sysvar::Sysvar,
 };
 
-pub const GH_JOB_LEN: usize = JOB_LEN + 32 + 32; // a github job: the job, then sha256(repository), sha256(ref)
+// 0.3.8 github job: the job, sha256(repository), sha256(ref), checks_hash[32], stake_required u8
+pub const GH_CHECKS: usize = JOB_LEN + 64;
+pub const GH_STAKE_REQ: usize = GH_CHECKS + 32;
+pub const GH_JOB_LEN: usize = GH_STAKE_REQ + 1;
+pub const GH_V037_JOB_LEN: usize = JOB_LEN + 64; // 0.3.7 github jobs: settle by refund only
+
+fn hex_into(b: &[u8], out: &mut [u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (k, x) in b.iter().enumerate() { out[2 * k] = HEX[(x >> 4) as usize]; out[2 * k + 1] = HEX[(x & 15) as usize]; }
+}
+
+/// A canonical base58 32-byte public key (as Solana prints it); None for anything else.
+fn b58_32(s: &[u8]) -> Option<[u8; 32]> {
+    const A: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    if s.is_empty() || s.len() > 44 { return None; }
+    let mut out = [0u8; 32];
+    for &c in s {
+        let mut carry = A.iter().position(|&x| x == c)? as u32;
+        for b in out.iter_mut().rev() {
+            carry += (*b as u32) * 58;
+            *b = carry as u8;
+            carry >>= 8;
+        }
+        if carry != 0 { return None; }
+    }
+    let ones = s.iter().take_while(|&&c| c == b'1').count();
+    let zeros = out.iter().take_while(|&&b| b == 0).count();
+    if ones != zeros { return None; }
+    Some(out)
+}
 pub const ISSUER: &[u8] = b"https://token.actions.githubusercontent.com";
-pub const WORKFLOW_PREFIX: &[u8] = b"drexthealpha/Knos/.github/workflows/prove.yml@refs/tags/";
+pub const WF_PROVE: u8 = 0; // prove.yml
+pub const WF_FUND: u8 = 1;  // fund.yml
+pub const WF_LEN: usize = 1 + 40; // kind, sha (40 lowercase hex)
+
+fn is_sha40(s: &[u8]) -> bool { s.len() == 40 && s.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) }
+
+/// The workflow registry entry ["workflow", kind, sha] exists (owned by the program) for this sha.
+fn workflow_registered(program_id: &Pubkey, wf: &AccountInfo, kind: u8, sha: &[u8]) -> bool {
+    if !is_sha40(sha) { return false; }
+    let (k, _) = Pubkey::find_program_address(&[b"workflow", &[kind], &sha[..20], &sha[20..]], program_id);
+    *wf.key == k && wf.owner == program_id && wf.data_len() == WF_LEN
+}
+
+/// 24 SetWorkflow  admin(s,w) config2 workflow(w) system      data: kind u8 (0 prove.yml, 1 fund.yml) add u8 sha[40]
+/// Adds (creates ["workflow", kind, sha]) or removes (closes it, rent to the admin) an allowed workflow commit sha.
+pub fn set_workflow(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8], config_key: &Pubkey) -> ProgramResult {
+    let it = &mut accounts.iter();
+    let admin = next_account_info(it)?; let config = next_account_info(it)?; let wf = next_account_info(it)?;
+    let sys = next_account_info(it)?;
+    let cfg = Config::load(config, program_id, config_key)?;
+    if !admin.is_signer || !admin.is_writable || *admin.key != cfg.admin { return Err(err(15, "admin only")); }
+    if *sys.key != system_program::ID || rest.len() != 2 + 40 { return Err(ProgramError::InvalidInstructionData); }
+    let (kind, add, sha) = (rest[0], rest[1] != 0, &rest[2..42]);
+    if kind > WF_FUND || !is_sha40(sha) { return Err(err(73, "workflow kind or sha")); }
+    let (k, bump) = Pubkey::find_program_address(&[b"workflow", &[kind], &sha[..20], &sha[20..]], program_id);
+    if *wf.key != k { return Err(err(5, "workflow address")); }
+    if add {
+        if !wf.data_is_empty() || *wf.owner != system_program::ID { return Err(err(6, "workflow exists")); }
+        create_pda(admin, wf, sys, program_id, WF_LEN, &[b"workflow", &[kind], &sha[..20], &sha[20..], &[bump]])?;
+        let mut d = wf.try_borrow_mut_data()?;
+        d[0] = kind; d[1..].copy_from_slice(sha);
+    } else {
+        if wf.owner != program_id { return Err(err(73, "workflow not registered")); }
+        let lamports = wf.lamports();
+        **admin.try_borrow_mut_lamports()? = admin.lamports().checked_add(lamports).ok_or(ProgramError::ArithmeticOverflow)?;
+        **wf.try_borrow_mut_lamports()? = 0;
+        wf.resize(0)?;
+        wf.assign(&system_program::ID);
+    }
+    Ok(())
+}
 const L: usize = 64; // 32-bit limbs of an RSA-2048 number
 type Big = [u32; L];
 const KEY_LEN: usize = 256 + 4 + 256; // n limbs (LE), n0inv, r2 limbs
@@ -115,6 +184,54 @@ pub fn mont_mul(a: &Big, b: &Big, n: &Big, n0inv: u32) -> Big {
     let mut r = [0u32; L];
     r.copy_from_slice(&t[..L]);
     if t[L] != 0 || geq(&r, n) { sub_in(&mut r, n); }
+    r
+}
+
+/// a^2 * R^-1 mod n for a < n: the square by symmetry (each cross product once, doubled), then a separate
+/// Montgomery reduction. About 1.5 L^2 limb products instead of mont_mul's 2 L^2.
+pub fn mont_sqr(a: &Big, n: &Big, n0inv: u32) -> Big {
+    let mut t = [0u32; 2 * L + 1];
+    for i in 0..L {
+        let ai = a[i] as u64;
+        let mut c = 0u64;
+        for j in i + 1..L {
+            let s = t[i + j] as u64 + ai * a[j] as u64 + c;
+            t[i + j] = s as u32;
+            c = s >> 32;
+        }
+        t[i + L] = c as u32;
+    }
+    let mut top = 0u32;
+    for v in t.iter_mut().take(2 * L) {
+        let w = *v;
+        *v = (w << 1) | top;
+        top = w >> 31;
+    }
+    let mut c = 0u64;
+    for i in 0..L {
+        let d = a[i] as u64 * a[i] as u64;
+        let s = t[2 * i] as u64 + (d & 0xffff_ffff) + c;
+        t[2 * i] = s as u32;
+        let s = t[2 * i + 1] as u64 + (d >> 32) + (s >> 32);
+        t[2 * i + 1] = s as u32;
+        c = s >> 32;
+    }
+    let mut hi = 0u64;
+    for i in 0..L {
+        let m = t[i].wrapping_mul(n0inv) as u64;
+        let mut c = 0u64;
+        for j in 0..L {
+            let s = t[i + j] as u64 + m * n[j] as u64 + c;
+            t[i + j] = s as u32;
+            c = s >> 32;
+        }
+        let s = t[i + L] as u64 + c + hi;
+        t[i + L] = s as u32;
+        hi = s >> 32;
+    }
+    let mut r = [0u32; L];
+    r.copy_from_slice(&t[L..2 * L]);
+    if hi != 0 || geq(&r, n) { sub_in(&mut r, n); }
     r
 }
 
@@ -312,7 +429,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
                 let s = signature(sig, &n)?;
                 let r2 = load(&key.try_borrow_data()?, 260);
                 let mut x = mont_mul(&s, &r2, &n, n0inv); // s in Montgomery form
-                for _ in 0..8 { x = mont_mul(&x, &x, &n, n0inv); }
+                for _ in 0..8 { x = mont_sqr(&x, &n, n0inv); }
                 store(&mut d, B_X, &x);
                 d[B_KEY..B_KEY + 32].copy_from_slice(key.key.as_ref());
                 d[B_STAGE] = 1;
@@ -320,12 +437,14 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
             }
             let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
             let worker_tok = next_account_info(it)?; let fee_tok = next_account_info(it)?; let buyer = next_account_info(it)?;
-            let config = next_account_info(it)?; let token = next_account_info(it)?;
+            let config = next_account_info(it)?; let token = next_account_info(it)?; let wf = next_account_info(it)?;
             if !prover.is_writable || *vauth.key != *vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(9, "verify accounts")); }
             let cfg = Config::load(config, program_id, config_key)?;
             let (jk, _) = Pubkey::find_program_address(&[b"job", &job_id], program_id);
             if *job.key != jk || job.owner != program_id || job.data_len() != GH_JOB_LEN { return Err(err(69, "not a github job")); }
             let now = Clock::get()?.unix_timestamp;
+            let payout: Pubkey;
+            let stake_required: bool;
             {
                 let d = buf.try_borrow_data()?;
                 if d[B_STAGE] != 1 || d[B_KEY..B_KEY + 32] != key.key.as_ref()[..] { return Err(err(70, "run step 1 first")); }
@@ -342,7 +461,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
                 if *key.key != kk { return Err(err(68, "the token's key is not this key")); }
                 // s^65537 mod n: x = (s^256)_M from step 1; 8 more squarings -> (s^65536)_M; * s (plain) -> s^65537
                 let mut x = load(&d, B_X);
-                for _ in 0..8 { x = mont_mul(&x, &x, &n, n0inv); }
+                for _ in 0..8 { x = mont_sqr(&x, &n, n0inv); }
                 let em = limbs_to_be(&mont_mul(&x, &s, &n, n0inv));
                 let digest = hashv(&[&t[..h64.len() + 1 + p64.len()]]).to_bytes();
                 let ps = 256 - 3 - DIGEST_INFO.len() - 32;
@@ -351,27 +470,44 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
                 if !ok { return Err(err(71, "bad signature")); }
                 // the claims
                 let payload = b64url(p64)?;
-                let [iss, wf, repo, rf, aud, exp] =
-                    fields(&payload, [b"iss", b"job_workflow_ref", b"repository", b"ref", b"aud", b"exp"])?;
+                let [iss, wsha, repo, rf, aud, exp, sha] =
+                    fields(&payload, [b"iss", b"job_workflow_sha", b"repository", b"ref", b"aud", b"exp", b"sha"])?;
                 if want_str(iss, "iss")? != ISSUER { return Err(err(72, "issuer")); }
-                if !want_str(wf, "job_workflow_ref")?.starts_with(WORKFLOW_PREFIX) { return Err(err(73, "workflow")); }
+                // the run's workflow file is pinned by commit: its sha must be in the registry (SetWorkflow, kind 0)
+                if !workflow_registered(program_id, wf, WF_PROVE, want_str(wsha, "job_workflow_sha")?) {
+                    return Err(err(73, "workflow sha not registered"));
+                }
                 let jd = job.try_borrow_data()?;
                 if hashv(&[want_str(repo, "repository")?]).to_bytes()[..] != jd[JOB_LEN..JOB_LEN + 32] { return Err(err(74, "repository")); }
                 if hashv(&[want_str(rf, "ref")?]).to_bytes()[..] != jd[JOB_LEN + 32..JOB_LEN + 64] { return Err(err(74, "ref")); }
-                let mut want_aud = [0u8; 5 + 64];
-                want_aud[..5].copy_from_slice(b"knos:");
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                for (k, b) in job_id.iter().enumerate() { want_aud[5 + 2 * k] = HEX[(b >> 4) as usize]; want_aud[6 + 2 * k] = HEX[(b & 15) as usize]; }
-                if want_str(aud, "aud")? != want_aud { return Err(err(75, "audience")); }
+                // aud = "knos:<job hex 64>:<head sha 40>:<checks hash hex 64>:<payout base58>"
+                let a = want_str(aud, "aud")?;
+                let mut want = [0u8; 5 + 64 + 1];
+                want[..5].copy_from_slice(b"knos:");
+                hex_into(&job_id, &mut want[5..69]);
+                want[69] = b':';
+                if a.len() < 70 + 40 + 1 + 64 + 1 + 32 || a[..70] != want { return Err(err(75, "audience")); }
+                let head = &a[70..110];
+                let mut ch = [0u8; 64];
+                hex_into(&jd[GH_CHECKS..GH_CHECKS + 32], &mut ch);
+                if a[110] != b':' || a[111..175] != ch || a[175] != b':' { return Err(err(75, "audience: checks hash")); }
+                if !is_sha40(head) || want_str(sha, "sha")? != head { return Err(err(75, "audience: head sha")); }
+                payout = Pubkey::new_from_array(b58_32(&a[176..]).ok_or_else(|| err(75, "audience: payout"))?);
+                stake_required = jd[GH_STAKE_REQ] != 0;
                 let exp = match exp { Some((v, false)) if !v.is_empty() && v.len() <= 18 && v.iter().all(|c| c.is_ascii_digit()) =>
                     v.iter().fold(0i64, |a, c| a * 10 + (c - b'0') as i64), _ => return Err(err(63, "exp")) };
                 if exp <= now { return Err(err(76, "token expired")); }
             }
-            // pay the worker: price - fee + the stake back; the fee to the fee account; close the job and the buffer
+            // pay the payout the token names: price - fee (+ the stake back, when the job required a claim stake: then
+            // only the claimer can be the payout); the fee to the fee account; close the job and the buffer. Anyone
+            // may relay the proof and pay the gas.
             let mut j = Job::load(&job.try_borrow_data()?)?;
-            if j.state != S::Claimed as u8 || now > j.deadline { return Err(err(20, "not claimed or past the deadline")); }
-            let (wo, _) = token_owner_mint(worker_tok)?;
-            if wo != j.worker || *fee_tok.key != cfg.fee_token { return Err(err(33, "payee")); }
+            if now > j.deadline { return Err(err(20, "past the deadline")); }
+            if stake_required {
+                if j.state != S::Claimed as u8 || j.worker != payout { return Err(err(20, "a staked job pays its claimer only")); }
+            } else if j.state != S::Open as u8 { return Err(err(20, "not open")); }
+            let (wo, wm) = token_owner_mint(worker_tok)?;
+            if wo != payout || wm != cfg.mint || *fee_tok.key != cfg.fee_token { return Err(err(33, "payee")); }
             let fee = cfg.fee(j.amount).min(j.amount);
             let to_worker = (j.amount - fee).checked_add(j.stake).ok_or(ProgramError::ArithmeticOverflow)?;
             j.state = S::Released as u8; j.stake = 0; j.store(&mut job.try_borrow_mut_data()?);
@@ -388,7 +524,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
         19 => {
             let buyer = next_account_info(it)?; let job = next_account_info(it)?; let buyer_tok = next_account_info(it)?;
             let vault_tok = next_account_info(it)?; let config = next_account_info(it)?; let token = next_account_info(it)?; let sys = next_account_info(it)?;
-            if rest.len() != 32 + 8 + 8 + 8 + 32 + 64 { return Err(ProgramError::InvalidInstructionData); }
+            // data: ... repo_hash[32] ref_hash[32] checks_hash[32] stake_required u8
+            if rest.len() != 32 + 8 + 8 + 8 + 32 + 64 + 33 || rest[184] > 1 { return Err(ProgramError::InvalidInstructionData); }
             let id: [u8; 32] = rest[0..32].try_into().unwrap();
             let amount = u64::from_le_bytes(rest[32..40].try_into().unwrap());
             let work = i64::from_le_bytes(rest[40..48].try_into().unwrap());
@@ -412,7 +549,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
             Job { state: S::Open as u8, buyer: *buyer.key, worker: Pubkey::default(), amount, deadline: now.saturating_add(work), review,
                   brief, result: [0; 32], verifier: Pubkey::default(), proof: [0; 32], stake: 0, mint: Pubkey::default() }
                 .store(&mut d);
-            d[JOB_LEN..GH_JOB_LEN].copy_from_slice(&rest[88..152]);
+            d[JOB_LEN..GH_JOB_LEN].copy_from_slice(&rest[88..185]);
             Ok(())
         }
         _ => Err(ProgramError::InvalidInstructionData),

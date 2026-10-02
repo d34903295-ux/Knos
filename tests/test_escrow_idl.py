@@ -43,6 +43,9 @@ CALLS = {
     "faucet": lambda: sol.faucet(PID, K[0], K[1], K[2], 100_000_000),
     "init_faucet_mint": lambda: sol.init_faucet_mint(PID, K[0], K[1], 100_000_000),
     "add_mint": lambda: sol.add_mint(PID, K[0], K[1], K[2]),
+    "set_admin": lambda: sol.set_admin(PID, K[0], K[1]),
+    "set_workflow": lambda: sol.set_workflow(PID, K[0], "ab" * 20),
+    "set_fee_account": lambda: sol.set_fee_account(PID, K[0], K[1]),
 }
 BY_TAG = {ix["discriminator"][0]: ix for ix in IDL["instructions"]}
 SIZES = {"u8": 1, "u16": 2, "u32": 4, "bytes": 0, "u64": 8, "i64": 8, "pubkey": 32}
@@ -85,7 +88,7 @@ def test_builders_match_idl():
             assert len(ix.data) > 1 + arg_len, name
         else:
             assert len(ix.data) == 1 + arg_len, name
-    assert seen == set(BY_TAG) == set(range(1, 20)) | {20, 21, 22, 23}
+    assert seen == set(BY_TAG) == set(range(1, 20)) | {20, 21, 22, 23, 24, 27, 28}
 
 
 def _layout(name):

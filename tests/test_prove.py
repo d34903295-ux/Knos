@@ -79,11 +79,12 @@ def test_attest_runs_no_pr_code_and_mints_the_five_part_audience():
     assert "pip install --system \"knos==" in runs                  # knos from PyPI, never from the PR
 
 
-def test_the_caller_template_uses_pull_request_target_and_a_release_tag():
+def test_the_caller_template_uses_pull_request_target_and_a_pinned_commit():
     doc = _yaml(ROOT / "examples" / "knos-workflow.yml")
-    assert set(doc["on"]) == {"pull_request_target"}
+    assert {"pull_request_target", "issue_comment"} <= set(doc["on"])
     prove = doc["jobs"]["prove"]
-    assert prove["uses"].startswith("drexthealpha/Knos/.github/workflows/prove.yml@v")
+    pin = prove["uses"].split("@")
+    assert pin[0] == "drexthealpha/Knos/.github/workflows/prove.yml" and len(pin[1]) == 40   # a commit, never a tag
     assert prove["with"]["job"] == "${{ needs.job.outputs.id }}"
     assert prove["with"]["issue"] == "${{ needs.job.outputs.issue }}"
     assert prove["permissions"] == {"contents": "read", "id-token": "write"}
@@ -96,7 +97,7 @@ def test_the_caller_template_uses_pull_request_target_and_a_release_tag():
 
 def _jwt(**claims) -> str:
     body = {"aud": AUD, "iss": "https://token.actions.githubusercontent.com",
-            "exp": int(time.time()) + 300, "job_workflow_ref": REF, **claims}
+            "exp": int(time.time()) + 300, "job_workflow_ref": REF, "job_workflow_sha": "a" * 40, **claims}
     enc = [base64.urlsafe_b64encode(json.dumps(x).encode()).rstrip(b"=").decode() for x in ({"alg": "RS256"}, body)]
     return ".".join(enc + ["c2ln"])
 
@@ -134,8 +135,8 @@ def test_a_good_token_is_sent_and_both_signatures_printed(chain, tmp_path, capsy
     ({"aud": "sts.amazonaws.com"}, "audience"),
     ({"iss": "https://evil.example"}, "issuer"),
     ({"exp": int(time.time()) - 5}, "expired"),
-    ({"job_workflow_ref": "attacker/repo/.github/workflows/prove.yml@refs/heads/main"}, "job_workflow_ref"),
-    ({"job_workflow_ref": "drexthealpha/Knos/.github/workflows/prove.yml@refs/heads/main"}, "job_workflow_ref"),
+    ({"job_workflow_sha": ""}, "job_workflow_sha"),
+    ({"job_workflow_sha": "v0.3.8"}, "job_workflow_sha"),
 ])
 def test_a_token_the_chain_would_refuse_is_refused_before_sending(chain, tmp_path, capsys, claims, why):
     rc, said = run(capsys, "prove", "--job", JOB, "--jwt-file", _token(tmp_path, _jwt(**claims)))

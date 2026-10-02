@@ -166,6 +166,17 @@ def lower_fee(pid: Pubkey, admin: Pubkey, fee_bps: int) -> Instruction:
                        [_m(admin, True, False), _m(config_pda(pid), False, True)])
 
 
+def set_admin(pid: Pubkey, admin: Pubkey, new_admin: Pubkey) -> Instruction:
+    """SetAdmin (27): the current admin hands the config to a new admin (e.g. a Squads v4 vault PDA)."""
+    return Instruction(pid, bytes([27]) + bytes(new_admin), [_m(admin, True, False), _m(config_pda(pid), False, True)])
+
+
+def set_fee_account(pid: Pubkey, admin: Pubkey, fee_token: Pubkey) -> Instruction:
+    """SetFeeAccount (28): the admin points the fee at another token account of the config mint."""
+    return Instruction(pid, bytes([28]), [_m(admin, True, False), _m(config_pda(pid), False, True),
+                                          _m(fee_token, False, False)])
+
+
 def post(pid: Pubkey, buyer: Pubkey, job_id: bytes, amount: int, work_s: int, review_s: int, brief_hash: bytes,
          buyer_token: Pubkey, vault_token: Pubkey, verifier: Pubkey | None = None, mint: Pubkey | None = None,
          _tag: int = 1) -> Instruction:
@@ -362,8 +373,9 @@ def parse_config(raw: bytes) -> dict:
 #                    config token                      data: job_id[32]
 #    19 PostGithub   buyer(s,w) job(w) buyer_token(w) vault_token(w) config token system
 #                    data: id[32] amount u64 work i64 review i64 brief[32] repo_hash[32] ref_hash[32]
-GH_JOB_LEN = JOB_LEN + 64      # a github job: the job, then sha256(repository), sha256(ref)
-JOB_LENS = JOB_LENS + (GH_JOB_LEN,)
+GH_V037_JOB_LEN = JOB_LEN + 64  # a 0.3.7 github job: the job, sha256(repository), sha256(ref) (refund only now)
+GH_JOB_LEN = JOB_LEN + 64 + 33  # 0.3.8: ... then checks_hash[32], stake_required u8
+JOB_LENS = JOB_LENS + (GH_JOB_LEN, GH_V037_JOB_LEN)
 GH_BUF_LEN = 291 + 2048
 GH_MAX_JWT = 2048
 GH_ISSUER = "https://token.actions.githubusercontent.com"
@@ -381,8 +393,19 @@ def gh_buffer_pda(pid: Pubkey, job_id: bytes, prover: Pubkey) -> Pubkey:
     return Pubkey.find_program_address([b"ghproof", job_id, bytes(prover)], pid)[0]
 
 
-def gh_audience(job_id: bytes) -> str:
-    return "knos:" + job_id.hex()
+def gh_audience(job_id: bytes, head_sha: str = "0" * 40, checks_hash: bytes = bytes(32),
+                payout: Pubkey | str = "11111111111111111111111111111111") -> str:
+    """The proof audience: knos:<job hex>:<head sha>:<checks hash hex>:<payout base58>. The token's sha claim must be
+    head_sha, checks_hash the job's (fixed at funding), and the payout is who gets paid."""
+    return f"knos:{job_id.hex()}:{head_sha}:{checks_hash.hex()}:{payout}"
+
+
+def parse_gh_audience(aud: str) -> tuple[bytes, str, bytes, str]:
+    """(job id, head sha, checks hash, payout base58) from a 5-part proof audience; ValueError otherwise."""
+    parts = aud.split(":")
+    if len(parts) != 5 or parts[0] != "knos" or len(parts[1]) != 64 or len(parts[2]) != 40 or len(parts[3]) != 64:
+        raise ValueError(f"not a knos proof audience: {aud!r}")
+    return bytes.fromhex(parts[1]), parts[2], bytes.fromhex(parts[3]), parts[4]
 
 
 def rsa_r2_n0inv(n: int) -> tuple[int, int]:
@@ -423,8 +446,34 @@ def verify_step1(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey) -> Ins
                                                    _m(key, False, False)])
 
 
+WF_PROVE, WF_FUND = 0, 1      # workflow registry kinds: prove.yml, fund.yml
+
+
+def workflow_pda(pid: Pubkey, sha: str, kind: int = WF_PROVE) -> Pubkey:
+    """The registry entry ["workflow", kind, sha] that pins a workflow file by its 40-hex commit sha."""
+    s = sha.encode()[:40].ljust(40, b"0")
+    return Pubkey.find_program_address([b"workflow", bytes([kind]), s[:20], s[20:]], pid)[0]
+
+
+def set_workflow(pid: Pubkey, admin: Pubkey, sha: str, add: bool = True, kind: int = WF_PROVE) -> Instruction:
+    """SetWorkflow (24, admin): add or remove an allowed job_workflow_sha (kind 0 prove.yml, 1 fund.yml)."""
+    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+        raise ValueError("a 40-hex lowercase commit sha")
+    return Instruction(pid, bytes([24, kind, int(add)]) + sha.encode(),
+                       [_m(admin, True, True), _m(config_pda(pid), False, False),
+                        _m(workflow_pda(pid, sha, kind), False, True), _m(SYSTEM, False, False)])
+
+
+def jwt_claims(jwt: str) -> dict:
+    """The (unverified) payload of a JWT: the program checks it; clients read it to pick accounts."""
+    import base64
+    import json
+    p = jwt.strip().split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
+
+
 def verify_step2(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey, vault_token: Pubkey, worker_token: Pubkey,
-                 fee_token: Pubkey, buyer: Pubkey) -> Instruction:
+                 fee_token: Pubkey, buyer: Pubkey, workflow_sha: str = "0" * 40) -> Instruction:
     """VerifyStep2 (18): 8 squarings, * s, the PKCS#1 v1.5 check and the claims; on success the worker is paid and the
     job and the buffer close."""
     return Instruction(pid, bytes([18]) + job_id,
@@ -432,18 +481,22 @@ def verify_step2(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey, vault_
                         _m(key, False, False), _m(job_pda(pid, job_id), False, True), _m(vault_token, False, True),
                         _m(vault_authority(pid), False, False), _m(worker_token, False, True),
                         _m(fee_token, False, True), _m(buyer, False, True), _m(config_pda(pid), False, False),
-                        _m(TOKEN, False, False)])
+                        _m(TOKEN, False, False), _m(workflow_pda(pid, workflow_sha), False, False)])
 
 
 def post_github(pid: Pubkey, buyer: Pubkey, job_id: bytes, amount: int, work_s: int, review_s: int, brief_hash: bytes,
-                repository: str, ref: str, buyer_token: Pubkey, vault_token: Pubkey) -> Instruction:
+                repository: str, ref: str, buyer_token: Pubkey, vault_token: Pubkey, checks_hash: bytes = bytes(32),
+                stake_required: bool = False) -> Instruction:
     """PostGithub (19): a job paid on a GitHub Actions proof for `repository` at `ref`. amount 0 = a bounty with no
     money (the claim stake only)."""
     import hashlib
     if len(job_id) != 32 or len(brief_hash) != 32:
         raise ValueError("job id and brief hash are 32 bytes")
     data = bytes([19]) + job_id + struct.pack("<Qqq", amount, work_s, review_s) + brief_hash + \
-        hashlib.sha256(repository.encode()).digest() + hashlib.sha256(ref.encode()).digest()
+        hashlib.sha256(repository.encode()).digest() + hashlib.sha256(ref.encode()).digest() + checks_hash + \
+        bytes([int(stake_required)])
+    if len(checks_hash) != 32:
+        raise ValueError("checks hash is 32 bytes")
     return Instruction(pid, data, [_m(buyer, True, True), _m(job_pda(pid, job_id), False, True),
                                    _m(buyer_token, False, True), _m(vault_token, False, True),
                                    _m(config_pda(pid), False, False), _m(TOKEN, False, False),

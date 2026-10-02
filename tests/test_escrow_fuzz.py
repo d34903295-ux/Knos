@@ -51,11 +51,15 @@ def _b64(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
 
+GH_WF_SHA = "ab" * 20
+
+
 def gh_prove(e, who, jid: bytes, worker_tok, good: bool) -> bool:
     """Write a GitHub-style OIDC token for `jid` (signed by the fuzz key; `good` False: audience of another job) and run
     BufferWrite, VerifyStep1, VerifyStep2. True if all of them succeeded."""
-    claims = {"aud": sol.gh_audience(jid if good else bytes(32)), "ref": GH_REF, "repository": GH_REPO,
-              "job_workflow_ref": sol.GH_WORKFLOW_PREFIX + "v1", "iss": sol.GH_ISSUER, "exp": 4_000_000_000}
+    payout = sol.Pubkey.from_bytes(bytes(e.svm.get_account(worker_tok).data)[32:64])
+    claims = {"aud": sol.gh_audience(jid if good else bytes(32), "cd" * 20, bytes(32), payout), "sha": "cd" * 20, "ref": GH_REF, "repository": GH_REPO,
+              "job_workflow_sha": GH_WF_SHA, "iss": sol.GH_ISSUER, "exp": 4_000_000_000}
     head = _b64(json.dumps({"alg": "RS256", "kid": GH_KID}).encode())
     body = _b64(json.dumps(claims).encode())
     sig = GH_KEY[0].sign(f"{head}.{body}".encode(), padding.PKCS1v15(), hashes.SHA256())
@@ -68,7 +72,7 @@ def gh_prove(e, who, jid: bytes, worker_tok, good: bool) -> bool:
             return False
     return (e.send([sol.compute_limit(), sol.verify_step1(p, who.pubkey(), jid, k)], who, [who]) and
             e.send([sol.compute_limit(), sol.verify_step2(p, who.pubkey(), jid, k, e.vault, worker_tok, e.fee_token,
-                                                          buyer)], who, [who]))
+                                                          buyer, GH_WF_SHA)], who, [who]))
 
 
 class Model:
@@ -139,7 +143,7 @@ def _step(rng: random.Random, m: Model, ids: list[bytes]) -> None:
               and (m.cap == 0 or amount <= m.cap))
         if gh:
             got = e.send([sol.post_github(e.pid, who.pubkey(), jid, amount, work, review, bytes(32), GH_REPO, GH_REF,
-                                          tok, e.vault)], who, [who])
+                                          tok, e.vault, stake_required=True)], who, [who])
         else:
             got = e.post(who, tok, jid, amount, work=work, review=review, verifier=ver.pubkey() if ver else None)
         if ok:
@@ -296,6 +300,7 @@ def test_escrow_fuzz_model_conservation_no_double_payout_no_stuck_funds():
     GH_KEY.append(rsa.generate_private_key(public_exponent=65537, key_size=2048))
     assert e.send([sol.register_key(e.pid, e.admin.pubkey(), GH_KID, GH_KEY[0].public_key().public_numbers().n)],
                   e.admin, [e.admin])
+    assert e.send([sol.set_workflow(e.pid, e.admin.pubkey(), GH_WF_SHA)], e.admin, [e.admin])
     m = Model(e, actors)
     total = sum(m.bal.values())
     t0, steps, episode = time.perf_counter(), 0, 0

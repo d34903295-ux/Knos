@@ -31,7 +31,6 @@ except ImportError:  # Python 3.10
     import tomli as tomllib  # type: ignore[no-redef]
 
 ISSUER = "https://token.actions.githubusercontent.com"
-WORKFLOW = "drexthealpha/Knos/.github/workflows/prove.yml@refs/tags/"
 
 
 def claims(jwt: str) -> dict:
@@ -67,9 +66,10 @@ def precheck(c: dict, job_id: bytes, now: float | None = None) -> None:
     exp = c.get("exp")
     if not isinstance(exp, (int, float)) or exp <= now:
         raise ValueError("the token has expired: mint a new one (they last minutes)")
-    ref = str(c.get("job_workflow_ref", ""))
-    if not ref.startswith(WORKFLOW):
-        raise ValueError(f"job_workflow_ref is {ref!r}: the token must come from Knos's prove.yml at a release tag")
+    wsha = str(c.get("job_workflow_sha", ""))
+    if len(wsha) != 40 or any(ch not in "0123456789abcdef" for ch in wsha):
+        raise ValueError(f"job_workflow_sha is {wsha!r}: the token must come from a pinned prove.yml commit "
+                         "(the escrow accepts only commits registered on chain)")
 
 
 def prove(ledger, payer, job_id: bytes, jwt: str) -> tuple[str, str]:
