@@ -90,7 +90,6 @@ jobs:
     uses: drexthealpha/Knos/.github/workflows/prove.yml@81d40cda2d0d40636c881befbdf07008665ff288
     with:
       job: ${{ needs.job.outputs.id }}
-      payout: ${{ needs.job.outputs.payout }}
       issue: ${{ needs.job.outputs.issue }}
 
   prove-relay:

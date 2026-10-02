@@ -185,7 +185,6 @@ jobs:
     uses: drexthealpha/Knos/.github/workflows/prove.yml@${KNOS_SHA}
     with:
       job: \${{ needs.job.outputs.id }}
-      payout: \${{ needs.job.outputs.payout }}
       issue: \${{ needs.job.outputs.issue }}
 
   prove-relay:

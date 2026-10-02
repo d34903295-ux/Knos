@@ -52,6 +52,50 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
             raise typer.Exit(1)
         out.print("[green]proven[/green]")
 
+    @proof.command("checks-hash")
+    def checks_hash(dir_: Path = typer.Option(..., "--dir", help="e.g. .knos/acceptance/<issue>")) -> None:
+        """Print the sha256 of an acceptance bundle (sorted "path\\0sha256(content)\\n" lines), as fixed on chain."""
+        from ..jobs import prove
+        try:
+            out.print(prove.checks_hash(dir_), markup=False)
+        except ValueError as why:
+            raise Stop(str(why)) from None
+
+    @proof.command("aud")
+    def aud(job: str = typer.Option(..., "--job"), head: str = typer.Option(..., "--head"),
+            checks: str = typer.Option(..., "--checks"), payout: str = typer.Option(..., "--payout")) -> None:
+        """Print the OIDC audience knos:<job>:<head>:<checks>:<payout>, refusing a malformed part."""
+        from ..jobs import prove
+        try:
+            out.print(prove.build_aud(job, head, checks, payout), markup=False)
+        except ValueError as why:
+            raise Stop(f"Bad audience: {why}") from None
+
+    @proof.command("judge")
+    def judge(base: Path = typer.Option(..., "--base", help="the base branch checkout"),
+              pr: Path = typer.Option(..., "--pr", help="the pull request head source"),
+              issue: str = typer.Option(..., "--issue", help="the acceptance bundle: .knos/acceptance/<issue>/"),
+              changed: Path = typer.Option(None, "--changed", help="file listing the PR's changed paths"),
+              evidence: Path = typer.Option(None, "--evidence", help="write the evidence JSON here")) -> None:
+        """prove.yml's check job: overlay, protected paths, sentinel, fail-to-pass. Exit 1 unless it passes."""
+        from ..jobs import prove
+        from . import engine
+        cfg = dict(engine.config(base))
+        cfg["issue"] = issue
+        names = None
+        if changed:
+            names = [x.strip() for x in changed.read_text(encoding="utf-8").splitlines() if x.strip()]
+        v = prove.judge(base, pr, cfg, names)
+        if evidence:
+            evidence.write_text(json.dumps(v, indent=1), encoding="utf-8")
+        for r in v["reasons"]:
+            out.print(f"NO  {r}", markup=False, emoji=False)
+        out.print(f"checks_hash {v['checks_hash']}", markup=False)
+        if not v["passed"]:
+            out.print("[red]not proven[/red]")
+            raise typer.Exit(1)
+        out.print("[green]proven[/green]")
+
     @proof.command("observe")
     def observe(sha: str = typer.Argument(...), check: str = typer.Argument(..., help="e.g. ci"),
                 failed: bool = typer.Option(False, "--failed"), detail: str = typer.Option("", "--detail")) -> None:
