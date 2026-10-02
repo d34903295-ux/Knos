@@ -3,6 +3,9 @@
 //!   post -> claim -> deliver -> accept | verify_release | reject | release | refund.
 //! Native program (no framework). The Knos escrow program (devnet: GwmbMFvyHHwHug5em9dv26oXz2zTgXKGsNdrBxPayRPq).
 //!
+//! 0.3.9: an issuer registry (25 RegisterIssuer; keys scoped per issuer: GitHub Actions, GitLab CI), FundWithToken
+//! (26, devnet: a fund.yml token funds a github job with minted test USDC), the version in the binary (29 Version).
+//!
 //! 0.3.4: a job may name a verifier key at post; the verifier alone can release a delivered job by naming the exact
 //! result hash the worker committed (and a proof root, stored in the job). Minimum job and minimum fee; a per-job cap
 //! the admin can only lower; a pause that stops new posts only. The config moved to a new PDA ["config2"].
@@ -37,8 +40,12 @@ solana_security_txt::security_txt! {
     project_url: "https://github.com/drexthealpha/Knos",
     contacts: "link:https://github.com/drexthealpha/Knos/security/advisories/new",
     policy: "https://github.com/drexthealpha/Knos/blob/main/SECURITY.md",
-    source_code: "https://github.com/drexthealpha/Knos"
+    source_code: "https://github.com/drexthealpha/Knos",
+    source_release: "v0.3.9"
 }
+
+/// The program's version, in the binary: clients read it from the program data and refuse a mismatch.
+pub const VERSION: &str = "knos-escrow 0.3.9";
 
 mod bounty;
 
@@ -68,7 +75,7 @@ struct Job {
 }
 impl Job {
     fn load(d: &[u8]) -> Result<Job, ProgramError> {
-        if d.len() != MINT_JOB_LEN && d.len() != github::GH_JOB_LEN && d.len() != github::GH_V037_JOB_LEN && d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
+        if d.len() != MINT_JOB_LEN && d.len() != github::GH_MINT_JOB_LEN && d.len() != github::GH_JOB_LEN && d.len() != github::GH_V037_JOB_LEN && d.len() != JOB_LEN && d.len() != V034_JOB_LEN && d.len() != LEGACY_JOB_LEN { return Err(err(13, "not a job account")); }
         let pk = |o: usize| Pubkey::new_from_array(d[o..o + 32].try_into().unwrap());
         let u = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
         let full = d.len() >= V034_JOB_LEN;
@@ -77,7 +84,7 @@ impl Job {
                  verifier: if full { pk(153) } else { Pubkey::default() },
                  proof: if full { d[185..217].try_into().unwrap() } else { [0; 32] },
                  stake: if d.len() >= JOB_LEN { u(217) } else { 0 },
-                 mint: if d.len() == MINT_JOB_LEN { pk(225) } else { Pubkey::default() } })
+                 mint: if d.len() == MINT_JOB_LEN { pk(225) } else if d.len() == github::GH_MINT_JOB_LEN { pk(github::GH_JOB_LEN) } else { Pubkey::default() } })
     }
     fn store(&self, d: &mut [u8]) {
         d[0] = self.state; d[1..33].copy_from_slice(self.buyer.as_ref()); d[33..65].copy_from_slice(self.worker.as_ref());
@@ -87,6 +94,7 @@ impl Job {
         if d.len() >= V034_JOB_LEN { d[153..185].copy_from_slice(self.verifier.as_ref()); d[185..217].copy_from_slice(&self.proof); }
         if d.len() >= JOB_LEN { d[217..225].copy_from_slice(&self.stake.to_le_bytes()); }
         if d.len() == MINT_JOB_LEN { d[225..257].copy_from_slice(self.mint.as_ref()); }
+        if d.len() == github::GH_MINT_JOB_LEN { d[github::GH_JOB_LEN..].copy_from_slice(self.mint.as_ref()); }
     }
 }
 
@@ -309,7 +317,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             if j.state != S::Open as u8 || now > j.deadline { return Err(err(20, "not open")); }
             if *worker.key == j.buyer { return Err(err(22, "a buyer cannot claim its own job")); }
             if *worker.key == j.verifier { return Err(err(36, "a worker cannot verify its own work")); }
-            if job.data_len() == github::GH_JOB_LEN && job.try_borrow_data()?[github::GH_STAKE_REQ] == 0 {
+            if github::is_gh_job(job.data_len()) && job.try_borrow_data()?[github::GH_STAKE_REQ] == 0 {
                 return Err(err(78, "no claim on this github job: proofs are permissionless"));
             }
             let (vo, vm) = token_owner_mint(vault_tok)?; let (_, wm) = token_owner_mint(worker_tok)?;
@@ -333,7 +341,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             let mut j = Job::load(&job.try_borrow_data()?)?; let now = Clock::get()?.unix_timestamp;
             let vb = bounty::vault_bump_for(&j.mint, vauth.key, program_id, (vault_auth, vault_bump))?;
             if j.state != S::Claimed as u8 || *worker.key != j.worker { return Err(err(21, "not worker")); }
-            if job.data_len() == github::GH_JOB_LEN || job.data_len() == github::GH_V037_JOB_LEN { return Err(err(77, "a github job settles by proof, not delivery")); }
+            if github::is_gh_job(job.data_len()) || job.data_len() == github::GH_V037_JOB_LEN { return Err(err(77, "a github job settles by proof, not delivery")); }
             if now > j.deadline { return Err(err(23, "the claim timed out")); }
             let (wo, _) = token_owner_mint(worker_tok)?;
             if wo != j.worker { return Err(err(33, "stake back to the worker only")); }
@@ -419,7 +427,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             close_job(&j, job, buyer)
         }
         // 15 RegisterKey, 16 BufferWrite, 17 VerifyStep1, 18 VerifyStep2, 19 PostGithub: see github.rs
-        15..=19 => github::process(program_id, accounts, tag, rest, &config_key, &vault_auth, vault_bump),
+        // 26 FundWithToken (devnet): a fund.yml token funds a github job with minted test USDC; see github.rs
+        15..=19 | 26 => github::process(program_id, accounts, tag, rest, &config_key, &vault_auth, vault_bump),
+        // 25 RegisterIssuer (admin): an OIDC issuer (GitHub, GitLab CI) keys can be scoped to; see github.rs
+        25 => github::register_issuer(program_id, accounts, rest, &config_key),
+        // 29 Version: logs the program's version ("knos-escrow X.Y.Z"); no accounts.
+        29 => { msg!("{}", VERSION); Ok(()) }
         // 20 Faucet, 21 InitFaucetMint (devnet builds only), 22 AddMint: see bounty.rs.
         20 => bounty::faucet(program_id, accounts, rest),
         21 => bounty::init_faucet_mint(program_id, accounts, rest, &config_key),

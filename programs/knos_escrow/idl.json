@@ -2,7 +2,7 @@
  "address": "GwmbMFvyHHwHug5em9dv26oXz2zTgXKGsNdrBxPayRPq",
  "metadata": {
   "name": "knos_escrow",
-  "version": "0.3.7",
+  "version": "0.3.9",
   "spec": "0.1.0",
   "description": "Knos escrow: pay-on-acceptance or pay-on-proof escrow for AI agent jobs (SPL tokens)",
   "repository": "https://github.com/drexthealpha/Knos"
@@ -1056,7 +1056,8 @@
   {
    "name": "register_key",
    "docs": [
-    "Admin only: an RSA-2048 key GitHub signs Actions OIDC tokens with, at PDA [\"ghkey\", sha256(kid)]. r2 = R^2 mod n and n0inv = -n^-1 mod 2^32 are checked once here."
+    "Admin only: an RSA-2048 key GitHub signs Actions OIDC tokens with, at PDA [\"ghkey\", sha256(kid)]. r2 = R^2 mod n and n0inv = -n^-1 mod 2^32 are checked once here.",
+    "0.3.9: an optional trailing issuer id u8 (with the issuer account [\"issuer\", id] as a 5th account) scopes the key to that registered issuer, at [\"ghkey\", sha256(kid), [id]]."
    ],
    "discriminator": [
     15
@@ -1814,6 +1815,149 @@
     {
      "name": "verifier",
      "type": "pubkey"
+    }
+   ]
+  },
+  {
+   "name": "register_issuer",
+   "docs": [
+    "Admin: register an OIDC issuer at PDA [\"issuer\", id]: claims kind (0 GitHub Actions: repository, job_workflow_sha; 1 GitLab CI: project_path, ci_config_sha) and its url (https://, at most 128 bytes)."
+   ],
+   "discriminator": [
+    25
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "signer": true,
+     "writable": true
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "issuer",
+     "writable": true
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    }
+   ],
+   "args": [
+    {
+     "name": "id",
+     "type": "u8"
+    },
+    {
+     "name": "claims_kind",
+     "type": "u8"
+    },
+    {
+     "name": "url",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "fund_with_token",
+   "docs": [
+    "Devnet: after BufferWrite + VerifyStep1 of a fund.yml OIDC token (aud \"knos:fund:<issue>:<amount>:<checks hash hex>:<stake 0|1>\", job_workflow_sha registered with kind 1), create the github job sha256(\"knos-fund\" | repository | \"#\" | issue) in the faucet mint and mint the amount into that mint's vault. One funding per repository per hour (PDA [\"fundrate\", sha256(repository)])."
+   ],
+   "discriminator": [
+    26
+   ],
+   "accounts": [
+    {
+     "name": "payer",
+     "signer": true,
+     "writable": true
+    },
+    {
+     "name": "buffer",
+     "writable": true
+    },
+    {
+     "name": "key"
+    },
+    {
+     "name": "job",
+     "writable": true
+    },
+    {
+     "name": "vault_token",
+     "writable": true
+    },
+    {
+     "name": "faucet"
+    },
+    {
+     "name": "mint",
+     "writable": true
+    },
+    {
+     "name": "registry"
+    },
+    {
+     "name": "config",
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "token_program",
+     "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    {
+     "name": "system_program",
+     "address": "11111111111111111111111111111111"
+    },
+    {
+     "name": "workflow"
+    },
+    {
+     "name": "fundrate",
+     "writable": true
+    }
+   ],
+   "args": [
+    {
+     "name": "job_id",
+     "type": {
+      "array": [
+       "u8",
+       32
+      ]
+     }
     }
    ]
   }

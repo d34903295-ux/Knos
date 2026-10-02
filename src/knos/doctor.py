@@ -95,4 +95,13 @@ def jobs() -> list[tuple[str, bool, str]]:
         return [("jobs settlement", True, f"{cluster}: RPC unreachable now; will settle at 'confirmed'")]
     why = (f"finalized is {gap} slot(s) behind confirmed, measured now" if mode == "finalized"
            else f"finalized trails confirmed by {gap} slots")
-    return [("jobs settlement", True, f"{cluster}: waits for '{mode}' ({why})")]
+    rows = [("jobs settlement", True, f"{cluster}: waits for '{mode}' ({why})")]
+    from .jobs import market
+    try:
+        rows.append(("escrow program version", True, f"{cluster} runs knos-escrow "
+                     f"{market.assert_program_version(net.ledger())}, as this client needs"))
+    except market.ProgramVersionError as e:
+        rows.append(("escrow program version", False, str(e)))
+    except Exception as e:  # noqa: BLE001 - offline mid-check
+        rows.append(("escrow program version", True, f"{cluster}: not checked now ({type(e).__name__})"))
+    return rows

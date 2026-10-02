@@ -13,7 +13,8 @@
 //!                   buyer(w) config2 token                 data: job_id[32]
 //!   19 PostGithub   buyer(s,w) job(w) buyer_token(w) vault_token(w) config2 token system
 //!                   data: id[32] amount u64 work i64 review i64 brief[32] repo_hash[32] ref_hash[32]
-use super::{close_job, create_pda, err, token_owner_mint, token_transfer, Config, Job, JOB_LEN, S, TOKEN_PROGRAM};
+use super::{bounty, close_job, create_pda, err, token_owner_mint, token_transfer, vseeds, Config, Job, JOB_LEN, S, TOKEN_PROGRAM};
+use solana_program::{instruction::{AccountMeta, Instruction}, program::invoke_signed};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     clock::Clock,
@@ -30,6 +31,20 @@ pub const GH_CHECKS: usize = JOB_LEN + 64;
 pub const GH_STAKE_REQ: usize = GH_CHECKS + 32;
 pub const GH_JOB_LEN: usize = GH_STAKE_REQ + 1;
 pub const GH_V037_JOB_LEN: usize = JOB_LEN + 64; // 0.3.7 github jobs: settle by refund only
+// 0.3.9: a github job funded by FundWithToken, in the faucet's (registered) mint: the github job + mint[32]
+pub const GH_MINT_JOB_LEN: usize = GH_JOB_LEN + 32;
+pub fn is_gh_job(len: usize) -> bool { len == GH_JOB_LEN || len == GH_MINT_JOB_LEN }
+
+// 0.3.9 issuer registry: ["issuer", id] = claims kind u8, url_len u8, url[MAX_ISS]
+pub const MAX_ISS: usize = 128;
+pub const ISSUER_LEN: usize = 2 + MAX_ISS;
+pub const CLAIMS_GITHUB: u8 = 0; // repository, job_workflow_sha
+pub const CLAIMS_GITLAB: u8 = 1; // project_path, ci_config_sha
+// FundWithToken: a funded job's work window and review; one funding per repository per hour
+pub const FUND_WORK: i64 = 14 * 86_400;
+pub const FUND_REVIEW: i64 = 86_400;
+pub const FUND_PERIOD: i64 = 3_600;
+pub const FUNDRATE_LEN: usize = 8;
 
 fn hex_into(b: &[u8], out: &mut [u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -99,7 +114,119 @@ pub fn set_workflow(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8], 
 }
 const L: usize = 64; // 32-bit limbs of an RSA-2048 number
 type Big = [u32; L];
-const KEY_LEN: usize = 256 + 4 + 256; // n limbs (LE), n0inv, r2 limbs
+const KEY_LEN: usize = 256 + 4 + 256; // n limbs (LE), n0inv, r2 limbs (a GitHub key at ["ghkey", sha256(kid)])
+// 0.3.9: a key scoped to a registered issuer, at ["ghkey", sha256(kid), [issuer id]]: + issuer id, claims kind, sha256(url)
+const KEY2_LEN: usize = KEY_LEN + 2 + 32;
+
+struct KeyInfo { n: Big, n0inv: u32, issuer: Option<(u8, u8, [u8; 32])> }
+fn load_key(program_id: &Pubkey, key: &AccountInfo) -> Result<KeyInfo, ProgramError> {
+    if key.owner != program_id || (key.data_len() != KEY_LEN && key.data_len() != KEY2_LEN) { return Err(err(68, "not a registered key")); }
+    let kd = key.try_borrow_data()?;
+    let issuer = if kd.len() == KEY2_LEN { Some((kd[KEY_LEN], kd[KEY_LEN + 1], kd[KEY_LEN + 2..].try_into().unwrap())) } else { None };
+    Ok(KeyInfo { n: load(&kd, 0), n0inv: u32::from_le_bytes(kd[256..260].try_into().unwrap()), issuer })
+}
+
+/// The claims a proof reads, by the issuer's claim names (GitHub: repository, job_workflow_sha; GitLab CI:
+/// project_path, ci_config_sha). The issuer is checked: GitHub's for a legacy key, the registered url's otherwise.
+struct Claims<'a> { wsha: &'a [u8], repo: &'a [u8], rf: &'a [u8], aud: &'a [u8], sha: Option<(&'a [u8], bool)>, exp: i64 }
+fn claims<'a>(payload: &'a [u8], ki: &KeyInfo) -> Result<Claims<'a>, ProgramError> {
+    let kind = ki.issuer.map(|i| i.1).unwrap_or(CLAIMS_GITHUB);
+    let names: [&[u8]; 7] = if kind == CLAIMS_GITLAB {
+        [b"iss", b"ci_config_sha", b"project_path", b"ref", b"aud", b"exp", b"sha"]
+    } else {
+        [b"iss", b"job_workflow_sha", b"repository", b"ref", b"aud", b"exp", b"sha"]
+    };
+    let [iss, wsha, repo, rf, aud, exp, sha] = fields(payload, names)?;
+    let iss = want_str(iss, "iss")?;
+    let ok = match ki.issuer { None => iss == ISSUER, Some((_, _, h)) => hashv(&[iss]).to_bytes() == h };
+    if !ok { return Err(err(72, "issuer")); }
+    let exp = match exp { Some((v, false)) if !v.is_empty() && v.len() <= 18 && v.iter().all(|c| c.is_ascii_digit()) =>
+        v.iter().fold(0i64, |a, c| a * 10 + (c - b'0') as i64), _ => return Err(err(63, "exp")) };
+    Ok(Claims { wsha: want_str(wsha, "workflow sha")?, repo: want_str(repo, "repository")?, rf: want_str(rf, "ref")?,
+                aud: want_str(aud, "aud")?, sha, exp })
+}
+
+/// Step 2's signature check on the buffered token: step 1 ran with this key, the header names this key (RS256), and
+/// s^65537 mod n is the PKCS#1 v1.5 SHA-256 encoding of the signed part. Returns the decoded payload.
+fn verified_payload(program_id: &Pubkey, d: &[u8], key: &AccountInfo, ki: &KeyInfo) -> Result<Vec<u8>, ProgramError> {
+    let (n, n0inv) = (&ki.n, ki.n0inv);
+    if d[B_STAGE] != 1 || d[B_KEY..B_KEY + 32] != key.key.as_ref()[..] { return Err(err(70, "run step 1 first")); }
+    let len = u16::from_le_bytes(d[B_LEN..B_LEN + 2].try_into().unwrap()) as usize;
+    let t = &d[B_JWT..B_JWT + len];
+    let (h64, p64, sig) = split_jwt(t)?;
+    let s = signature(sig, n)?;
+    let header = b64url(h64)?;
+    let [alg, kid] = fields(&header, [b"alg", b"kid"])?;
+    if want_str(alg, "alg")? != b"RS256" { return Err(err(63, "alg")); }
+    let kh = hashv(&[want_str(kid, "kid")?]).to_bytes();
+    let (kk, _) = match ki.issuer {
+        None => Pubkey::find_program_address(&[b"ghkey", &kh], program_id),
+        Some((id, _, _)) => Pubkey::find_program_address(&[b"ghkey", &kh, &[id]], program_id),
+    };
+    if *key.key != kk { return Err(err(68, "the token's key is not this key")); }
+    // s^65537 mod n: x = (s^256)_M from step 1; 8 more squarings -> (s^65536)_M; * s (plain) -> s^65537
+    let mut x = load(d, B_X);
+    for _ in 0..8 { x = mont_sqr(&x, n, n0inv); }
+    let em = limbs_to_be(&mont_mul(&x, &s, n, n0inv));
+    let digest = hashv(&[&t[..h64.len() + 1 + p64.len()]]).to_bytes();
+    let ps = 256 - 3 - DIGEST_INFO.len() - 32;
+    let ok = em[0] == 0 && em[1] == 1 && em[2..2 + ps].iter().all(|&c| c == 0xff) && em[2 + ps] == 0
+        && em[3 + ps..3 + ps + 19] == DIGEST_INFO && em[256 - 32..] == digest;
+    if !ok { return Err(err(71, "bad signature")); }
+    b64url(p64)
+}
+
+fn close_buffer<'a>(buf: &AccountInfo<'a>, to: &AccountInfo<'a>) -> ProgramResult {
+    let lamports = buf.lamports();
+    **to.try_borrow_mut_lamports()? = to.lamports().checked_add(lamports).ok_or(ProgramError::ArithmeticOverflow)?;
+    **buf.try_borrow_mut_lamports()? = 0;
+    buf.resize(0)?;
+    buf.assign(&system_program::ID);
+    Ok(())
+}
+
+/// 25 RegisterIssuer  admin(s,w) config2 issuer(w) system     data: id u8, claims kind u8 (0 GitHub, 1 GitLab CI), url
+/// Creates ["issuer", id]. Keys registered with an issuer id (RegisterKey + id, with this account) verify only tokens
+/// whose iss is this url, and read the claims by its kind's names.
+pub fn register_issuer(program_id: &Pubkey, accounts: &[AccountInfo], rest: &[u8], config_key: &Pubkey) -> ProgramResult {
+    let it = &mut accounts.iter();
+    let admin = next_account_info(it)?; let config = next_account_info(it)?; let iss = next_account_info(it)?;
+    let sys = next_account_info(it)?;
+    let cfg = Config::load(config, program_id, config_key)?;
+    if !admin.is_signer || !admin.is_writable || *admin.key != cfg.admin { return Err(err(15, "admin only")); }
+    if *sys.key != system_program::ID || rest.len() < 3 || rest.len() > 2 + MAX_ISS { return Err(ProgramError::InvalidInstructionData); }
+    let (id, kind, url) = (rest[0], rest[1], &rest[2..]);
+    if kind > CLAIMS_GITLAB || !url.starts_with(b"https://") { return Err(err(79, "issuer kind or url")); }
+    let (k, bump) = Pubkey::find_program_address(&[b"issuer", &[id]], program_id);
+    if *iss.key != k { return Err(err(5, "issuer address")); }
+    if !iss.data_is_empty() || *iss.owner != system_program::ID { return Err(err(6, "issuer exists")); }
+    create_pda(admin, iss, sys, program_id, ISSUER_LEN, &[b"issuer", &[id], &[bump]])?;
+    let mut d = iss.try_borrow_mut_data()?;
+    d[0] = kind; d[1] = url.len() as u8; d[2..2 + url.len()].copy_from_slice(url);
+    Ok(())
+}
+
+/// The registered issuer ["issuer", id]: (claims kind, sha256(url)).
+fn issuer_of(program_id: &Pubkey, iss: &AccountInfo, id: u8) -> Result<(u8, [u8; 32]), ProgramError> {
+    let (k, _) = Pubkey::find_program_address(&[b"issuer", &[id]], program_id);
+    if *iss.key != k || iss.owner != program_id || iss.data_len() != ISSUER_LEN { return Err(err(79, "issuer not registered")); }
+    let d = iss.try_borrow_data()?;
+    let l = d[1] as usize;
+    if l == 0 || l > MAX_ISS { return Err(err(79, "issuer not registered")); }
+    Ok((d[0], hashv(&[&d[2..2 + l]]).to_bytes()))
+}
+
+fn parse_u64(s: &[u8]) -> Option<u64> {
+    if s.is_empty() || s.len() > 19 || !s.iter().all(|c| c.is_ascii_digit()) || (s.len() > 1 && s[0] == b'0') { return None; }
+    Some(s.iter().fold(0u64, |a, c| a * 10 + (c - b'0') as u64))
+}
+fn is_hex64(s: &[u8]) -> bool { s.len() == 64 && s.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) }
+fn unhex32(s: &[u8]) -> [u8; 32] {
+    let v = |c: u8| if c <= b'9' { c - b'0' } else { c - b'a' + 10 };
+    let mut o = [0u8; 32];
+    for (k, b) in o.iter_mut().enumerate() { *b = v(s[2 * k]) << 4 | v(s[2 * k + 1]); }
+    o
+}
 pub const MAX_JWT: usize = 2048;
 // proof buffer: stage u8 (0 written, 1 step 1 done), jwt_len u16, key[32], x limbs[256], jwt
 const B_STAGE: usize = 0;
@@ -366,7 +493,15 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
             if !admin.is_signer || *admin.key != cfg.admin { return Err(err(15, "admin only")); }
             if *sys.key != system_program::ID { return Err(err(1, "system")); }
             let kl = *rest.first().ok_or(ProgramError::InvalidInstructionData)? as usize;
-            if kl == 0 || kl > 64 || rest.len() != 1 + kl + 256 + 256 + 4 { return Err(ProgramError::InvalidInstructionData); }
+            let base = 1 + kl + 256 + 256 + 4;
+            // 0.3.9: a trailing issuer id scopes the key to that registered issuer (5th account: ["issuer", id])
+            if kl == 0 || kl > 64 || (rest.len() != base && rest.len() != base + 1) { return Err(ProgramError::InvalidInstructionData); }
+            let issuer = if rest.len() == base + 1 {
+                let id = rest[base];
+                let (kind, h) = issuer_of(program_id, next_account_info(it)?, id)?;
+                Some((id, kind, h))
+            } else { None };
+            let rest = &rest[..base];
             let kid = &rest[1..1 + kl];
             let n = be_to_limbs(&rest[1 + kl..1 + kl + 256]);
             let r2 = be_to_limbs(&rest[1 + kl + 256..1 + kl + 512]);
@@ -381,12 +516,20 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
             sub_in(&mut r_mod_n, &n);
             if r != r_mod_n { return Err(err(66, "r2 is not R^2 mod n")); }
             let kh = hashv(&[kid]).to_bytes();
-            let (kk, bump) = Pubkey::find_program_address(&[b"ghkey", &kh], program_id);
+            let idb = [issuer.map(|i| i.0).unwrap_or(0)];
+            let (kk, bump) = match issuer {
+                None => Pubkey::find_program_address(&[b"ghkey", &kh], program_id),
+                Some(_) => Pubkey::find_program_address(&[b"ghkey", &kh, &idb], program_id),
+            };
             if *key.key != kk { return Err(err(5, "key address")); }
             if !key.data_is_empty() || *key.owner != system_program::ID { return Err(err(6, "key exists")); }
-            create_pda(admin, key, sys, program_id, KEY_LEN, &[b"ghkey", &kh, &[bump]])?;
+            match issuer {
+                None => create_pda(admin, key, sys, program_id, KEY_LEN, &[b"ghkey", &kh, &[bump]])?,
+                Some(_) => create_pda(admin, key, sys, program_id, KEY2_LEN, &[b"ghkey", &kh, &idb, &[bump]])?,
+            }
             let mut d = key.try_borrow_mut_data()?;
             store(&mut d, 0, &n); d[256..260].copy_from_slice(&n0inv.to_le_bytes()); store(&mut d, 260, &r2);
+            if let Some((id, kind, h)) = issuer { d[KEY_LEN] = id; d[KEY_LEN + 1] = kind; d[KEY_LEN + 2..].copy_from_slice(&h); }
             Ok(())
         }
         16 => {
@@ -411,17 +554,14 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
             d[B_JWT + off..B_JWT + off + chunk.len()].copy_from_slice(chunk);
             Ok(())
         }
-        17 | 18 => {
+        17 | 18 | 26 => {
             let prover = next_account_info(it)?; let buf = next_account_info(it)?; let key = next_account_info(it)?;
             let job_id = job_id_of(rest)?;
             if !prover.is_signer { return Err(err(8, "prover signs")); }
             let (bk, _) = buffer_key(program_id, &job_id, prover.key);
             if *buf.key != bk || buf.owner != program_id || buf.data_len() != BUF_LEN { return Err(err(5, "buffer account")); }
-            if key.owner != program_id || key.data_len() != KEY_LEN { return Err(err(68, "not a registered key")); }
-            let (n, n0inv) = {
-                let kd = key.try_borrow_data()?;
-                (load(&kd, 0), u32::from_le_bytes(kd[256..260].try_into().unwrap()))
-            };
+            let ki = load_key(program_id, key)?;
+            let (n, n0inv) = (ki.n, ki.n0inv);
             if tag == 17 {
                 let mut d = buf.try_borrow_mut_data()?;
                 let len = u16::from_le_bytes(d[B_LEN..B_LEN + 2].try_into().unwrap()) as usize;
@@ -435,53 +575,28 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
                 d[B_STAGE] = 1;
                 return Ok(());
             }
+            if tag == 26 { return fund_with_token(program_id, it, prover, buf, key, &ki, &job_id, config_key); }
             let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let vauth = next_account_info(it)?;
             let worker_tok = next_account_info(it)?; let fee_tok = next_account_info(it)?; let buyer = next_account_info(it)?;
             let config = next_account_info(it)?; let token = next_account_info(it)?; let wf = next_account_info(it)?;
-            if !prover.is_writable || *vauth.key != *vault_auth || *token.key != TOKEN_PROGRAM { return Err(err(9, "verify accounts")); }
+            if !prover.is_writable || *token.key != TOKEN_PROGRAM { return Err(err(9, "verify accounts")); }
             let cfg = Config::load(config, program_id, config_key)?;
             let (jk, _) = Pubkey::find_program_address(&[b"job", &job_id], program_id);
-            if *job.key != jk || job.owner != program_id || job.data_len() != GH_JOB_LEN { return Err(err(69, "not a github job")); }
+            if *job.key != jk || job.owner != program_id || !is_gh_job(job.data_len()) { return Err(err(69, "not a github job")); }
             let now = Clock::get()?.unix_timestamp;
             let payout: Pubkey;
             let stake_required: bool;
             {
                 let d = buf.try_borrow_data()?;
-                if d[B_STAGE] != 1 || d[B_KEY..B_KEY + 32] != key.key.as_ref()[..] { return Err(err(70, "run step 1 first")); }
-                let len = u16::from_le_bytes(d[B_LEN..B_LEN + 2].try_into().unwrap()) as usize;
-                let t = &d[B_JWT..B_JWT + len];
-                let (h64, p64, sig) = split_jwt(t)?;
-                let s = signature(sig, &n)?;
-                // the key is the one the header names
-                let header = b64url(h64)?;
-                let [alg, kid] = fields(&header, [b"alg", b"kid"])?;
-                if want_str(alg, "alg")? != b"RS256" { return Err(err(63, "alg")); }
-                let kh = hashv(&[want_str(kid, "kid")?]).to_bytes();
-                let (kk, _) = Pubkey::find_program_address(&[b"ghkey", &kh], program_id);
-                if *key.key != kk { return Err(err(68, "the token's key is not this key")); }
-                // s^65537 mod n: x = (s^256)_M from step 1; 8 more squarings -> (s^65536)_M; * s (plain) -> s^65537
-                let mut x = load(&d, B_X);
-                for _ in 0..8 { x = mont_sqr(&x, &n, n0inv); }
-                let em = limbs_to_be(&mont_mul(&x, &s, &n, n0inv));
-                let digest = hashv(&[&t[..h64.len() + 1 + p64.len()]]).to_bytes();
-                let ps = 256 - 3 - DIGEST_INFO.len() - 32;
-                let ok = em[0] == 0 && em[1] == 1 && em[2..2 + ps].iter().all(|&c| c == 0xff) && em[2 + ps] == 0
-                    && em[3 + ps..3 + ps + 19] == DIGEST_INFO && em[256 - 32..] == digest;
-                if !ok { return Err(err(71, "bad signature")); }
-                // the claims
-                let payload = b64url(p64)?;
-                let [iss, wsha, repo, rf, aud, exp, sha] =
-                    fields(&payload, [b"iss", b"job_workflow_sha", b"repository", b"ref", b"aud", b"exp", b"sha"])?;
-                if want_str(iss, "iss")? != ISSUER { return Err(err(72, "issuer")); }
+                let payload = verified_payload(program_id, &d, key, &ki)?;
+                let c = claims(&payload, &ki)?;
                 // the run's workflow file is pinned by commit: its sha must be in the registry (SetWorkflow, kind 0)
-                if !workflow_registered(program_id, wf, WF_PROVE, want_str(wsha, "job_workflow_sha")?) {
-                    return Err(err(73, "workflow sha not registered"));
-                }
+                if !workflow_registered(program_id, wf, WF_PROVE, c.wsha) { return Err(err(73, "workflow sha not registered")); }
                 let jd = job.try_borrow_data()?;
-                if hashv(&[want_str(repo, "repository")?]).to_bytes()[..] != jd[JOB_LEN..JOB_LEN + 32] { return Err(err(74, "repository")); }
-                if hashv(&[want_str(rf, "ref")?]).to_bytes()[..] != jd[JOB_LEN + 32..JOB_LEN + 64] { return Err(err(74, "ref")); }
+                if hashv(&[c.repo]).to_bytes()[..] != jd[JOB_LEN..JOB_LEN + 32] { return Err(err(74, "repository")); }
+                if hashv(&[c.rf]).to_bytes()[..] != jd[JOB_LEN + 32..JOB_LEN + 64] { return Err(err(74, "ref")); }
                 // aud = "knos:<job hex 64>:<head sha 40>:<checks hash hex 64>:<payout base58>"
-                let a = want_str(aud, "aud")?;
+                let a = c.aud;
                 let mut want = [0u8; 5 + 64 + 1];
                 want[..5].copy_from_slice(b"knos:");
                 hex_into(&job_id, &mut want[5..69]);
@@ -491,35 +606,38 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
                 let mut ch = [0u8; 64];
                 hex_into(&jd[GH_CHECKS..GH_CHECKS + 32], &mut ch);
                 if a[110] != b':' || a[111..175] != ch || a[175] != b':' { return Err(err(75, "audience: checks hash")); }
-                if !is_sha40(head) || want_str(sha, "sha")? != head { return Err(err(75, "audience: head sha")); }
+                if !is_sha40(head) || want_str(c.sha, "sha")? != head { return Err(err(75, "audience: head sha")); }
                 payout = Pubkey::new_from_array(b58_32(&a[176..]).ok_or_else(|| err(75, "audience: payout"))?);
                 stake_required = jd[GH_STAKE_REQ] != 0;
-                let exp = match exp { Some((v, false)) if !v.is_empty() && v.len() <= 18 && v.iter().all(|c| c.is_ascii_digit()) =>
-                    v.iter().fold(0i64, |a, c| a * 10 + (c - b'0') as i64), _ => return Err(err(63, "exp")) };
-                if exp <= now { return Err(err(76, "token expired")); }
+                if c.exp <= now { return Err(err(76, "token expired")); }
             }
             // pay the payout the token names: price - fee (+ the stake back, when the job required a claim stake: then
             // only the claimer can be the payout); the fee to the fee account; close the job and the buffer. Anyone
-            // may relay the proof and pay the gas.
+            // may relay the proof and pay the gas. A funded job (0.3.9) pays from its mint's vault; its fee goes to
+            // the admin's account of that mint.
             let mut j = Job::load(&job.try_borrow_data()?)?;
+            let vb = bounty::vault_bump_for(&j.mint, vauth.key, program_id, (*vault_auth, vault_bump))?;
             if now > j.deadline { return Err(err(20, "past the deadline")); }
             if stake_required {
                 if j.state != S::Claimed as u8 || j.worker != payout { return Err(err(20, "a staked job pays its claimer only")); }
             } else if j.state != S::Open as u8 { return Err(err(20, "not open")); }
             let (wo, wm) = token_owner_mint(worker_tok)?;
-            if wo != payout || wm != cfg.mint || *fee_tok.key != cfg.fee_token { return Err(err(33, "payee")); }
+            let jm = if j.mint == Pubkey::default() { cfg.mint } else { j.mint };
+            if wo != payout || wm != jm { return Err(err(33, "payee")); }
+            if j.mint == Pubkey::default() {
+                if *fee_tok.key != cfg.fee_token { return Err(err(33, "payee")); }
+            } else {
+                let (fo, fm) = token_owner_mint(fee_tok)?;
+                if fo != cfg.admin || fm != j.mint { return Err(err(33, "payee")); }
+            }
             let fee = cfg.fee(j.amount).min(j.amount);
             let to_worker = (j.amount - fee).checked_add(j.stake).ok_or(ProgramError::ArithmeticOverflow)?;
             j.state = S::Released as u8; j.stake = 0; j.store(&mut job.try_borrow_mut_data()?);
-            if to_worker > 0 { token_transfer(token, vault_tok, worker_tok, vauth, to_worker, Some(&[b"vault", &[vault_bump]]))?; }
-            if fee > 0 { token_transfer(token, vault_tok, fee_tok, vauth, fee, Some(&[b"vault", &[vault_bump]]))?; }
+            let b = [vb]; let seeds = vseeds(&j.mint, &b);
+            if to_worker > 0 { token_transfer(token, vault_tok, worker_tok, vauth, to_worker, Some(&seeds[..]))?; }
+            if fee > 0 { token_transfer(token, vault_tok, fee_tok, vauth, fee, Some(&seeds[..]))?; }
             close_job(&j, job, buyer)?;
-            let lamports = buf.lamports();
-            **prover.try_borrow_mut_lamports()? = prover.lamports().checked_add(lamports).ok_or(ProgramError::ArithmeticOverflow)?;
-            **buf.try_borrow_mut_lamports()? = 0;
-            buf.resize(0)?;
-            buf.assign(&system_program::ID);
-            Ok(())
+            close_buffer(buf, prover)
         }
         19 => {
             let buyer = next_account_info(it)?; let job = next_account_info(it)?; let buyer_tok = next_account_info(it)?;
@@ -554,4 +672,92 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }
+}
+
+/// 26 FundWithToken  payer(s,w) buffer(w) key job(w) vault_token(w) faucet mint(w) registry config2 token system
+///                   workflow fundrate(w)                    data: job_id[32] (the buffer's; checked against the token)
+/// Devnet: a fund.yml run (its job_workflow_sha registered with kind 1) proves "fund issue <issue> of <repository>
+/// with <amount> test USDC": the token (BufferWrite + VerifyStep1 first, as for a proof) has
+/// aud = "knos:fund:<issue>:<amount units>:<checks hash 64 hex>:<stake 0|1>". The job id is
+/// sha256("knos-fund" | repository | "#" | issue); the job is a github job on the token's repository and ref with that
+/// checks hash, in the faucet's mint (registered with AddMint), and the faucet mints the amount (at most its cap) into
+/// that mint's vault. The payer is the job's buyer. One funding per repository per hour (["fundrate", repo hash]).
+#[allow(clippy::too_many_arguments)]
+fn fund_with_token<'a, 'b>(program_id: &Pubkey, it: &mut core::slice::Iter<'b, AccountInfo<'a>>, payer: &AccountInfo<'a>,
+                           buf: &AccountInfo<'a>, key: &AccountInfo<'a>, ki: &KeyInfo, job_id: &[u8; 32],
+                           config_key: &Pubkey) -> ProgramResult {
+    if !bounty::DEVNET { return Err(err(60, "faucet: devnet only")); }
+    let job = next_account_info(it)?; let vault_tok = next_account_info(it)?; let faucet = next_account_info(it)?;
+    let mint = next_account_info(it)?; let reg = next_account_info(it)?; let config = next_account_info(it)?;
+    let token = next_account_info(it)?; let sys = next_account_info(it)?; let wf = next_account_info(it)?;
+    let rate = next_account_info(it)?;
+    if !payer.is_writable || *token.key != TOKEN_PROGRAM || *sys.key != system_program::ID { return Err(err(9, "fund accounts")); }
+    let cfg = Config::load(config, program_id, config_key)?;
+    if cfg.paused { return Err(err(17, "paused: no new jobs")); }
+    let (fk, _) = Pubkey::find_program_address(&[b"faucet"], program_id);
+    if *faucet.key != fk || faucet.owner != program_id || faucet.data_len() != bounty::FAUCET_LEN { return Err(err(61, "faucet accounts")); }
+    let (fmint, cap, fb) = {
+        let d = faucet.try_borrow_data()?;
+        (Pubkey::new_from_array(d[0..32].try_into().unwrap()), u64::from_le_bytes(d[32..40].try_into().unwrap()), d[40])
+    };
+    if *mint.key != fmint { return Err(err(61, "not the faucet's mint")); }
+    if *vault_tok.key != bounty::registry_vault(reg, &fmint, program_id)? { return Err(err(7, "vault or mint")); }
+    let now = Clock::get()?.unix_timestamp;
+    let mut ext = [0u8; 97 + 32]; // repo_hash ref_hash checks_hash stake_required mint
+    let (amount, brief);
+    {
+        let d = buf.try_borrow_data()?;
+        let payload = verified_payload(program_id, &d, key, ki)?;
+        let c = claims(&payload, ki)?;
+        if !workflow_registered(program_id, wf, WF_FUND, c.wsha) { return Err(err(73, "fund workflow sha not registered")); }
+        if c.exp <= now { return Err(err(76, "token expired")); }
+        // aud = "knos:fund:<issue>:<amount>:<checks hash hex 64>:<stake 0|1>"
+        let a = c.aud;
+        if !a.starts_with(b"knos:fund:") { return Err(err(75, "audience")); }
+        let mut parts = a[10..].split(|&x| x == b':');
+        let (issue, amt, ch, st) = match (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(i), Some(m), Some(h), Some(s), None) => (i, m, h, s),
+            _ => return Err(err(75, "audience")),
+        };
+        if parse_u64(issue).is_none() || !is_hex64(ch) || (st != b"0" && st != b"1") { return Err(err(75, "audience")); }
+        amount = parse_u64(amt).ok_or_else(|| err(75, "audience: amount"))?;
+        if hashv(&[b"knos-fund", c.repo, b"#", issue]).to_bytes() != *job_id { return Err(err(75, "job id is not the token's issue")); }
+        ext[0..32].copy_from_slice(&hashv(&[c.repo]).to_bytes());
+        ext[32..64].copy_from_slice(&hashv(&[c.rf]).to_bytes());
+        ext[64..96].copy_from_slice(&unhex32(ch));
+        ext[96] = (st == b"1") as u8;
+        ext[97..].copy_from_slice(fmint.as_ref());
+        brief = hashv(&[a]).to_bytes();
+    }
+    if amount > cap { return Err(err(63, "over the faucet's per-call cap")); }
+    if amount != 0 && amount < cfg.min_amount { return Err(err(18, "below the minimum job")); }
+    if cfg.max_amount != 0 && amount > cfg.max_amount { return Err(err(19, "over the per-job cap")); }
+    // one funding per repository per hour
+    let (rk, rb) = Pubkey::find_program_address(&[b"fundrate", &ext[0..32]], program_id);
+    if *rate.key != rk { return Err(err(5, "fundrate address")); }
+    if rate.owner == program_id && rate.data_len() == FUNDRATE_LEN {
+        let last = i64::from_le_bytes(rate.try_borrow_data()?[0..8].try_into().unwrap());
+        if now < last.saturating_add(FUND_PERIOD) { return Err(err(80, "one funding per repository per hour")); }
+    } else {
+        create_pda(payer, rate, sys, program_id, FUNDRATE_LEN, &[b"fundrate", &ext[0..32], &[rb]])?;
+    }
+    rate.try_borrow_mut_data()?[0..8].copy_from_slice(&now.to_le_bytes());
+    let (jk, jb) = Pubkey::find_program_address(&[b"job", job_id], program_id);
+    if *job.key != jk { return Err(err(5, "job address")); }
+    if !job.data_is_empty() || *job.owner != system_program::ID { return Err(err(6, "job exists")); }
+    create_pda(payer, job, sys, program_id, GH_MINT_JOB_LEN, &[b"job", job_id, &[jb]])?;
+    {
+        let mut d = job.try_borrow_mut_data()?;
+        Job { state: S::Open as u8, buyer: *payer.key, worker: Pubkey::default(), amount, deadline: now.saturating_add(FUND_WORK),
+              review: FUND_REVIEW, brief, result: [0; 32], verifier: Pubkey::default(), proof: [0; 32], stake: 0, mint: fmint }
+            .store(&mut d);
+        d[JOB_LEN..GH_MINT_JOB_LEN].copy_from_slice(&ext);
+    }
+    if amount > 0 {
+        let mut ixd = vec![7u8]; ixd.extend_from_slice(&amount.to_le_bytes()); // SPL Token MintTo
+        let ix = Instruction { program_id: TOKEN_PROGRAM, data: ixd,
+            accounts: vec![AccountMeta::new(*mint.key, false), AccountMeta::new(*vault_tok.key, false), AccountMeta::new_readonly(fk, true)] };
+        invoke_signed(&ix, &[mint.clone(), vault_tok.clone(), faucet.clone(), token.clone()], &[&[b"faucet", &[fb]]])?;
+    }
+    close_buffer(buf, payer)
 }

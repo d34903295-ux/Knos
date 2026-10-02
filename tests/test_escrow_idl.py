@@ -46,6 +46,9 @@ CALLS = {
     "set_admin": lambda: sol.set_admin(PID, K[0], K[1]),
     "set_workflow": lambda: sol.set_workflow(PID, K[0], "ab" * 20),
     "set_fee_account": lambda: sol.set_fee_account(PID, K[0], K[1]),
+    "register_issuer": lambda: sol.register_issuer(PID, K[0], 1, sol.GITLAB_ISSUER, sol.CLAIMS_GITLAB),
+    "fund_with_token": lambda: sol.fund_with_token(PID, K[0], H, K[1], K[2], K[3], "ab" * 20, "o/r"),
+    "version_ix": None,
 }
 BY_TAG = {ix["discriminator"][0]: ix for ix in IDL["instructions"]}
 SIZES = {"u8": 1, "u16": 2, "u32": 4, "bytes": 0, "u64": 8, "i64": 8, "pubkey": 32}
@@ -64,7 +67,7 @@ def test_every_builder_is_called():
 def test_builders_match_idl():
     seen = set()
     for name, call in CALLS.items():
-        if call is None:          # compute_limit: a ComputeBudget instruction, not the escrow's
+        if call is None:          # compute_limit (ComputeBudget's), version_ix (29: no accounts, a log)
             continue
         ix = call()
         tag = ix.data[0]
@@ -88,7 +91,7 @@ def test_builders_match_idl():
             assert len(ix.data) > 1 + arg_len, name
         else:
             assert len(ix.data) == 1 + arg_len, name
-    assert seen == set(BY_TAG) == set(range(1, 20)) | {20, 21, 22, 23, 24, 27, 28}
+    assert seen == set(BY_TAG) == set(range(1, 20)) | {20, 21, 22, 23, 24, 25, 26, 27, 28}
 
 
 def _layout(name):

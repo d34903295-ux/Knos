@@ -52,8 +52,19 @@ def new_job_id() -> bytes:
 
 # ---- token accounts ------------------------------------------------------------------------------------------------
 
+def _other_mint_account(ledger, owner: Pubkey, mint: Pubkey) -> Pubkey | None:
+    """In the in-process runtime, a token account of a registered (non-config) mint the test made for `owner`."""
+    env = getattr(ledger, "env", None)
+    return getattr(env, "mint_accounts", {}).get((bytes(owner), bytes(mint))) if env is not None else None
+
+
 def vault_for(ledger, mint: Pubkey) -> Pubkey:
     env = getattr(ledger, "env", None)
+    if mint != ledger.config()["mint"]:           # a registered mint: its vault is in the registry ["mint", mint]
+        reg = ledger.account(sol.mint_registry(ledger.program, mint))
+        if reg is None:
+            raise LookupError(f"mint {mint} is not registered with the escrow")
+        return Pubkey.from_bytes(reg[32:64])
     if env is not None:
         return env.vault
     from ..pro import sol_budget as sb
@@ -62,6 +73,8 @@ def vault_for(ledger, mint: Pubkey) -> Pubkey:
 
 def token_account_for(ledger, owner: Pubkey, mint: Pubkey) -> Pubkey:
     env = getattr(ledger, "env", None)
+    if (other := _other_mint_account(ledger, owner, mint)) is not None:
+        return other
     if env is not None:
         return env.accounts[bytes(owner)]
     from ..pro import sol_budget as sb
@@ -72,6 +85,8 @@ def stake_account_for(ledger, owner: Pubkey, mint: Pubkey) -> Pubkey:
     """Where a worker's claim stake comes from and goes back to: its ATA on a cluster; in the in-process runtime a
     separate faucet-funded account (localsvm.Escrow.stake_account)."""
     env = getattr(ledger, "env", None)
+    if (other := _other_mint_account(ledger, owner, mint)) is not None:
+        return other
     if env is not None:
         return env.stake_account(owner)
     from ..pro import sol_budget as sb
@@ -85,6 +100,46 @@ def _ensure_ata(ledger, payer: Keypair, owner: Pubkey, mint: Pubkey) -> list:
     return [sb.create_ata_idempotent(payer.pubkey(), owner, mint)]   # a no-op if it exists: saves a round trip
 
 
+# ---- the program version ---------------------------------------------------------------------------------------------
+
+class ProgramVersionError(RuntimeError):
+    """The cluster runs another knos-escrow than this client speaks."""
+
+
+def program_binary(ledger) -> bytes:
+    """The deployed program's ELF: the program account itself (a non-upgradeable load, as in LiteSVM) or, for an
+    upgradeable program, its programdata account past the 45-byte header."""
+    raw = ledger.account(ledger.program)
+    if raw is None:
+        raise ProgramVersionError(f"no program at {ledger.program} on {getattr(ledger, 'network', 'this cluster')}")
+    if raw[:4] == b"\x7fELF":
+        return raw
+    if len(raw) >= 36 and raw[0] == 2:          # UpgradeableLoaderState::Program { programdata_address }
+        data = ledger.account(Pubkey.from_bytes(raw[4:36]))
+        if data is None:
+            raise ProgramVersionError(f"the program data of {ledger.program} is missing")
+        return data[45:]
+    return raw
+
+
+def assert_program_version(ledger, want: str = sol.VERSION) -> str:
+    """Refuse to post, fund or prove against a program of another version than this client's (checked once per
+    ledger). Returns the deployed version."""
+    got = getattr(ledger, "_knos_program_version", None)
+    if got is None:
+        got = sol.program_version(program_binary(ledger)) or ""
+        if got == want:
+            try:
+                ledger._knos_program_version = got
+            except AttributeError:
+                pass
+    if got != want:
+        net = getattr(ledger, "network", "the cluster")
+        raise ProgramVersionError(f"{net} runs knos-escrow {got or 'older than 0.3.9'}; this client needs {want} — "
+                                  "upgrade knos or wait for the deploy")
+    return got
+
+
 # ---- the lifecycle ---------------------------------------------------------------------------------------------------
 
 def post(ledger, relay, buyer: Keypair, brief: Brief, price_units: int, work_s: int = 3600,
@@ -92,6 +147,7 @@ def post(ledger, relay, buyer: Keypair, brief: Brief, price_units: int, work_s: 
     """The buyer's one signature: the price moves into escrow; the brief's hash goes on chain, the brief to a relay.
     `verifier` (default none): a key that may release the delivered work on proof (`verify_release`), no buyer step.
     The escrow refuses a price under its minimum job (1 USDC) and over its per-job cap, and new posts while paused."""
+    assert_program_version(ledger)
     cfg = ledger.config()
     mint = cfg["mint"]
     brief.buyer = str(buyer.pubkey())
@@ -367,6 +423,7 @@ def post_github(ledger, relay, buyer: Keypair, brief: Brief, price_units: int, r
     """Post a github job: paid when a GitHub Actions OIDC token for the pinned prove.yml on `repo` at `ref`, with
     audience "knos:<job id hex>", is verified on chain (prove_github). price_units 0 = a bounty with no money (the
     claim stake only). With no proof by the deadline, settle/refund returns the price and the claim's stake."""
+    assert_program_version(ledger)
     cfg = ledger.config()
     mint = cfg["mint"]
     brief.buyer = str(buyer.pubkey())
@@ -390,19 +447,76 @@ def _jwt_kid(jwt: str) -> str:
     return json.loads(base64.urlsafe_b64decode(head + "=" * (-len(head) % 4)))["kid"]
 
 
-def _jwt_workflow_sha(jwt: str) -> str:
-    """The token's job_workflow_sha (a malformed one maps to a registry entry that does not exist: refused on chain)."""
+def _key_for(ledger, jwt: str) -> Pubkey:
+    """The registered key the token names: scoped to its issuer (GitLab CI: issuer 1; GitHub: issuer 0) when that is
+    registered, else GitHub's key at its pre-0.3.9 address."""
+    kid = _jwt_kid(jwt)
     try:
-        sha = sol.jwt_claims(jwt).get("job_workflow_sha", "")
+        iss = sol.jwt_claims(jwt).get("iss", "")
     except (ValueError, IndexError):
-        sha = ""
+        iss = ""
+    pid = ledger.program
+    issuer = sol.ISSUER_GITLAB if iss == sol.GITLAB_ISSUER else sol.ISSUER_GITHUB
+    scoped = sol.gh_key_pda(pid, kid, issuer)
+    if issuer == sol.ISSUER_GITLAB or ledger.account(scoped) is not None:
+        return scoped
+    return sol.gh_key_pda(pid, kid)
+
+
+def _workflow_sha_claim(jwt: str) -> str:
+    """job_workflow_sha (GitHub) or ci_config_sha (GitLab CI); a malformed one maps to a missing registry entry."""
+    try:
+        c = sol.jwt_claims(jwt)
+    except (ValueError, IndexError):
+        return "0" * 40
+    sha = c.get("ci_config_sha") if c.get("iss") == sol.GITLAB_ISSUER else c.get("job_workflow_sha")
     return sha if isinstance(sha, str) and len(sha) == 40 else "0" * 40
+
+
+def _buffer_and_step1(ledger, payer: Keypair, job_id: bytes, raw: bytes, key: Pubkey) -> str:
+    pid = ledger.program
+    step = 800
+    for off in range(0, len(raw), step):
+        ledger.send([sol.buffer_write(pid, payer.pubkey(), job_id, len(raw), off, raw[off:off + step])], payer)
+    return ledger.send([sol.compute_limit(), sol.verify_step1(pid, payer.pubkey(), job_id, key)], payer)
+
+
+def fund_with_token(ledger, payer: Keypair, jwt: str) -> tuple[bytes, str]:
+    """Fund a github job from a fund.yml run's OIDC token (devnet): aud "knos:fund:<issue>:<amount units>:<checks hash
+    hex>:<stake 0|1>". The program verifies the token (two transactions), creates the job
+    sha256("knos-fund" | repository | "#" | issue) on the token's repository and ref, and mints the amount of test
+    USDC into the vault. Returns (job id, the funding signature)."""
+    assert_program_version(ledger)
+    raw = jwt.strip().encode()
+    if len(raw) > sol.GH_MAX_JWT:
+        raise ValueError("token too long")
+    claims = sol.jwt_claims(jwt)
+    gitlab = claims.get("iss") == sol.GITLAB_ISSUER
+    repo = str(claims.get("project_path" if gitlab else "repository", ""))
+    parts = str(claims.get("aud", "")).split(":")
+    if len(parts) != 6 or parts[:2] != ["knos", "fund"]:
+        raise RuntimeError(f"not a knos fund audience: {claims.get('aud')!r}")
+    job_id = sol.fund_job_id(repo, parts[2])
+    pid = ledger.program
+    f = ledger.account(sol.faucet_pda(pid))
+    if f is None:
+        raise LookupError("no faucet on this cluster (FundWithToken is devnet only)")
+    mint = Pubkey.from_bytes(f[:32])
+    key = _key_for(ledger, jwt)
+    _buffer_and_step1(ledger, payer, job_id, raw, key)
+    sig = ledger.send([sol.compute_limit(), sol.fund_with_token(pid, payer.pubkey(), job_id, key, mint,
+                                                                vault_for(ledger, mint), _workflow_sha_claim(jwt),
+                                                                repo)], payer)
+    if getattr(ledger, "env", None) is not None:
+        ledger.env.known_jobs.append(job_id)
+    return job_id, sig
 
 
 def prove_github(ledger, payer: Keypair, job_id: bytes, jwt: str) -> tuple[str, str]:
     """Prove a claimed github job with a GitHub Actions OIDC token: write it to the proof buffer, then VerifyStep1 and
     VerifyStep2 (1.4M CU each). On success the job's worker is paid (price - fee + the stake back) and the job and
     the buffer close. Returns (sig1, sig2)."""
+    assert_program_version(ledger)
     raw = jwt.strip().encode()
     if len(raw) > sol.GH_MAX_JWT:
         raise ValueError("token too long")
@@ -415,17 +529,19 @@ def prove_github(ledger, payer: Keypair, job_id: bytes, jwt: str) -> tuple[str, 
         raise RuntimeError(f"the token's audience names no payout: {e}") from e
     pid = ledger.program
     cfg = ledger.config()
-    mint = cfg["mint"]
-    key = sol.gh_key_pda(pid, _jwt_kid(jwt))
-    step = 800
-    for off in range(0, len(raw), step):
-        ledger.send([sol.buffer_write(pid, payer.pubkey(), job_id, len(raw), off, raw[off:off + step])], payer)
-    sig1 = ledger.send([sol.compute_limit(), sol.verify_step1(pid, payer.pubkey(), job_id, key)], payer)
+    mint = j.mint or cfg["mint"]
+    key = _key_for(ledger, jwt)
+    sig1 = _buffer_and_step1(ledger, payer, job_id, raw, key)
     pre = _ensure_ata(ledger, payer, payout, mint)
     worker_tok = stake_account_for(ledger, payout, mint)
+    if j.mint is None:
+        fee_tok = cfg["fee_token"]
+    else:                                   # a funded job: the fee goes to the admin's account of that mint
+        pre += _ensure_ata(ledger, payer, cfg["admin"], mint)
+        fee_tok = token_account_for(ledger, cfg["admin"], mint)
     sig2 = ledger.send(pre + [sol.compute_limit(), sol.verify_step2(pid, payer.pubkey(), job_id, key,
                                                                     vault_for(ledger, mint), worker_tok,
-                                                                    cfg["fee_token"], j.buyer,
-                                                                    _jwt_workflow_sha(jwt))], payer)
+                                                                    fee_tok, j.buyer, _workflow_sha_claim(jwt),
+                                                                    j.mint)], payer)
     _record(ledger, j, "released")
     return sig1, sig2

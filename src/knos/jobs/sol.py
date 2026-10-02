@@ -351,6 +351,8 @@ def parse_job(address: Pubkey, raw: bytes) -> Job:
         stake, = struct.unpack_from("<Q", raw, 217)
     if len(raw) == MINT_JOB_LEN:
         mint = Pubkey.from_bytes(raw[225:257])
+    elif len(raw) == JOB_LEN + 64 + 33 + 32:       # GH_MINT_JOB_LEN (a funded github job)
+        mint = Pubkey.from_bytes(raw[JOB_LEN + 97:JOB_LEN + 129])
     return Job(address, STATES.get(state, "unknown"), Pubkey.from_bytes(raw[1:33]),
                None if worker == Pubkey.default() else worker, amount, deadline, review, bytes(raw[89:121]),
                None if result == bytes(32) else result, verifier, proof, stake, mint)
@@ -375,7 +377,8 @@ def parse_config(raw: bytes) -> dict:
 #                    data: id[32] amount u64 work i64 review i64 brief[32] repo_hash[32] ref_hash[32]
 GH_V037_JOB_LEN = JOB_LEN + 64  # a 0.3.7 github job: the job, sha256(repository), sha256(ref) (refund only now)
 GH_JOB_LEN = JOB_LEN + 64 + 33  # 0.3.8: ... then checks_hash[32], stake_required u8
-JOB_LENS = JOB_LENS + (GH_JOB_LEN, GH_V037_JOB_LEN)
+GH_MINT_JOB_LEN = GH_JOB_LEN + 32  # 0.3.9: a github job funded by FundWithToken: ... then the faucet mint[32]
+JOB_LENS = JOB_LENS + (GH_JOB_LEN, GH_V037_JOB_LEN, GH_MINT_JOB_LEN)
 GH_BUF_LEN = 291 + 2048
 GH_MAX_JWT = 2048
 GH_ISSUER = "https://token.actions.githubusercontent.com"
@@ -383,10 +386,13 @@ GH_WORKFLOW_PREFIX = "drexthealpha/Knos/.github/workflows/prove.yml@refs/tags/"
 COMPUTE_BUDGET = Pubkey.from_string("ComputeBudget111111111111111111111111111111")
 
 
-def gh_key_pda(pid: Pubkey, kid: str | bytes) -> Pubkey:
+def gh_key_pda(pid: Pubkey, kid: str | bytes, issuer: int | None = None) -> Pubkey:
+    """A registered signing key: ["ghkey", sha256(kid)] (a GitHub key, as registered before 0.3.9) or, scoped to a
+    registered issuer, ["ghkey", sha256(kid), [issuer id]]."""
     import hashlib
     kid = kid.encode() if isinstance(kid, str) else kid
-    return Pubkey.find_program_address([b"ghkey", hashlib.sha256(kid).digest()], pid)[0]
+    seeds = [b"ghkey", hashlib.sha256(kid).digest()] + ([] if issuer is None else [bytes([issuer])])
+    return Pubkey.find_program_address(seeds, pid)[0]
 
 
 def gh_buffer_pda(pid: Pubkey, job_id: bytes, prover: Pubkey) -> Pubkey:
@@ -418,7 +424,7 @@ def compute_limit(units: int = 1_400_000) -> Instruction:
 
 
 def register_key(pid: Pubkey, admin: Pubkey, kid: str | bytes, n: int, r2: int | None = None,
-                 n0inv: int | None = None) -> Instruction:
+                 n0inv: int | None = None, issuer: int | None = None) -> Instruction:
     """RegisterKey (15, admin only): an RSA-2048 key GitHub signs OIDC tokens with, at ["ghkey", sha256(kid)].
     r2 and n0inv default to the right values; the program refuses wrong ones."""
     kid = kid.encode() if isinstance(kid, str) else kid
@@ -428,8 +434,78 @@ def register_key(pid: Pubkey, admin: Pubkey, kid: str | bytes, n: int, r2: int |
     r2 = r2d if r2 is None else r2
     n0inv = n0d if n0inv is None else n0inv
     data = bytes([15, len(kid)]) + kid + n.to_bytes(256, "big") + r2.to_bytes(256, "big") + struct.pack("<I", n0inv)
-    return Instruction(pid, data, [_m(admin, True, True), _m(config_pda(pid), False, False),
-                                   _m(gh_key_pda(pid, kid), False, True), _m(SYSTEM, False, False)])
+    accts = [_m(admin, True, True), _m(config_pda(pid), False, False),
+             _m(gh_key_pda(pid, kid, issuer), False, True), _m(SYSTEM, False, False)]
+    if issuer is not None:      # 0.3.9: scoped to the registered issuer ["issuer", id]
+        data += bytes([issuer])
+        accts.append(_m(issuer_pda(pid, issuer), False, False))
+    return Instruction(pid, data, accts)
+
+
+# -- 0.3.9: the issuer registry, FundWithToken, the program version ---------------------------------------------------
+#    25 RegisterIssuer admin(s,w) config issuer(w) system     data: id u8 claims_kind u8 url
+#    26 FundWithToken  payer(s,w) buffer(w) key job(w) vault_token(w) faucet mint(w) registry config token system
+#                      workflow(kind 1) fundrate(w)          data: job_id[32]
+#    29 Version        (no accounts): logs "knos-escrow X.Y.Z"
+CLAIMS_GITHUB, CLAIMS_GITLAB = 0, 1
+ISSUER_GITHUB, ISSUER_GITLAB = 0, 1          # the ids Knos registers on devnet
+GITLAB_ISSUER = "https://gitlab.com"
+VERSION = "0.3.9"                              # the program version this client speaks
+
+
+def issuer_pda(pid: Pubkey, issuer: int) -> Pubkey:
+    return Pubkey.find_program_address([b"issuer", bytes([issuer])], pid)[0]
+
+
+def register_issuer(pid: Pubkey, admin: Pubkey, issuer: int, url: str, claims_kind: int = CLAIMS_GITHUB) -> Instruction:
+    """RegisterIssuer (25, admin): an OIDC issuer url (GitHub Actions: claims kind 0; GitLab CI: kind 1, where
+    project_path stands for repository and ci_config_sha for job_workflow_sha)."""
+    u = url.encode()
+    if not 0 < len(u) <= 128:
+        raise ValueError("issuer url is 1..128 bytes")
+    return Instruction(pid, bytes([25, issuer, claims_kind]) + u,
+                       [_m(admin, True, True), _m(config_pda(pid), False, False),
+                        _m(issuer_pda(pid, issuer), False, True), _m(SYSTEM, False, False)])
+
+
+def fund_job_id(repository: str, issue: int | str) -> bytes:
+    """The job a fund.yml token funds: sha256("knos-fund" | repository | "#" | issue)."""
+    import hashlib
+    return hashlib.sha256(b"knos-fund" + repository.encode() + b"#" + str(issue).encode()).digest()
+
+
+def fund_audience(issue: int, amount_units: int, checks_hash: bytes, stake_required: bool = False) -> str:
+    return f"knos:fund:{issue}:{amount_units}:{checks_hash.hex()}:{int(stake_required)}"
+
+
+def fundrate_pda(pid: Pubkey, repository: str) -> Pubkey:
+    import hashlib
+    return Pubkey.find_program_address([b"fundrate", hashlib.sha256(repository.encode()).digest()], pid)[0]
+
+
+def fund_with_token(pid: Pubkey, payer: Pubkey, job_id: bytes, key: Pubkey, mint: Pubkey, vault_token: Pubkey,
+                    workflow_sha: str, repository: str) -> Instruction:
+    """FundWithToken (26, devnet): after BufferWrite + VerifyStep1 of a fund.yml token, create the github job it names
+    and mint its amount of test USDC (the faucet mint) into that mint's vault."""
+    return Instruction(pid, bytes([26]) + job_id,
+                       [_m(payer, True, True), _m(gh_buffer_pda(pid, job_id, payer), False, True),
+                        _m(key, False, False), _m(job_pda(pid, job_id), False, True), _m(vault_token, False, True),
+                        _m(faucet_pda(pid), False, False), _m(mint, False, True),
+                        _m(mint_registry(pid, mint), False, False), _m(config_pda(pid), False, False),
+                        _m(TOKEN, False, False), _m(SYSTEM, False, False),
+                        _m(workflow_pda(pid, workflow_sha, WF_FUND), False, False),
+                        _m(fundrate_pda(pid, repository), False, True)])
+
+
+def version_ix(pid: Pubkey) -> Instruction:
+    return Instruction(pid, bytes([29]), [])
+
+
+def program_version(raw: bytes) -> str | None:
+    """The "knos-escrow X.Y.Z" version string inside a program binary (None: a build before 0.3.9)."""
+    import re
+    m = re.search(rb"knos-escrow (\d+\.\d+\.\d+)", raw)
+    return m.group(1).decode() if m else None
 
 
 def buffer_write(pid: Pubkey, prover: Pubkey, job_id: bytes, total_len: int, offset: int, chunk: bytes) -> Instruction:
@@ -473,13 +549,13 @@ def jwt_claims(jwt: str) -> dict:
 
 
 def verify_step2(pid: Pubkey, prover: Pubkey, job_id: bytes, key: Pubkey, vault_token: Pubkey, worker_token: Pubkey,
-                 fee_token: Pubkey, buyer: Pubkey, workflow_sha: str = "0" * 40) -> Instruction:
+                 fee_token: Pubkey, buyer: Pubkey, workflow_sha: str = "0" * 40, mint: Pubkey | None = None) -> Instruction:
     """VerifyStep2 (18): 8 squarings, * s, the PKCS#1 v1.5 check and the claims; on success the worker is paid and the
     job and the buffer close."""
     return Instruction(pid, bytes([18]) + job_id,
                        [_m(prover, True, True), _m(gh_buffer_pda(pid, job_id, prover), False, True),
                         _m(key, False, False), _m(job_pda(pid, job_id), False, True), _m(vault_token, False, True),
-                        _m(vault_authority(pid), False, False), _m(worker_token, False, True),
+                        _m(vault_authority(pid, mint), False, False), _m(worker_token, False, True),
                         _m(fee_token, False, True), _m(buyer, False, True), _m(config_pda(pid), False, False),
                         _m(TOKEN, False, False), _m(workflow_pda(pid, workflow_sha), False, False)])
 
