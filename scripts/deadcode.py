@@ -12,7 +12,8 @@ from pathlib import Path
 ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 ENTRY = ["knos.cli", "knos.__main__", "knos.sdk", "knos.jobs.api", "knos.mcp",
-         "knos.core"]  # knos.core: the embeddable claims API documented in docs/INTEGRATE.md
+         "knos.core",  # knos.core: the embeddable claims API documented in docs/INTEGRATE.md
+         "knos.proof.ghrelay"]  # run by the always-on worker (worker.yml: python -m knos.proof.ghrelay)
 SCRIPTS = [p for p in list((ROOT / "scripts").glob("*.py")) + list((ROOT / "examples").glob("*.py"))
            if p.name not in ("deadcode.py", "vulture_whitelist.py")]
 
