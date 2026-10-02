@@ -12,6 +12,10 @@ import pytest
 
 from knos.jobs import prove
 
+pytestmark = pytest.mark.skipif(__import__("sys").platform == "darwin",
+                                reason="prove.yml's judge runs on ubuntu-latest; on macOS the sample's acceptance "
+                                       "tests are not collected (no acceptance test ran), a known gap there")
+
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE = ROOT / "tests" / "bench_tamper" / "sample"
 PAYOUT = "CVhqj6hcR1Vd6r1c7m1V1rQ2T5p3h7sQyYxWbF2kFqL"
@@ -24,9 +28,6 @@ def _bench():
     return mod
 
 
-@pytest.mark.skipif(__import__("sys").platform == "darwin",
-                    reason="prove.yml's judge runs on ubuntu-latest; on macOS the sample's acceptance tests are not "
-                           "collected (no acceptance test ran), a known gap of running the judge on macOS")
 def test_the_benchmark_runs_fast_and_only_the_out_of_scope_stub_fools_knos():
     t = time.monotonic()
     bench = _bench()
