@@ -174,6 +174,24 @@ def _state_path() -> Path:
     return paths.home() / "ghrelay.json"
 
 
+def receipt_root(aud: str) -> bytes:
+    """The receipt's evidence root for a paid proof: sha256 of its audience (job, head, checks hash, payout)."""
+    return hashlib.sha256(aud.encode()).digest()
+
+
+def _receipt_for(payer, repo: str, n: int):
+    """A paid proof gets a SAS receipt on devnet, attested by the relaying key: root = sha256(audience), commit = the
+    PR head, claim = what was paid. Returns the receipt page URL."""
+    def publish(job_id: bytes, a: dict, c: dict) -> str:
+        from ..team import rpc
+        from . import receipt as rc
+        aud = c["aud"] if isinstance(c["aud"], str) else c["aud"][0]
+        claim = f"{repo}#{n} passed .knos/acceptance and was paid: job {a['job']} to {a['payout']}"
+        _sig, att = rc.publish(rpc.CLUSTERS["devnet"], payer, receipt_root(aud), a["sha"], claim)
+        return rc.page_url(att)
+    return publish
+
+
 def once(ledger=None, payer=None, now: float | None = None) -> list[str]:
     sp = _state_path()
     try:
@@ -197,7 +215,7 @@ def once(ledger=None, payer=None, now: float | None = None) -> list[str]:
             if tid in seen:
                 continue
             seen.add(tid)
-            r = relay_one(ledger, payer, kind, jwt)
+            r = relay_one(ledger, payer, kind, jwt, receipt=_receipt_for(payer, repo, n))
             lines.append(log_line(kind, repo, n, jwt, r))
             state.setdefault("owners", [])
             if r["ok"] and repo.split("/")[0] not in state["owners"]:
