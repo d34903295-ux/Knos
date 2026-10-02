@@ -2,33 +2,19 @@
 
 **AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.**
 
-Hire any AI agent in one step and pay only for work that is proven. Your price waits in an escrow program on Solana,
-not with Knos. For a pull request, the proof is GitHub's own: a reusable workflow runs the checks, GitHub signs an OIDC
-token for that run, and the escrow verifies GitHub's RSA signature on chain before it pays the agent. With no proof by
-the deadline, you get everything back, plus the agent's claim stake. Knos takes 2.5% (at least 0.05 USDC), only when
-the agent is paid.
+A maintainer funds an issue with one comment: `/knos bounty 20`. Whoever's pull request is merged for that issue is
+paid, to their **GitHub account**: no wallet, no sign-up and no address in the pull request. The money sits in a
+program on Solana, not with Knos. The program releases it only on a token GitHub itself signed ("this pull request,
+by this account, was merged in this repository"), and it checks GitHub's RSA signature on chain. Nobody can change
+that program, Knos included: it has no admin and no upgrade authority.
 
-**Why now (1 Oct 2026):** coding agents opened about 1.8M marked pull requests in the week to 27 Sep
-([amplifying.ai tracker](https://amplifying.ai/coding-agents/trends)). In one study of 567 Claude Code PRs, 54.9% were
-merged without changes requested ([arXiv 2509.14745](https://arxiv.org/abs/2509.14745)). And 18.2% of agent PRs that
-say "tests pass" had failing CI at that commit (our measurement: [docs/BENCH.md](docs/BENCH.md)). Paid bounties draw
-crowds of AI PRs: Archestra's bounty issues drew 15–42 PRs each
-([example](https://github.com/archestra-ai/archestra/issues/1301)). Paste any agent PR at
-[drexthealpha.github.io/Knos](https://drexthealpha.github.io/Knos/) to see whether its claim is true.
-
-**The free entry:** your coding agent cannot say done until Knos proves it. Knos's Stop hook will not let Claude Code or
-Codex finish while its last message claims something Knos cannot prove: it runs the tests in a fresh venv, every CI job
-for the commit, the PyPI version, the URLs, the deletions and the commit author itself, and remembers each repo's past
-false "done" in Sibyl as a check it now requires. Free, MIT.
-
-**Try it now:** [drexthealpha.github.io/Knos](https://drexthealpha.github.io/Knos/): paste an agent PR, protect a
-repo in two clicks, or fund a bounty with a passkey, on Solana devnet.
-
-Everything here is on **Solana devnet**. Mainnet escrow is built but locked (`KNOS_ALLOW_MAINNET=1`) and capped at
-500 USDC per job until an external audit. Why on chain: [docs/WHY-CHAIN.md](docs/WHY-CHAIN.md). What it costs:
-[PRICING.md](PRICING.md) and [docs/ECONOMICS.md](docs/ECONOMICS.md). What can go wrong: [SECURITY.md](SECURITY.md).
+Try it: [drexthealpha.github.io/Knos](https://drexthealpha.github.io/Knos/). Paste any agent pull request to see
+whether its "tests pass" is true; protect a repo in two clicks; fund an issue with one comment. Everything is on
+**Solana devnet** and the money is test USDC.
 
 ## Why
+
+Coding agents open pull requests by the million, and a pull request's own description is not evidence.
 
 <!-- bench:market -->
 **Agent PR Index, 2026-10-02:** 2,431 PRs by AI coding agents claiming tests or CI pass (created 2026-06-04 – 2026-10-01); 9,207 PRs on repos owned by the PR's author or the human who assigned the agent were excluded. Of the 2,431 whose CI had finished at the head commit, **660 (27.2%) had a failing check** (95% Wilson interval 25.4%–28.9%). Published as `index.json` on the Pages site; built every 6 hours by `.github/workflows/index.yml`.
@@ -41,67 +27,73 @@ Everything here is on **Solana devnet**. Mainnet escrow is built but locked (`KN
 | Claude Code | 206 | 17 (8.2%) | 5.2%–12.8% |
 | OpenAI Codex | 202 | 111 (54.9%) | 48.1%–61.7% |
 | **all** | **2,431** | **660 (27.2%)** | **25.4%–28.9%** |
-
-Earlier sample (0.3.4):
-
-Of 303 pull requests by AI coding agents (GitHub Copilot, Devin, OpenAI Codex, Claude) whose description says tests or CI pass, and whose CI had finished at the PR's head commit, **55 (18.2%) had a failing check at that commit** (95% interval 14.2%–22.9%); counting only test and build checks, 34 (11.2%). 30 of the 55 were merged anyway. PRs created 3 Jul – 30 Sep 2026, collected 1 Oct 2026 with `gh search prs` and the GitHub API: script `scripts/agent_pr_ci.py`, every PR in `docs/agent_pr_ci.json`.
-
-| agent | claiming PRs with finished CI | CI failed |
-|---|---|---|
-| GitHub Copilot coding agent | 60 | 21 (35.0%) |
-| Devin | 68 | 15 (22.1%) |
-| OpenAI Codex | 55 | 9 (16.4%) |
-| Claude GitHub app | 96 | 8 (8.3%) |
-| Claude Code | 24 | 2 (8.3%) |
-| **all** | **303** | **55 (18.2%)** |
-
-Small per-agent samples are directional only. This is the gap the Knos Stop hook closes: it runs the CI check itself before the agent may say done.
 <!-- /bench:market -->
 
-## Install
+When nobody can tell good agent work from bad, paying for it stops: one bounty platform went from 1,470 payouts in
+2025 to 175 in 2026, and curl closed its bug bounty ([docs/WHY.md](docs/WHY.md) has the sources and the argument).
+Trade between strangers solved this long ago with the letter of credit: the bank pays against a document a third
+party signed, never against the seller's word. Knos is that for agent work. The document is GitHub's signature; the
+bank is a program nobody controls.
 
-Python 3.10+ on Windows, macOS or Linux:
+## How it works
+
+1. **Protect a repo.** One workflow file ([examples/knos-workflow.yml](examples/knos-workflow.yml)); the site
+   prefills it. No secret, wallet or app in the repo.
+2. **Fund an issue.** A maintainer comments `/knos bounty 20` (or writes that line in a new issue). GitHub signs a
+   token that says so; anyone can carry it to Solana, and Knos's public worker does; the escrow opens.
+3. **Every pull request for that issue gets a Knos check**, on GitHub, running none of its code: the repo's own
+   CONTRIBUTING rules, what the repo's history made required, and whether a "tests pass" in the description is true
+   at the head commit.
+4. **A maintainer merges the one they want.** GitHub signs that; Solana verifies the signature; an hour later the
+   bounty belongs to the author's GitHub account (until then `/knos veto` takes it back, because the pull request
+   itself says which issue it closes). 2.5% fee (at least 0.05 USDC), only when someone is paid.
+5. **The author claims it** whenever they like, to any Solana address, by running one workflow in a repository they
+   own. Nobody else can get GitHub to sign that for their account.
+
+No merge needed? Put acceptance checks in `.knos/acceptance/<issue>/` before funding. They run in a sandbox against
+each pull request (Python, Node, Go, Rust, any command, or a black-box check that cannot be forged from inside); a
+pass is paid after 24 hours unless vetoed. With no proof by the deadline (14 days), the funder gets everything back.
+
+## What is in this repository
+
+| | |
+|---|---|
+| [`programs/knos_oidc`](programs/knos_oidc) | **OIDC on Solana.** Verifies a GitHub Actions or GitLab CI token (RS256, 2048- and 4096-bit) on chain. Any program can then require a fact GitHub signed. No admin; new issuer keys enter only on GitHub's own signature. |
+| [`programs/knos_pay`](programs/knos_pay) | **Pay on proof.** The escrow: funds per issue, pays a GitHub account, refunds on deadline. No admin. |
+| [`examples/oidc_gate`](examples/oidc_gate) | A second program built on knos-oidc: it records the last commit GitHub signed for a repository. |
+| [`.github/workflows`](.github/workflows) | `fund.yml`, `prove.yml`, `relay.yml`: the reusable workflows a protected repo calls, pinned by commit. |
+| [`src/knos`](src/knos) | The judge (`knos proof gate`, `knos proof judge`), the relay anyone can run (`knos relay`), and the Stop hook. |
+| [`sdk/settle`](sdk/settle) | A JavaScript client with no dependency, checked byte for byte against the Python client. |
+| [`web`](web) | The site. It reads GitHub and Solana in the browser; there is no Knos server. |
+
+## Free, for your own agent
 
 ```
-pipx install knos        # or: uv tool install knos; or run it once with uvx knos init
-knos init                # the free Stop hook for every agent it finds; undo with: knos init --undo
+pipx install knos        # or: uv tool install knos
+knos init                # a Stop hook for Claude Code and Codex; undo with: knos init --undo
 ```
 
-<!-- mcp-name: io.github.drexthealpha/knos -->
+When your agent says tests pass, CI is green, it shipped or it is done, Knos runs that check itself before the agent
+may stop, and remembers each repo's past false "done" in [Sibyl](https://sibyllabs.org) as a check it now requires.
+A hook is a local aid and a person can remove it. The same check at the merge, on GitHub, is what a repo can require.
 
-## Privacy
+## What can go wrong, and what it costs
 
-Nothing in plaintext on chain. The Stop hook runs on your machine and reads public GitHub and PyPI to check what your
-agent claims. Secrets (`.env`, keys, certificates, `.ssh`, `.aws`, and paths you add with `knos private`) never reach
-your agents.
-
-## Plans
-
-The Stop hook is free. A paid PR costs 2.5% of the price (at least 0.05 USDC), only when the agent is paid. Everything
-else: [PRICING.md](PRICING.md).
-
-## Labs
-
-Experiments outside the one product (text jobs, coordination and claims, budgets, Knos Pro, Tempo, ERC-8183) now live
-under `knos labs`: see [docs/LABS.md](docs/LABS.md).
-
-## More
-
-- [WHY.md](docs/WHY.md): the market, with sources.
-- [COMPARE.md](docs/COMPARE.md): how Knos compares.
-- [INTEGRATE.md](docs/INTEGRATE.md): MCP, hooks, the SDK.
+- [docs/SECURITY.md](docs/SECURITY.md): who has to be trusted for what, what a proof proves and what it does not.
+- [docs/TAMPER.md](docs/TAMPER.md): 21 cheating pull requests against three judges.
+- [docs/BENCH.md](docs/BENCH.md): every measured number, and how to re-run it.
+- [docs/MARKET.md](docs/MARKET.md): the market, bottom up, with every assumption labelled; the fee and what a payout costs.
+- [docs/COMPARE.md](docs/COMPARE.md): MergePay, GH Bounty, Algora, Octasol and CodeRabbit, from their own code and pages.
+- [docs/OIDC.md](docs/OIDC.md): build on knos-oidc.
+- `knos mainnet-check` prints every gate that must hold before real money, with its evidence. One fails today on
+  purpose: there has been no outside audit. Mainnet stays locked until there is.
 
 ## History
 
-- **0.1.x:** released 1–7 Sep 2026, before 14 Sep; it won the Sibyl Labs hackathon.
-- **0.2.x:** 30 Sep 2026.
-- **0.3.0:** Oct 2026: coordination and memory on Solana and Tempo.
-- **0.3.1:** Oct 2026: the work network: hire any AI agent, pay only for accepted work.
-- **0.3.2 / 0.3.3:** Oct 2026: passkey buyers on Tempo, recall at 96.8%, Sibyl Pro with every payment.
-- **0.3.4:** 1 Oct 2026: proof hooks, Sibyl proof history, paid on proof, receipts.
+Knos 0.1 (1–7 Sep 2026, before this hackathon) was shared memory for coding agents and won the Sibyl Labs hackathon.
+0.2 and 0.3.0–0.3.9 (29 Sep – 2 Oct) were built during it and tried coordination, budgets and a jobs market before
+the measurement above showed where the real problem was. 0.3.10 is one product. The earlier ones are in
+[drexthealpha/knos-labs](https://github.com/drexthealpha/knos-labs). [docs/DISCLOSURE.md](docs/DISCLOSURE.md) says
+what was built when, and what came from elsewhere.
 
-See [CHANGELOG.md](CHANGELOG.md).
-
-**Licence:** MIT, all of it.
-
-Knos is built by drexthealpha. Its memory engine is [Sibyl](https://sibyllabs.org).
+MIT, all of it. Built by drexthealpha. Its memory engine is [Sibyl](https://sibyllabs.org).

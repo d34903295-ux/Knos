@@ -1,10 +1,11 @@
 name: agent-pr-index
 
-# The Agent PR Index: scans 2,000+ agent PRs (too slow for the Pages build), counts proven payouts by distinct funder
-# from the devnet escrow, and publishes index.json as the asset of a GitHub Release tagged index-<date> (a release is
-# not a data commit). The Pages build (network.yml, triggered by the release) downloads the newest one and attests its
-# Merkle root on devnet SAS. With only the default token the search budget is tight; KNOS_INDEX_TOKEN (a read-only PAT)
-# lifts it. A scan that keeps too few PRs publishes nothing, so the last good release stays live.
+# The Agent PR Index: scans 2,000+ pull requests by AI coding agents whose description says tests or CI pass, and
+# records what CI actually said at each head commit (too slow for the Pages build). It publishes index.json as the
+# asset of a GitHub Release tagged index-<date> (a release is not a data commit); the Pages build (network.yml)
+# downloads the newest one and re-checks its Merkle root. With only the default token the search budget is tight;
+# KNOS_INDEX_TOKEN (a read-only PAT) lifts it. A scan that keeps too few PRs publishes nothing, so the last good
+# release stays live.
 on:
   schedule:
     - cron: "17 */6 * * *"
@@ -27,7 +28,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e .
       - name: API cache (search pages and CI verdicts; reruns resume)
         uses: actions/cache@v4
         with:
@@ -47,7 +47,7 @@ jobs:
           if [ "$n" -lt 2000 ]; then echo "only $n PRs; the last release stays live"; exit 0; fi
           tag="index-$(date -u +%Y-%m-%d-%H%M)"
           root=$(python -c "import json; print(json.load(open('index.json'))['root'])")
-          gh release create "$tag" index.json --title "Agent PR Index $tag" --latest=false             --notes "Agent PR Index: $n PRs, Merkle root $root. Attested on devnet SAS by the Pages build."
+          gh release create "$tag" index.json --title "Agent PR Index $tag" --latest=false             --notes "Agent PR Index: $n PRs, Merkle root $root. Recompute it: python scripts/agent_pr_index.py check --out index.json"
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Pages build (a release made with GITHUB_TOKEN triggers no workflow, so start it explicitly)

@@ -1,5 +1,5 @@
 """The tamper benchmark (scripts/tamper_bench.py) and the judge's pieces: protected paths, overlay, sentinel,
-fail-to-pass, the 5-part audience and the checks hash."""
+fail-to-pass and the checks hash."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from knos.jobs import prove
+from knos import judge as prove
 
 pytestmark = pytest.mark.skipif(__import__("sys").platform == "darwin",
                                 reason="prove.yml's judge runs on ubuntu-latest; on macOS the sample's acceptance "
@@ -18,7 +18,6 @@ pytestmark = pytest.mark.skipif(__import__("sys").platform == "darwin",
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE = ROOT / "tests" / "bench_tamper" / "sample"
-PAYOUT = "CVhqj6hcR1Vd6r1c7m1V1rQ2T5p3h7sQyYxWbF2kFqL"
 
 
 def _bench():
@@ -28,18 +27,21 @@ def _bench():
     return mod
 
 
-def test_the_benchmark_runs_fast_and_only_the_out_of_scope_stub_fools_knos():
+def test_the_benchmark_runs_fast_and_only_the_two_stated_limits_fool_an_in_process_run():
     t = time.monotonic()
     bench = _bench()
     control, rows = bench.run()
     text = bench.render(control, rows)
-    assert time.monotonic() - t < 60
-    assert len(rows) == 20
+    assert time.monotonic() - t < 90
+    assert len(rows) == 21
     assert control["ci"] and control["knos"], control
     fooled = [r["name"] for r in rows if r["knos"]]
-    assert all(r["out_of_scope"] for r in rows if r["knos"]), fooled
-    assert sum(r["ci"] for r in rows) > len(fooled)
-    assert f"Knos fooled {len(fooled)}/20" in text
+    assert len(fooled) == 2 and all(r["out_of_scope"] for r in rows if r["knos"]), fooled
+    assert sum(r["ci"] for r in rows) >= 16
+    assert f"Knos, tests: fooled {len(fooled)}/21" in text
+    if bench.BLACKBOX:                      # the check that never loads the pull request's code is fooled by none
+        assert control["box"] and not any(r["box"] for r in rows), [r["name"] for r in rows if r["box"]]
+        assert "Knos, black box: fooled 0/21" in text
 
 
 @pytest.fixture()
@@ -58,7 +60,7 @@ FIX = 'import re\nKNOWN = [("Hello World", "hello-world"), ("a  b", "a-b"), ("x"
 def test_fail_to_pass_the_fix_passes_and_a_noop_does_not(repos):
     base, pr = repos
     v = prove.judge(base, pr, CFG)
-    assert not v["passed"] and any("acceptance tests not passed" in r for r in v["reasons"])
+    assert not v["passed"] and any("acceptance checks not passed" in r for r in v["reasons"])
     (pr / "calc.py").write_text(FIX, encoding="utf-8")
     v = prove.judge(base, pr, CFG)
     assert v["passed"], v["reasons"]
@@ -125,17 +127,6 @@ def test_the_sentinel_must_pass_and_the_canary_must_fail(tmp_path):
     assert got[sent] == "passed" and got[canary] == "failed"
 
 
-def test_aud_round_trips_and_refuses_bad_parts():
-    job, head, checks = "ab" * 32, "c" * 40, "d" * 64
-    aud = prove.build_aud(job, head, checks, PAYOUT)
-    assert aud == f"knos:{job}:{head}:{checks}:{PAYOUT}"
-    assert prove.parse_aud(aud) == {"job": job, "head": head, "checks": checks, "payout": PAYOUT}
-    for bad in (f"knos:{job}", f"knos:{job}:{head[:-1]}:{checks}:{PAYOUT}", f"knos:{job}:{head}:{checks.upper()}:{PAYOUT}",
-                f"knos:{job}:{head}:{checks}:0OIl{PAYOUT[4:]}", f"evil:{job}:{head}:{checks}:{PAYOUT}"):
-        with pytest.raises(ValueError):
-            prove.parse_aud(bad)
-
-
 def test_checks_hash_is_the_canonical_bundle_hash(tmp_path):
     import hashlib
     (tmp_path / "sub").mkdir()
@@ -147,9 +138,8 @@ def test_checks_hash_is_the_canonical_bundle_hash(tmp_path):
         prove.checks_hash(tmp_path / "missing")
 
 
-def test_cli_checks_hash_and_aud(capsys):
+def test_cli_checks_hash(capsys):
     from knos.cli import main
     assert main(["proof", "checks-hash", "--dir", str(SAMPLE / ".knos" / "acceptance" / "1")]) == 0
     assert capsys.readouterr().out.strip() == prove.checks_hash(SAMPLE / ".knos" / "acceptance" / "1")
-    assert main(["proof", "aud", "--job", "ab" * 32, "--head", "c" * 40, "--checks", "d" * 64,
-                 "--payout", "nope"]) == 1
+    assert main(["proof", "checks-hash", "--dir", str(SAMPLE / "missing")]) == 1

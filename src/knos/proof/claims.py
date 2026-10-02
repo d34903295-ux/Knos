@@ -7,6 +7,8 @@
     urls      any https URL said to be live / up / 200
     deleted   "deleted X", "removed X" (a path)
     author    "committed", "authored by", "no co-author"
+    done      a bare completion: "Done.", "All done", "it's fixed", "the task is complete" (checked by the tests,
+              when the repository has a test command Knos can find)
 
 A claim is only what the message asserts; whether it is true is the checks' job.
 """
@@ -24,6 +26,10 @@ _PATTERNS = {
     "pypi": r"\b(on pypi|published to pypi|pypi\.org/project)\b",
     "author": r"\b(committed|authored by|commit author|no (ai )?(attribution|co-author\w*))\b",
 }
+_DONE = re.compile(
+    r"(?:^|[.!?:\n]\s*)(?:all |it'?s |that'?s |everything(?:'s| is) |this is |now |(?:the )?(?:task|work|change|fix|implementation|feature) (?:is )?)?"
+    r"(?:all )?(?:done|finished|complete|completed|fixed|implemented)\s*(?:[.!]|$)"
+    r"|\b(?:is|are) (?:now |all |fully )?(?:done|fixed|complete|completed|finished|implemented)\b", re.M)
 _URL = re.compile(r"https?://[^\s)>\]\"'`]+")
 _DELETED = re.compile(r"\b(?:deleted|removed)\s+[`'\"]?([\w./\\-]+\.\w+|[\w./\\-]+/)[`'\"]?", re.I)
 _VERSION = re.compile(r"\b(?:v|version\s+)?(\d+\.\d+\.\d+)\b")
@@ -48,6 +54,8 @@ def read(text: str) -> Claim:
     for kind, pat in _PATTERNS.items():
         if re.search(pat, low):
             c.kinds.add(kind)
+    if _DONE.search(low):
+        c.kinds.add("done")
     c.urls = sorted({u.rstrip(".,;:") for u in _URL.findall(text or "")
                      if not re.search(r"(example\.com|localhost|127\.0\.0\.1)", u)})
     c.deleted = sorted({m.group(1).rstrip(".,") for m in _DELETED.finditer(text or "")})

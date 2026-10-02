@@ -1,8 +1,12 @@
 # What a pull request to Knos must pass before GitHub may sign a proof for it (prove.yml reads this from the base).
 [[check]]
 name = "manifests parse"
-run = "python -c \"import json; [json.load(open(p)) for p in ('server.json', 'docs/bench.json', 'programs/knos_escrow/idl.json')]\""
+run = "python -c \"import json; [json.load(open(p)) for p in ('docs/bench.json', 'docs/facts.json', 'programs/program_ids.json', 'src/knos/settle/program_ids.json')]\""
 
 [[check]]
 name = "benchmark docs match their source"
 run = "python scripts/bench_docs.py --check"
+
+[[check]]
+name = "every pitch number has a fact"
+run = "python scripts/claims_check.py --offline"

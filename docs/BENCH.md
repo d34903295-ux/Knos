@@ -1,9 +1,8 @@
-# Knos bench
+# Measurements
 
-Re-run it to check every number. `knos bench` measures the single-machine bars; `knos bench --chain URL` measures the
-team bars on a local validator. The methods are in `src/knos/bench.py` and `src/knos/bench_chain.py`.
+Every number Knos states about itself, with the command that reproduces it. Nothing here is modelled.
 
-## How often agents say "tests pass" when CI failed (0.3.4)
+## How often agents say "tests pass" when CI failed
 
 <!-- bench:market -->
 **Agent PR Index, 2026-10-02:** 2,431 PRs by AI coding agents claiming tests or CI pass (created 2026-06-04 – 2026-10-01); 9,207 PRs on repos owned by the PR's author or the human who assigned the agent were excluded. Of the 2,431 whose CI had finished at the head commit, **660 (27.2%) had a failing check** (95% Wilson interval 25.4%–28.9%). Published as `index.json` on the Pages site; built every 6 hours by `.github/workflows/index.yml`.
@@ -16,150 +15,86 @@ team bars on a local validator. The methods are in `src/knos/bench.py` and `src/
 | Claude Code | 206 | 17 (8.2%) | 5.2%–12.8% |
 | OpenAI Codex | 202 | 111 (54.9%) | 48.1%–61.7% |
 | **all** | **2,431** | **660 (27.2%)** | **25.4%–28.9%** |
-
-Earlier sample (0.3.4):
-
-Of 303 pull requests by AI coding agents (GitHub Copilot, Devin, OpenAI Codex, Claude) whose description says tests or CI pass, and whose CI had finished at the PR's head commit, **55 (18.2%) had a failing check at that commit** (95% interval 14.2%–22.9%); counting only test and build checks, 34 (11.2%). 30 of the 55 were merged anyway. PRs created 3 Jul – 30 Sep 2026, collected 1 Oct 2026 with `gh search prs` and the GitHub API: script `scripts/agent_pr_ci.py`, every PR in `docs/agent_pr_ci.json`.
-
-| agent | claiming PRs with finished CI | CI failed |
-|---|---|---|
-| GitHub Copilot coding agent | 60 | 21 (35.0%) |
-| Devin | 68 | 15 (22.1%) |
-| OpenAI Codex | 55 | 9 (16.4%) |
-| Claude GitHub app | 96 | 8 (8.3%) |
-| Claude Code | 24 | 2 (8.3%) |
-| **all** | **303** | **55 (18.2%)** |
-
-Small per-agent samples are directional only. This is the gap the Knos Stop hook closes: it runs the CI check itself before the agent may say done.
 <!-- /bench:market -->
 
-## Team bars (0.3): `knos bench --chain http://127.0.0.1:8899`
+Method: `scripts/agent_pr_ci.py` (the claim patterns and the CI verdict) and `scripts/agent_pr_index.py` (the scan and
+the index). A pull request counts only if its description claims tests or CI pass and its CI had finished at the head
+commit. Pull requests on repositories owned by the author, or by the person who assigned the agent, are left out: a
+person's own repository is not a market observation. The agent's own session check runs are not counted as CI. The
+published list has a Merkle root; `python scripts/agent_pr_index.py check --out index.json` recomputes it. The first,
+smaller sample (303 pull requests, 55 failing, 18.2%, collected 1 Oct 2026) is kept in `docs/agent_pr_ci.json`.
 
-On a local validator running the devnet-deployed Solana Attestation Service and Lighthouse (`scripts/devchain.sh
-start`). Method: `src/knos/bench_chain.py`.
+What this does not show: that the agents lied. A description can be written before CI finishes. It shows that the
+description is not evidence.
 
-| vector | knos | without knos | ratio / target |
+## The verifier on chain (knos-oidc)
+
+Measured in LiteSVM against the built program: `pytest -q -s tests/test_oidc_chain.py tests/test_oidc_gate.py`.
+
+| | transactions | compute units, each |
+|---|---|---|
+| verify a GitHub token (RSA-2048), a typical token | 2 | 764,395 and 832,314 |
+| the longest token GitHub's claims allow (4,092 bytes) | 2 | 780,992 and 953,332 |
+| the longest token the program accepts (8,192 bytes) | 2 | 809,355 and 1,188,020 |
+| verify a GitLab token (RSA-4096) | 6 | 909,088 to 1,159,360 |
+| another program reads a verified token (`examples/oidc_gate`) | part of its own | 22,515 |
+
+The limit is 1,400,000 per transaction. A real GitHub Actions token today is 2,086 to 2,276 bytes (the ones we
+captured), so writing it takes 3 transactions of 880 bytes each.
+
+## Correctness of the RSA arithmetic
+
+- **Wycheproof** (Google's test vectors for RSA PKCS#1 v1.5 signatures, SHA-256), run against the program's own
+  arithmetic by `cd programs/knos_oidc && cargo test --release`: 517 vectors, for 2048- and 4096-bit keys. All 14
+  valid signatures verify; all 499 invalid ones are refused; the 2 marked "acceptable" are refused; 2 use a public
+  exponent other than 65537, which the program does not support, and are skipped.
+- **Differential test against OpenSSL** (`tests/test_oidc_chain.py`): 60 random tokens, each also with one random
+  bit flipped in its payload or signature. The program and OpenSSL (through `cryptography`) agree on all 120.
+- **Forgeries** (`test_every_forgery_is_refused`): claims or signature changed after signing; signed by another key;
+  `alg` set to HS256 or none; another issuer or a look-alike issuer; `iss` given twice; `exp` missing or a string;
+  a payload that is not one JSON object; a fourth part; a short signature; a signature of 0, 1, the modulus or more.
+  Each is refused with the error it should get.
+This is testing, not an audit. There has been no outside audit; `knos mainnet-check` fails on that line on purpose.
+
+## The escrow (knos-pay)
+
+`pytest -q -s tests/test_pay_chain.py`.
+
+| | compute units |
+|---|---|
+| Pay (verify the token's claims against the job, credit the author, take the fee, close the job) | 54,725 |
+| Claim | 42,740 |
+
+**Random walk** (`KNOS_FUZZ_N=10000 pytest -q -s tests/test_pay_chain.py -k random_walk`; 600 steps in the default
+suite, 10,000 in `program.yml` on every change and nightly): random funds, proofs, wrong proofs, settles, vetoes,
+refunds, claims and clock jumps. After every step, for each mint: vault = funded − claimed − fees − refunded, and
+never negative. Last 10,000-step run: 0 violations.
+
+## What a relayer pays
+
+Measured with a 2,100-byte token (`tests/test_settle_relay.py` drives the same path):
+
+| step | transactions | fees (lamports) | rent the relayer puts up |
 |---|---|---|---|
-| **Security**, metric 1: conflicting writes to working trees (3 machines × 3 vendor hooks × 200 rounds, 4 files) | **0** (of 738 writes the guard allowed) | none: 1,062 (of 1,800) | 0 |
-| **Security**, metric 2: conflicting commits | **0** | | 0 |
-| **Budget**, Solana: overspends signed directly with the agent's delegate key (200) | 0 moved; 200/200 rejected | | all rejected |
-| **Budget**, Tempo Moderato: over-limit payments signed directly with the agent's access key, with no client-side checks (200) | 0 received; 200/200 reverted on chain; fees 44 units (0.000044 USD) each, from the allowance | | all rejected |
-| **Speed**: guard decision when the agent holds the claim (reads the mirror) | p50 2.7 ms / p95 25.6 ms | | p95 ≤ 100 ms |
-| **Speed**: edits that waited on the chain (20 edits per claimed unit) | 5% (the first edit of each unit) | | ≤ 5% |
-| **Cost**: placing one claim | 5,000 lamports fee + 2,797,920 lamports rent, refunded on release | Agent Mail across machines: an always-on host, from $1.94 / month ([COMPARE.md](COMPARE.md)) | $0 servers |
+| fund (a maintainer's comment) | 7 | 35,000 | the job account, 2,672,640, returned when the job is paid or refunded; once per repository, 1,002,240 for its rate account; once per mint ever, 2,039,280 for the vault |
+| pay (a merge) | 7 | 35,000 | once per payee, 1,113,600 for their public record; 1,224,960 for their balance account, returned at their claim |
+| claim | 7 | 35,000 | once per address, 2,039,280 for the claimer's token account |
 
-**Capability** (the coverage matrix: 4 vendors × single/multi machine × edit/commit enforcement × bypass-proof
-budget = 32 cells):
-- **Knos: 32.** Every vendor's edit hook, on one machine (`tests/test_guard.py`, `tests/test_codex_guard.py`) and
-  across machines (`tests/test_team_two_homes.py`: Claude Code, Cursor, Codex, OpenCode). The commit guard for every
-  host. Chain budgets that hold when Knos is bypassed (`tests/test_chain_budgets.py`, and the Tempo run above).
-- **Best alternative, MCP Agent Mail: 8.** Its reservations are advisory at edit time and its pre-commit guard blocks
-  commits, on one machine or across machines through its server, with no budgets
-  ([README](https://github.com/Dicklesworthstone/mcp_agent_mail), read 30 Sep 2026).
-- 32 / 8 = **4×**.
+So a bounty to someone who has been paid before, in a repository that has funded before, costs a relayer 105,000
+lamports (0.000105 SOL) end to end. A first payout to a new person costs about 3,150,000 more, once. A token that is
+refused costs nothing when a read can tell (the usual case: `precheck` in `src/knos/settle/relay.py`), and fees only
+when it takes the signature check to tell; the token account's rent always comes back.
 
-**Claim protocol property test** (`tests/test_team_property.py`):
-- Setup: five member keys, overlapping files and folders, decisions read through an RPC that lags 2–5 slots, dust sent
-  to claim addresses, and claimers that crash after creating.
-- 1,000 rounds on the current code (four concurrent runs of 250, different seeds): 5,000 claims, 2,059 winners,
-  2,607 that lost and closed their own claim, 317 crashed claimers, 300 dust transfers, 17 answered "offline" (the
-  RPC took too long; the guard lets that edit go ahead with a warning).
-- **Double winners: 0. Winners ever blocked: 0. Overlapping claimers not refused: 0.**
-- 3,469 reads were served stale by the lagging endpoint, and 29,073 were refused until it reached the asked slot.
-- An earlier run on older code (whole-program reads) completed 763 rounds with the same zeros before a harness
-  timeout.
+## The judge
 
-**Signer cap:** 30 member keys. 31 makes the ChangeAuthorizedSigners transaction 1,648 bytes, over the 1,232-byte
-limit (measured on the local validator; `knos team status` prints it).
+- **Tamper benchmark**: [TAMPER.md](TAMPER.md), regenerated by `python scripts/tamper_bench.py`.
+- **Languages**: `tests/test_judge_langs.py` judges an honest fix, a no-op and a cheat in Python, Node, Go and Rust
+  repositories, with a plain command, and with the black-box check.
+- **Sandbox**: the same file runs a pull request that tries to write the judge's output file, read CI's environment
+  and open a network connection; all three fail, and an honest fix still passes.
 
-**Limits, said plainly:**
-- The chain numbers come from a local validator on a busy laptop; devnet adds network latency to the first claim of
-  each file (the recorded devnet run is in [network/demo.md](network/demo.md)).
-- When the guard cannot get the chain's word within its 1-second budget, it lets the edit go ahead with a warning
-  ("fail-open"), because Knos never blocks work on an outage. The bench counts those edits separately: there were
-  none in the run above.
-- An earlier 200-round run, on the same laptop while a 2.5-hour test suite ran against the same validator, recorded
-  15 conflicting writes in the Knos arm. That run did not yet count fail-open edits, so we cannot show how many of
-  the 15 were fail-open. Re-running on a quieter machine gave the 0 above, and the property test (which never
-  fails open) found no double winners. We report both runs.
+## The suite
 
-## Single-machine bars
-
-Measured by `knos bench` on 2026-09-29 with 0.2.0. In 0.3 the single-machine path changed only in where memory is stored (Sibyl's own store, one tenant per repo); run `knos bench` to measure your machine.
-
-| vector | knos | without knos | ratio / target |
-|---|---|---|---|
-| **Security**: rounds where a conflicting edit reached the file (3 agents x 200 rounds) | 0 | none 200 | 0 |
-| **Capability**: questions answered from past sessions and commits, cited (20) | 18 | 0 (CLAUDE.md only) | (knos+1)/(base+1) = 19.0x |
-| **Friction**: steps to three hosts sharing memory and claims | 1 | 8 (Sibyl Memory + MCP Agent Mail, from their READMEs) | 8.0x |
-| **Budget**: spend past the cap (200 attempted payments, cap 5) | 0 | | 0 by construction |
-| **Speed**: guard decision p50 / p95 (5,400 files, 21 live claims) | 20.5 / 38.8 ms | | p95 <= 100 ms |
-| **Speed**: search p50 / p95 (5,400 files) | 17.2 / 25.9 ms | | p95 <= 300 ms |
-| **UX**: `knos init` wiring 4 hosts, self-test included | 21.0 s | | <= 30 s |
-
-## Friction, counted from each README
-
-| tool | steps | what | source | read |
-|---|---|---|---|---|
-| knos | 1 | `knos init` (memory + claims + edit guard, every host it finds) | this repo | measured |
-| MCP Agent Mail | 5 | installer, start the server (`am`), register_agent in each of 3 hosts; claims only (advisory leases), no memory of past sessions | https://github.com/Dicklesworthstone/mcp_agent_mail | 2026-09-29 |
-| Sibyl Memory | 3 | `pip install sibyl-memory-cli[mcp]`, `sibyl init` (browser sign-in), `sibyl setup`; memory only, no claims | https://docs.sibyllabs.org/memory/install | 2026-09-29 |
-| Sibyl Memory + MCP Agent Mail | 8 | both of the above, to get memory and claims | as above | 2026-09-29 |
-
-Limits, said plainly: the history set is 20 synthetic decisions asked in other words, not a public benchmark; the budget row measures Knos's cap, and the agent wallet's balance is a second, on-chain ceiling this bench does not spend real money to show.
-
-## Jobs (0.3.1)
-
-`knos bench jobs` runs full jobs (post, claim, deliver, accept) and checks the money after every one: the worker got
-95%, the fee account 5%, the vault is empty.
-
-| where | command | jobs | post p50 | accept p50 | label |
-|---|---|---|---|---|---|
-| Solana runtime, in-process (LiteSVM) | `knos bench jobs` | 20 | 0.9 ms | 0.9 ms | code speed, no network |
-| Tempo escrow on a local anvil | `knos bench jobs --tempo` | 20 | — | — | code speed, no network |
-| Solana devnet, `finalized` | `KNOS_COMMITMENT=finalized knos bench jobs --live` | 5 | 2.2 s | 2.6 s | testnet, wall clock from Lagos |
-| Solana devnet, `confirmed` | `KNOS_COMMITMENT=confirmed knos bench jobs --live` | 5 | 2.6 s | 3.0 s | testnet, wall clock from Lagos |
-| Tempo Moderato | a recorded run (deploy, then 5 jobs at 0.01 pathUSD) | 5 | 5.5 s | 2.6 s | testnet, wall clock from Lagos |
-
-Measured 1 Oct 2026. The live rows include every RPC round trip the client makes, from a home connection in Lagos.
-
-
-The 0.3.0 method (a Sibyl search on the brief) found 54 of 72 preferences; capturing them when said (0.3.1) finds 72
-of 72. Capture on a held-out set written before it was run: 21/24 preferences, 0 of 30 ordinary requests mistaken for
-one (`tests/data/preferences_heldout.json`).
-
-## Recall (0.3.2): `knos.recall` on LongMemEval_s
-
-No LLM. Sibyl (`sibyl-memory-client`) stores each past round; `knos.recall.retrieve` fuses one-term searches (BM25
-over the whole round, the user part and the assistant part), Sibyl's own search, and captured preference sentences,
-by reciprocal rank per session. Scored like the 0.3.1 baseline: the answer-bearing past session is in the top 10.
-Tuned on a fixed 100-question dev split (seed 0); the other 370 questions are held out.
-
-<!-- bench:recall-table -->
-LongMemEval_s (cleaned), 470 questions with evidence; tuned on 100, held out 370, measured 2026-10-01.
-
-| | baseline (0.3.1) | dev | **held-out** |
-|---|---|---|---|
-| overall, top 10 | 81.5% | 97.0% | **96.8%** |
-| the assistant said | 51.8% | 100% | **88.4%** |
-| preferences | 50.0% | 100% | **83.3%** |
-| median tokens retrieved | 5,338 | 5,554 | **5,656** |
-<!-- /bench:recall-table -->
-
-The strategy is `src/knos/recall.py`.
-
-## Web app (0.3.2): Lighthouse
-
-Lighthouse 12.8.2, headless Chrome, `web/` served as static files (as on GitHub Pages), 1 Oct 2026: performance 100,
-accessibility 100, best practices 100, SEO 100 on both the mobile and desktop presets (mobile first contentful paint
-1.1 s). Wallet and crypto libraries load only when used. Served instead through the Python dev server (`knos jobs
-serve`) on the same loaded machine, mobile performance was 55, all of it the server's 9.3 s time to first byte.
-
-## Acceptance with a live model (0.3.3)
-
-The same 24 jobs, buyers, histories and grader, with the reference worker's prompt (`Worker.prompt`) answered live by
-Gemini through its native API on 1 Oct 2026 (gemini-3.8-flash was out of free-tier quota, so every answer came from
-gemini-3.5-flash-lite). One attempt per job, temperature 0.2. The table is the one above.
-
-With memory every rejection was a task error (dates read month-first, "twenty percent" for "20%", two wrong JSON
-keys or values); no buyer preference was broken. Without memory 23 of 24 broke a preference the buyer had stated once.
+`pytest -q` (offline; the tests refuse every non-loopback connection). `node sdk/settle/test.mjs` checks the
+JavaScript client against the Python client byte for byte. `node tests/web/site.mjs <site>` drives the built site in
+headless Chromium against a mocked GitHub and Solana.

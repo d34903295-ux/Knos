@@ -1,6 +1,5 @@
 """Proof: AI agent work counts only when Knos proves it. The Stop hook blocks an unproven "done", lets a stop through
-after 3 blocks on unchanged evidence, the safety guard refuses unread overwrites and deletes outside the repo, and
-Sibyl history is load-bearing: the replay of Knos's own releases."""
+after 3 blocks on unchanged evidence, and Sibyl history is load-bearing: the replay of Knos's own releases."""
 
 from __future__ import annotations
 
@@ -9,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from knos.proof import checks, claims, engine, history, hook, receipt
+from knos.proof import checks, claims, engine, history, hook
 
 import _replay as replay
 
@@ -61,22 +60,6 @@ def test_the_stop_hook_reads_claude_codes_transcript(tmp_path):
     assert hook.last_message({"transcript_path": str(t)}) == "Shipped; tests pass."
 
 
-def test_safety_refuses_unread_overwrites_and_deletes_outside_the_repo(tmp_path, repo):
-    f = repo / "notes.md"
-    f.write_text("mine", encoding="utf-8")
-    t = tmp_path / "t.jsonl"
-    t.write_text("", encoding="utf-8")
-    base = {"cwd": str(repo), "transcript_path": str(t)}
-    assert "never read it" in hook.safety({**base, "tool_name": "Write", "tool_input": {"file_path": str(f)}})
-    t.write_text(json.dumps({"message": {"content": [{"type": "tool_use", "name": "Read",
-                                                      "input": {"file_path": str(f)}}]}}) + "\n", encoding="utf-8")
-    assert hook.safety({**base, "tool_name": "Write", "tool_input": {"file_path": str(f)}}) is None
-    outside = Path(Path(str(repo)).anchor) / "knos-not-yours"   # outside the repo and the temp dir
-    assert "outside this repository" in hook.safety({**base, "tool_name": "Bash",
-                                                     "tool_input": {"command": f"rm -rf {outside}"}})
-    assert hook.safety({**base, "tool_name": "Bash", "tool_input": {"command": "rm -rf build/"}}) is None
-
-
 def test_checks_run_by_knos_not_the_agent(tmp_path, repo):
     assert not checks.deleted(repo, ["README.md"]).ok if (repo / "README.md").exists() else True
     assert checks.deleted(repo, ["nope.txt"]).ok
@@ -91,21 +74,89 @@ def test_checks_run_by_knos_not_the_agent(tmp_path, repo):
     assert not got.ok and "tests/pytest: failure" in got.detail
 
 
-def test_receipt_root_commits_to_every_check():
-    ev = [{"name": "ci", "ok": True, "evidence": {"sha": "a"}}, {"name": "tests", "ok": True, "evidence": {}}]
-    r1 = receipt.merkle_root(receipt.leaves(ev))
-    ev[0]["evidence"]["sha"] = "b"
-    assert receipt.merkle_root(receipt.leaves(ev)) != r1 and len(r1) == 32
+def test_a_bare_done_is_a_claim_and_runs_the_tests_when_there_is_a_test_command(tmp_path, repo, knos_home):
+    for said in ("Done.", "All done!", "It's fixed.", "The task is complete.", "Everything is implemented.",
+                 "I updated the parser.\nDone."):
+        assert "done" in claims.read(said).kinds, said
+    for said in ("It is not done yet.", "Here is a plan.", "What should be done about the parser?",
+                 "I have done some reading."):
+        assert "done" not in claims.read(said).kinds, said
+    payload = {"cwd": str(repo), "session_id": "s-done", "last_assistant_message": "Done."}
+    assert hook.stop(payload, history.NullStore())[0] == "allow"        # no test command here: nothing to run
+    (repo / "package.json").write_text('{"scripts": {"test": "node -e \\"process.exit(1)\\""}}', encoding="utf-8")
+    assert checks.test_command(repo) == "npm test"
+    fail = {"tests": lambda r, c, cfg: checks.Result("tests", False, "`npm test`: 1 failing", {})}
+    verdict, why = hook.stop(payload, history.NullStore(), fail)
+    assert verdict == "block" and "npm test" in why
 
 
-def test_init_installs_the_stop_and_safety_hooks(knos_home, tmp_path, monkeypatch):
-    from knos import guard
-    monkeypatch.setattr(guard, "claude_settings", lambda: tmp_path / "settings.json")
-    guard.install_claude()
-    hooks = json.loads((tmp_path / "settings.json").read_text())["hooks"]
-    assert "hook proof" in json.dumps(hooks["Stop"]) and "hook safety" in json.dumps(hooks["PreToolUse"])
-    assert guard.uninstall_claude() and "hooks" not in json.loads((tmp_path / "settings.json").read_text()) or \
-        "Stop" not in json.loads((tmp_path / "settings.json").read_text()).get("hooks", {})
+def test_the_test_command_follows_the_language(tmp_path):
+    for name, body, want in (("pyproject.toml", "[project]\nname='x'\n", "pytest -q"), ("Cargo.toml", "[package]\n", "cargo test"),
+                             ("go.mod", "module x\n", "go test ./..."), ("package.json", '{"scripts":{"test":"vitest"}}', "npm test")):
+        d = tmp_path / name.replace(".", "_")
+        d.mkdir()
+        (d / name).write_text(body, encoding="utf-8")
+        assert checks.test_command(d) == want
+    assert checks.test_command(tmp_path) == "" and checks.test_command(tmp_path, "make test") == "make test"
+
+
+def test_init_installs_only_the_stop_hook_and_undo_removes_it(knos_home, _isolated):
+    from knos import init
+    home = _isolated
+    (home / ".claude").mkdir()
+    settings = home / ".claude" / "settings.json"
+    settings.write_text(json.dumps({"model": "x", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "mine"}]}]}}), "utf-8")
+    rep = init.install()
+    assert [h for h, _ in rep["done"]] == ["claude"] and ("codex", "not installed here") in rep["skipped"]
+    data = json.loads(settings.read_text())
+    assert set(data["hooks"]) == {"Stop"} and data["model"] == "x"
+    cmds = [h["command"] for e in data["hooks"]["Stop"] for h in e["hooks"]]
+    assert cmds[0] == "mine" and "hook proof --client claude" in cmds[1] and len(cmds) == 2
+    init.install()                                                     # a second init changes nothing
+    assert json.loads(settings.read_text()) == data
+    assert (home / ".claude" / "settings.json.knos-backup").exists()
+    init.undo()
+    after = json.loads(settings.read_text())
+    assert [h["command"] for e in after["hooks"]["Stop"] for h in e["hooks"]] == ["mine"] and after["model"] == "x"
+
+
+def test_init_removes_what_older_versions_installed(knos_home, _isolated):
+    from knos import init
+    home = _isolated
+    (home / ".claude").mkdir()
+    old = {"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "knos hook guard --client claude #knos-guard"}]},
+                                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "other"}]}],
+                     "SessionStart": [{"hooks": [{"type": "command", "command": "knos hook start --client claude #knos-guard"}]}],
+                     "Stop": [{"hooks": [{"type": "command", "command": "knos hook proof --client claude #knos-guard"}]}]}}
+    (home / ".claude" / "settings.json").write_text(json.dumps(old), "utf-8")
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"knos": {"command": "knos", "args": ["mcp"]},
+                                                                  "other": {"command": "x"}}}), "utf-8")
+    (home / ".codex").mkdir()
+    (home / ".codex" / "config.toml").write_text('model = "x"\n\n[mcp_servers.knos]\ncommand = "knos"\nargs = ["mcp"]\n\n[other]\na = 1\n', "utf-8")
+    rep = init.install()
+    assert any("MCP server" in x for x in rep["removed"])
+    hooks = json.loads((home / ".claude" / "settings.json").read_text())["hooks"]
+    assert set(hooks) == {"PreToolUse", "Stop"} and json.dumps(hooks).count("knos-guard") == 1
+    assert hooks["PreToolUse"] == [{"matcher": "Bash", "hooks": [{"type": "command", "command": "other"}]}]
+    assert json.loads((home / ".claude.json").read_text())["mcpServers"] == {"other": {"command": "x"}}
+    toml = (home / ".codex" / "config.toml").read_text()
+    assert "mcp_servers.knos" not in toml and "[other]" in toml and 'model = "x"' in toml
+
+
+def test_a_settings_file_knos_cannot_read_is_left_alone(knos_home, _isolated):
+    from knos import init
+    (_isolated / ".claude").mkdir()
+    bad = _isolated / ".claude" / "settings.json"
+    bad.write_text("{not json", "utf-8")
+    rep = init.install()
+    assert bad.read_text() == "{not json" and rep["done"] == [] and "left it alone" in rep["skipped"][0][1]
+
+
+def test_a_hook_name_from_an_older_version_does_nothing(knos_home, capsys):
+    from knos.cli import main
+    for name in ("guard", "start", "safety"):
+        assert main(["hook", name, "--client", "claude"]) == 0
+    assert capsys.readouterr().out == ""
 
 
 def test_ci_reads_gh_json_followed_by_a_notice(tmp_path):

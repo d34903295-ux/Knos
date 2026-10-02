@@ -1,88 +1,100 @@
 name: knos prove
 
-# A reusable workflow. A repo that funded a Knos job calls it from a `pull_request_target` workflow (template:
-# examples/knos-workflow.yml), pinned to a release tag:
+# A reusable workflow. A repo that funded a Knos bounty calls it from a `pull_request_target` workflow (template:
+# examples/knos-workflow.yml), pinned to a full commit sha. knos-pay pays a bounty only for a GitHub Actions OIDC
+# token from this file at the commit the bounty pins (job_workflow_sha), on a GitHub-hosted runner, whose audience is
 #
-#     uses: drexthealpha/Knos/.github/workflows/prove.yml@v0.3.8
+#     knos:pay:<repository id>:<issue>:<author's GitHub user id>:<PR head sha>:<checks hash>:<mode>
 #
-# The escrow pays only for a GitHub Actions OIDC token whose job_workflow_ref starts with
-# "drexthealpha/Knos/.github/workflows/prove.yml@refs/tags/" and whose audience is
+# The author is paid by GitHub user id: no wallet and no address in the pull request.
 #
-#     knos:<job id, 64 hex>:<PR head sha, 40 hex>:<checks hash, 64 hex>:<payout, base58>
+#   check   every bounty pull request, on open and on each push. contents: read and checks: read only, NO id-token,
+#           NO secrets. It is the status a branch ruleset can require ("prove / check").
+#             always      `knos proof gate`, which runs none of the pull request's code: the repository's own rules
+#                         (CONTRIBUTING.md), what this repository's history made required (tampering and false
+#                         claims caught before, remembered in Sibyl's local store, carried in this repository's
+#                         Actions cache), and the description's own claims: "tests pass" is checked against the
+#                         commit's finished checks.
+#             tests mode  (.knos/acceptance/<issue>/ exists on the BASE branch) then `knos proof judge`: the funder's
+#                         acceptance checks must fail on the base and pass on the pull request. The pull request may
+#                         not touch what judges it; the base's tests are laid over its source; and its code (the
+#                         dependency install and the tests) runs in a sandbox: another user, an empty environment, no
+#                         network during the tests. Python, Node, Go, Rust, any command, or a black-box check.
+#   attest  tests mode only, after check passed. id-token: write only. Never checks out or runs PR code: a sparse
+#           checkout of the base's .knos/acceptance/<issue> only, recomputes the checks hash, then mints (mode 1).
+#           knos-pay holds that payment for the review window, in which the funder can veto it.
+#   merged  the pull request was merged by a maintainer. One job that runs no pull request code mints the token
+#           (mode 0, checks hash = 64 zeros). The maintainer's merge is the acceptance.
 #
-# where the checks hash (fixed on chain at funding) is sha256 over the funder's acceptance bundle
-# .knos/acceptance/<issue>/ on the BASE branch: sorted relative paths, each "path\0sha256(content)\n", hashed.
-#
-# Security model (two jobs, so untrusted code and the token never meet):
-#   check   contents: read only, NO id-token, NO secrets. Checks out the base, fetches the PR head source into a
-#           separate dir, and runs `knos proof judge` (knos.jobs.prove.judge):
-#             - refuses a PR touching protected paths: .knos/**, .github/**, the test dirs (tests/, test/), conftest.py,
-#               pytest.ini, tox.ini, and the pytest sections of pyproject.toml / setup.cfg (proof.toml `protected`,
-#               `test_dirs` change the lists);
-#             - OVERLAYS from the base onto the PR source: the test dirs, .github/, .knos/ (proof.toml, acceptance/),
-#               every conftest.py, pytest.ini, tox.ini, setup.cfg, pyproject.toml;
-#             - writes a random-named passing sentinel test and a failing canary into the overlaid tests dir; the
-#               report (random path outside the tree) must show the sentinel passed and the canary failed;
-#             - fail-to-pass: the acceptance tests fail on the base and pass on the PR head; pass-to-pass holds; the PR
-#               collects at least as many tests as the base.
-#           Outputs passed, head_sha, checks_hash; uploads the evidence as the `knos-evidence` artifact.
-#   attest  id-token: write only. Never checks out or runs PR code: a sparse checkout of the base's
-#           .knos/acceptance/<issue> only, recomputes the checks hash and requires it equal check's; reads the payout
-#           from the PR body line `knos-payout: <base58>` through the GitHub API (data, not code); mints the token for
-#           the 5-part audience and publishes it as the `knos-proof` artifact (permissionless: Knos's always-on
-#           worker relays it to the escrow). If the caller passes a KNOS_PROVER_KEY secret it also runs `knos prove`.
+# The token is published as artifact `knos-proof`; the caller's relay.yml job posts it and Knos's always-on worker
+# (or anyone) relays it to the chain. A bot-authored pull request is paid to its first assignee.
 on:
   workflow_call:
     inputs:
-      job:
-        description: the Knos job id (64 hex characters) this pull request delivers
-        required: true
-        type: string
       issue:
-        description: the acceptance bundle, .knos/acceptance/<issue>/ on the base branch
+        description: the issue this pull request closes (its bounty; in tests mode also .knos/acceptance/<issue>/ on the base)
         required: true
         type: string
-      knos-version:
-        description: the knos release (PyPI) both jobs install
-        required: false
-        type: string
-        default: "0.3.8"
-      knos-ref:
-        description: >-
-          a Knos commit sha (40 hex) to install knos from instead of PyPI: the same sha the caller pins this file at,
-          so the judge is the code the escrow registered
-        required: false
-        type: string
-        default: ""
       setup:
-        description: shell command run in the PR tree before judging (install its dependencies); runs in check only
+        description: >-
+          tests mode: shell command that installs a tree's dependencies (e.g. "pip install -e ." or "npm ci"). It runs
+          in the sandbox, in the base tree and in the pull request's tree, with network; the tests then run without
         required: false
         type: string
         default: ""
-      cluster:
-        description: devnet (default) or localnet, for the optional direct `knos prove`
-        required: false
-        type: string
-        default: devnet
-    secrets:
-      KNOS_PROVER_KEY:
-        description: optional. A Solana fee payer; when set, attest also sends the token itself
-        required: false
     outputs:
       passed:
-        description: "true when the pull request passed the judge"
-        value: ${{ jobs.check.outputs.passed }}
+        description: "true when a token was minted (tests mode passed, or the pull request was merged)"
+        value: ${{ jobs.attest.result == 'success' || jobs.merged.result == 'success' }}
 
 permissions: {}
 
 jobs:
-  check:
+  # ---- mode 0: merged by a maintainer. No pull request code runs here. ---------------------------------------------
+  merged:
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    steps:
+      - name: mint the OIDC token for the merged pull request
+        env:
+          ISSUE: ${{ inputs.issue }}
+          REPO_ID: ${{ github.repository_id }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          ASSIGNEE_ID: ${{ github.event.pull_request.assignees[0].id }}
+        run: |
+          set -euo pipefail
+          case "$ISSUE" in ''|*[!0-9]*) echo "no issue number"; exit 1;; esac
+          case "$HEAD" in *[!0-9a-f]*|"") echo "no pull request head sha"; exit 1;; esac
+          author="$AUTHOR_ID"
+          if [ "$AUTHOR_TYPE" = "Bot" ]; then author="$ASSIGNEE_ID"; fi
+          case "$author" in ''|*[!0-9]*) echo "a bot's pull request needs a human assignee to be paid"; exit 1;; esac
+          aud="knos:pay:$REPO_ID:$ISSUE:$author:$HEAD:$(printf '0%.0s' $(seq 64)):0"
+          mkdir -p knos-proof
+          curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$aud" | jq -r .value > knos-proof/token.txt
+          printf '%s\n' "$aud" > knos-proof/aud.txt
+          echo "minted a token for $aud"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: knos-proof
+          path: knos-proof/
+
+  # ---- every bounty pull request: the gate; and in tests mode, the funder's acceptance checks ------------------------
+  check:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     permissions:
       contents: read
+      checks: read
     outputs:
       passed: ${{ steps.judge.outputs.passed }}
+      mode: ${{ steps.judge.outputs.mode }}
       head_sha: ${{ steps.judge.outputs.head_sha }}
       checks_hash: ${{ steps.judge.outputs.checks_hash }}
     steps:
@@ -93,12 +105,15 @@ jobs:
           path: base
           fetch-depth: 0
           persist-credentials: false
-      - name: fetch the pull request head source into its own dir
+      - name: fetch the pull request head source into its own dir (nothing in it is run here)
         env:
           HEAD: ${{ github.event.pull_request.head.sha }}
           BASE: ${{ github.event.pull_request.base.sha }}
           NUM: ${{ github.event.pull_request.number }}
+          BODY: ${{ github.event.pull_request.body }}
+          ISSUE: ${{ inputs.issue }}
         run: |
+          case "$ISSUE" in ''|*[!0-9]*) echo "no issue number"; exit 1;; esac
           case "$HEAD" in *[!0-9a-f]*|"") echo "no pull request head sha"; exit 1;; esac
           git -C base fetch --no-tags origin "+refs/pull/$NUM/head:refs/knos/head"
           test "$(git -C base rev-parse refs/knos/head)" = "$HEAD"
@@ -106,49 +121,58 @@ jobs:
           git -C base archive "$HEAD" | tar -x -C pr
           git -C base diff --name-only "$BASE...$HEAD" > changed.txt
           git -C base diff "$BASE...$HEAD" > pr.diff
+          printf '%s' "$BODY" > body.md
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
-      - name: install knos (PyPI, or the pinned Knos commit), and pytest
+      - name: install knos at this workflow's own commit, and pytest
         env:
-          REF: ${{ inputs.knos-ref }}
-          VER: ${{ inputs.knos-version }}
+          REF: ${{ job.workflow_sha }}
+          REPO: ${{ job.workflow_repository }}
         run: |
+          # The judge is the code at the very commit of this workflow file: the commit the bounty pinned on chain.
+          # The calling repository cannot choose another. (A runner without job.workflow_sha installs the release
+          # this file shipped in.)
           case "$REF" in
-            "") uv pip install --system "knos==$VER" pytest ;;
-            *[!0-9a-f]*) echo "knos-ref must be a commit sha"; exit 1 ;;
-            *) uv pip install --system "knos @ git+https://github.com/drexthealpha/Knos@$REF" pytest ;;
+            "") uv pip install --system "knos==0.3.10" pytest ;;
+            *[!0-9a-f]*) echo "job.workflow_sha is not a commit sha"; exit 1 ;;
+            *) uv pip install --system "knos @ git+https://github.com/${REPO:-drexthealpha/Knos}@$REF" pytest ;;
           esac
-      - name: the judge's memory of this repo (learned tampering) in Sibyl's local store .knos-memory/sibyl.db, from this repo's Actions cache
+      - name: the judge's memory of this repo (rules, tampering, false claims) in Sibyl's local store .knos-memory/sibyl.db, from this repo's Actions cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/.knos-memory
-          key: knos-judge-sibyl-${{ github.run_id }}
+          key: knos-judge-sibyl-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: knos-judge-sibyl-
-      - name: the PR's dependencies
-        if: inputs.setup != ''
-        working-directory: pr
-        env:
-          SETUP: ${{ inputs.setup }}
-        run: bash -c "$SETUP"
-      - name: knos proof judge
+      - name: knos proof gate (and, in tests mode, knos proof judge in the sandbox)
         id: judge
         env:
           ISSUE: ${{ inputs.issue }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
+          SETUP: ${{ inputs.setup }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "head_sha=$HEAD" >> "$GITHUB_OUTPUT"
-          echo "checks_hash=$(knos proof checks-hash --dir "base/.knos/acceptance/$ISSUE")" >> "$GITHUB_OUTPUT"
-          if knos proof judge --base base --pr pr --issue "$ISSUE" --changed changed.txt --evidence evidence.json \
-               --diff pr.diff --store "$RUNNER_TEMP/.knos-memory" --repo "$GITHUB_REPOSITORY" --agent "$AUTHOR"; then
+          common=(--base base --diff pr.diff --evidence evidence.json --store "$RUNNER_TEMP/.knos-memory"
+                  --repo "$GITHUB_REPOSITORY" --agent "$AUTHOR" --body-file body.md --head "$HEAD" --wait 600)
+          if [ -n "$(find "base/.knos/acceptance/$ISSUE" -type f 2>/dev/null | head -1)" ]; then
+            echo "mode=tests" >> "$GITHUB_OUTPUT"
+            echo "checks_hash=$(knos proof checks-hash --dir "base/.knos/acceptance/$ISSUE")" >> "$GITHUB_OUTPUT"
+            run=(knos proof judge "${common[@]}" --pr pr --issue "$ISSUE" --changed changed.txt --sandbox require --setup "$SETUP")
+          else
+            echo "mode=merge" >> "$GITHUB_OUTPUT"
+            echo "no .knos/acceptance/$ISSUE on the base branch: this issue's bounty is paid on merge"
+            run=(knos proof gate "${common[@]}" --issue "$ISSUE")
+          fi
+          if "${run[@]}"; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
-            # learned only from a refusal that ran no pull request code (a repo rule or a protected path), so the
-            # PR cannot have written the memory that is saved
-            if jq -e '[.reasons[] | select(startswith("repo rule:") or startswith("touches protected path"))] | length > 0' \
+            # learned only from a refusal that ran no pull request code (a repo rule, a protected path, a false
+            # claim), so the pull request cannot have written the memory that is saved
+            if jq -e '[.reasons[] | select(startswith("repo rule:") or startswith("touches protected path") or startswith("claim:"))] | length > 0' \
                  evidence.json > /dev/null; then echo "learn=true" >> "$GITHUB_OUTPUT"; fi
             exit 1
           fi
@@ -157,7 +181,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/.knos-memory
-          key: knos-judge-sibyl-${{ github.run_id }}
+          key: knos-judge-sibyl-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       - name: evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -166,9 +190,10 @@ jobs:
           path: evidence.json
           if-no-files-found: ignore
 
+  # ---- tests mode: the token, in a job that never sees pull request code -------------------------------------------
   attest:
     needs: check
-    if: needs.check.outputs.passed == 'true'
+    if: needs.check.outputs.passed == 'true' && needs.check.outputs.mode == 'tests'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -186,48 +211,46 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
-      - name: install knos (PyPI, or the pinned Knos commit; no pull request code in this job)
+      - name: install knos at this workflow's own commit (no pull request code in this job)
         env:
-          REF: ${{ inputs.knos-ref }}
-          VER: ${{ inputs.knos-version }}
+          REF: ${{ job.workflow_sha }}
+          REPO: ${{ job.workflow_repository }}
         run: |
+          # The judge is the code at the very commit of this workflow file: the commit the bounty pinned on chain.
+          # The calling repository cannot choose another. (A runner without job.workflow_sha installs the release
+          # this file shipped in.)
           case "$REF" in
-            "") uv pip install --system "knos==$VER" ;;
-            *[!0-9a-f]*) echo "knos-ref must be a commit sha"; exit 1 ;;
-            *) uv pip install --system "knos @ git+https://github.com/drexthealpha/Knos@$REF" ;;
+            "") uv pip install --system "knos==0.3.10" ;;
+            *[!0-9a-f]*) echo "job.workflow_sha is not a commit sha"; exit 1 ;;
+            *) uv pip install --system "knos @ git+https://github.com/${REPO:-drexthealpha/Knos}@$REF" ;;
           esac
-      - name: mint the OIDC token for job, head, checks and payout
+      - name: mint the OIDC token for the issue, author, head and checks
         env:
-          JOB: ${{ inputs.job }}
           ISSUE: ${{ inputs.issue }}
+          REPO_ID: ${{ github.repository_id }}
           HEAD: ${{ needs.check.outputs.head_sha }}
           EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
           CHECKS: ${{ needs.check.outputs.checks_hash }}
-          PULL_URL: ${{ github.event.pull_request.url }}
+          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          ASSIGNEE_ID: ${{ github.event.pull_request.assignees[0].id }}
         run: |
           set -euo pipefail
+          case "$ISSUE" in ''|*[!0-9]*) echo "no issue number"; exit 1;; esac
           test "$HEAD" = "$EVENT_HEAD" || { echo "check judged another head"; exit 1; }
           got=$(knos proof checks-hash --dir "base/.knos/acceptance/$ISSUE")
           test "$got" = "$CHECKS" || { echo "checks hash $got != $CHECKS"; exit 1; }
-          payout=$(curl -sSf "$PULL_URL" | jq -r '.body // ""' | tr -d '\r' \
-            | grep -oE '^knos-payout:[[:space:]]*[1-9A-HJ-NP-Za-km-z]{32,44}[[:space:]]*$' | head -1 \
-            | grep -oE '[1-9A-HJ-NP-Za-km-z]{32,44}' | head -1 || true)
-          test -n "$payout" || { echo "the pull request body has no knos-payout: <base58> line"; exit 1; }
-          aud=$(knos proof aud --job "$JOB" --head "$HEAD" --checks "$CHECKS" --payout "$payout")
+          author="$AUTHOR_ID"
+          if [ "$AUTHOR_TYPE" = "Bot" ]; then author="$ASSIGNEE_ID"; fi
+          case "$author" in ''|*[!0-9]*) echo "a bot's pull request needs a human assignee to be paid"; exit 1;; esac
+          aud="knos:pay:$REPO_ID:$ISSUE:$author:$HEAD:$CHECKS:1"
           mkdir -p knos-proof
           curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$aud" | jq -r .value > knos-proof/token.txt
           printf '%s\n' "$aud" > knos-proof/aud.txt
-      - name: publish the token (the always-on worker relays it)
+          echo "minted a token for $aud"
+      - name: publish the token (the always-on worker, or anyone, relays it)
         uses: actions/upload-artifact@v4
         with:
           name: knos-proof
           path: knos-proof/
-      - name: knos prove (only when the caller passed KNOS_PROVER_KEY)
-        env:
-          JOB: ${{ inputs.job }}
-          KNOS_JOBS_CLUSTER: ${{ inputs.cluster }}
-          KNOS_MEMBER_KEY: ${{ secrets.KNOS_PROVER_KEY }}
-        run: |
-          if [ -z "$KNOS_MEMBER_KEY" ]; then echo "no KNOS_PROVER_KEY: the relay sends the knos-proof artifact"; exit 0; fi
-          knos prove --job "$JOB" --jwt-file knos-proof/token.txt

@@ -1,21 +1,13 @@
-"""`knos init`: wire knos into every agent on this machine in one command, and take it all back out with `--undo`.
+"""`knos init`: install the Stop hook for the coding agents on this machine. `knos init --undo` removes it.
 
-What it writes, per host:
+    Claude Code   Stop -> `knos hook proof --client claude` in ~/.claude/settings.json
+    Codex         Stop -> `knos hook proof --client codex` in ~/.codex/hooks.json (Codex asks you to trust it once)
 
-  claude    the MCP server (via `claude mcp add` when the CLI is here, so a running session gets it without a
-            restart; else ~/.claude.json) and two hooks in ~/.claude/settings.json: SessionStart -> `knos hook start`,
-            PreToolUse on Edit|Write|MultiEdit|NotebookEdit -> `knos hook guard`, PreToolUse on Write|Bash ->
-            `knos hook safety`, and Stop -> `knos hook proof` (no "done" Knos cannot prove)
-  desktop   the MCP server in Claude Desktop's config (it has no hooks)
-  cursor    the MCP server in ~/.cursor/mcp.json and a preToolUse hook in ~/.cursor/hooks.json
-  opencode  the MCP server in opencode.json and a guard plugin
-  codex     the MCP server under [mcp_servers.knos] in ~/.codex/config.toml, and PreToolUse (guard, safety) and Stop
-            (proof) hooks in ~/.codex/hooks.json
+Nothing else is written. A settings file that is not JSON Knos understands is left exactly as it is. Before a file is
+changed for the first time it is copied to <file>.knos-backup.
 
-Every file is copied to ~/.knos/backups/init-<time>/ before it is changed, and a file that is not JSON knos can read
-is left exactly as it is. `--undo` removes only what knos added (entries named "knos", hooks marked knos-guard), so
-anything the person changed since is kept. Then a self-test: the MCP server is started the way an agent starts it and
-must answer the handshake and list the memory tools; the guard hook must exit 0 on an empty event.
+Knos before 0.3.10 also installed an MCP server and edit hooks (now in drexthealpha/knos-labs). `knos init` removes
+those entries, so an upgrade does not leave a host calling commands that no longer exist.
 """
 
 from __future__ import annotations
@@ -23,470 +15,194 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
-import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import guard, paths
-
-HOSTS = ("claude", "codex", "cursor", "desktop", "opencode")
-TOOLS = {"search", "about", "remember", "done"}
-READ_BUDGET = 15.0  # seconds of `knos init` spent reading the repo; the rest is read on the first question
+MARK = "knos-guard"   # every hook Knos ever installed carries this marker in its command
 
 
-def server_command() -> list[str]:
-    """How an agent starts the server: the `knos` script on PATH, by its absolute path, because a GUI app starts it
-    with its own PATH and no shell profile. `pipx upgrade` keeps that path. Without a `knos` script (a source tree),
-    this interpreter runs the module."""
-    exe = own_script() or shutil.which("knos")
-    if exe:
-        return [str(Path(exe)), "mcp"]
-    return [sys.executable, "-m", "knos", "mcp"]
+class Unreadable(Exception):
+    """A settings file that is not JSON knos understands. It is left exactly as it is, never overwritten."""
 
 
 def own_script() -> str | None:
-    """The `knos` script installed beside the interpreter running this, when there is one. Preferred over the first
-    `knos` on PATH: an older install earlier on PATH must not be the one every agent gets wired to."""
+    """The `knos` script installed beside the interpreter running this (preferred over a stale one on PATH)."""
     folder = Path(sys.executable).parent
     for name in ("knos.exe", "knos") if os.name == "nt" else ("knos",):
-        cand = folder / name
-        if cand.is_file():
-            return str(cand)
-    return None
+        if (folder / name).is_file():
+            return str(folder / name)
+    return shutil.which("knos")
 
 
-def desktop_config() -> Path:
-    home = Path.home()
-    if sys.platform == "darwin":
-        return home / "Library/Application Support/Claude/claude_desktop_config.json"
-    if sys.platform.startswith("win"):
-        return Path(os.environ.get("APPDATA", home / "AppData/Roaming")) / "Claude" / "claude_desktop_config.json"
-    return home / ".config/Claude/claude_desktop_config.json"
+def hook_cmd(client: str) -> str:
+    """How a hook calls knos: by absolute path with forward slashes (a Windows path through bash loses its
+    backslashes); without a script, this interpreter with -m."""
+    exe = own_script()
+    head = [f'"{exe.replace(os.sep, "/")}"'] if exe else [f'"{sys.executable.replace(os.sep, "/")}"', "-m", "knos"]
+    return " ".join(head + ["hook", "proof", "--client", client]) + f" #{MARK}"
 
 
-def opencode_config() -> Path:
-    given = os.environ.get("OPENCODE_CONFIG")
-    if given:
-        return Path(given)
-    base = os.environ.get("XDG_CONFIG_HOME")
-    return (Path(base) if base else Path.home() / ".config") / "opencode" / "opencode.json"
+def claude_settings() -> Path:
+    return Path.home() / ".claude" / "settings.json"
 
 
-def codex_config() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+def codex_hooks() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "hooks.json"
 
 
-def mcp_files() -> dict[str, Path]:
-    return {"claude": Path.home() / ".claude.json", "desktop": desktop_config(), "codex": codex_config(),
-            "cursor": Path.home() / ".cursor" / "mcp.json", "opencode": opencode_config()}
+HOSTS = {"claude": claude_settings, "codex": codex_hooks}
 
 
 def present(host: str) -> bool:
-    """Whether that agent is installed here: its config folder exists (or, for Claude Code and Codex, its CLI)."""
-    if host == "claude":
-        return (Path.home() / ".claude").is_dir() or shutil.which("claude") is not None
-    if host == "codex":
-        return codex_config().parent.is_dir() or shutil.which("codex") is not None
-    return mcp_files()[host].parent.is_dir()
+    """Whether that agent is installed here: its config folder exists, or its CLI is on PATH."""
+    return HOSTS[host]().parent.is_dir() or shutil.which(host) is not None
 
 
-# Codex keeps MCP servers in TOML. knos owns exactly one table, [mcp_servers.knos], and touches nothing else in the
-# file: it is added as a block at the end and removed by that block's header, so comments and formatting survive.
-_CODEX_HEADER = "[mcp_servers.knos]"
-
-
-def _toml_str(s: str) -> str:
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def _codex_without(text: str) -> str:
-    lines = text.splitlines(keepends=True)
-    out, skipping = [], False
-    for line in lines:
-        head = line.strip()
-        if head == _CODEX_HEADER or head.startswith("[mcp_servers.knos."):
-            skipping = True
-            continue
-        if skipping and head.startswith("["):
-            skipping = False
-        if not skipping:
-            out.append(line)
-    return "".join(out).rstrip("\n") + ("\n" if out else "")
-
-
-def _codex_add(backups: "Backups") -> bool:
-    path = codex_config()
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    cmd = server_command()
-    block = (f"{_CODEX_HEADER}\ncommand = {_toml_str(cmd[0])}\n"
-             f"args = [{', '.join(_toml_str(a) for a in cmd[1:])}]\n")
-    base = _codex_without(text)
-    new = (base + ("\n" if base else "") + block)
-    if new == text:
-        return False
-    backups.keep(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new, encoding="utf-8")
-    return True
-
-
-def _codex_remove(backups: "Backups") -> bool:
-    path = codex_config()
+def _load(path: Path) -> dict:
     if not path.exists():
-        return False
-    text = path.read_text(encoding="utf-8")
-    if _CODEX_HEADER not in text:
-        return False
-    backups.keep(path)
-    path.write_text(_codex_without(text), encoding="utf-8")
-    return True
-
-
-@dataclass
-class Report:
-    done: list[str] = field(default_factory=list)
-    skipped: list[str] = field(default_factory=list)
-    problems: list[str] = field(default_factory=list)
-    backups: Path | None = None
-    restart: list[str] = field(default_factory=list)
-
-
-def _snapshot(path: Path) -> bytes | None:
+        return {}
     try:
-        return path.read_bytes()
-    except OSError:
-        return None
-
-
-def _sha(path: Path) -> str | None:
-    import hashlib
-
-    got = _snapshot(path)
-    return hashlib.sha256(got).hexdigest() if got is not None else None
-
-
-class Backups:
-    """One folder per run. Each file's bytes are copied once, before its first change; `seal` then records the hash
-    of what knos left, so `undo` can tell an untouched file (restored byte for byte) from one edited since (only
-    knos's own entries are taken out)."""
-
-    def __init__(self, kind: str = "init") -> None:
-        self.dir = paths.home() / "backups" / f"{kind}-{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
-        self.manifest: dict[str, dict] = {}
-
-    def record(self, path: Path, before: bytes | None) -> None:
-        key = str(path)
-        if key in self.manifest:
-            return
-        self.dir.mkdir(parents=True, exist_ok=True)
-        dest = None
-        if before is not None:
-            dest = self.dir / f"{len(self.manifest):02d}-{path.name}"
-            dest.write_bytes(before)
-        self.manifest[key] = {"backup": str(dest) if dest else None}
-        self._write()
-
-    def keep(self, path: Path) -> None:
-        self.record(path, _snapshot(path))
-
-    def seal(self) -> None:
-        for key, rec in self.manifest.items():
-            rec["after"] = _sha(Path(key))
-        if self.manifest:
-            self._write()
-
-    def _write(self) -> None:
-        (self.dir / "manifest.json").write_text(json.dumps(self.manifest, indent=2), encoding="utf-8")
-
-
-def restore_exact() -> set[str]:
-    """Undo every `knos init` whose files are still exactly as it left them, newest first: each such file gets its
-    original bytes back (or is removed, if init created it). Returns the paths restored."""
-    restored: set[str] = set()
-    root = paths.home() / "backups"
-    for manifest in sorted(root.glob("init-*/manifest.json"), reverse=True):
-        try:
-            entries = json.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        for key, rec in entries.items():
-            if not isinstance(rec, dict) or "after" not in rec:
-                continue
-            path = Path(key)
-            if _sha(path) != rec["after"]:
-                continue
-            if rec.get("backup"):
-                path.write_bytes(Path(rec["backup"]).read_bytes())
-            else:
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
-            restored.add(key)
-    return restored
-
-
-def _edit(path: Path, change, backups: Backups) -> bool:
-    """Apply `change(data) -> bool` to a JSON file; write only when it changed something. Raises guard.Unreadable."""
-    data = guard._load(path)
-    before = json.dumps(data, sort_keys=True)
-    change(data)
-    if json.dumps(data, sort_keys=True) == before:
-        return False
-    backups.keep(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return True
-
-
-def _mcp_entry(host: str) -> dict:
-    cmd = server_command()
-    if host == "opencode":
-        return {"type": "local", "command": cmd, "enabled": True}
-    return {"command": cmd[0], "args": cmd[1:]}
-
-
-def _add_mcp(host: str, backups: Backups) -> bool:
-    entry = _mcp_entry(host)
-    key = "mcp" if host == "opencode" else "mcpServers"
-
-    def change(data: dict) -> None:
-        servers = data.setdefault(key, {})
-        if not isinstance(servers, dict):
-            raise guard.Unreadable(f"{mcp_files()[host]} has a {key} that is not an object, so knos left it alone")
-        servers["knos"] = entry
-        if host == "opencode":
-            data.setdefault("$schema", "https://opencode.ai/config.json")
-
-    return _edit(mcp_files()[host], change, backups)
-
-
-def _remove_mcp(host: str, backups: Backups) -> bool:
-    key = "mcp" if host == "opencode" else "mcpServers"
-
-    def change(data: dict) -> None:
-        servers = data.get(key)
-        if isinstance(servers, dict):
-            servers.pop("knos", None)
-
-    path = mcp_files()[host]
-    return path.exists() and _edit(path, change, backups)
-
-
-def _claude_cli_add() -> bool:
-    """`claude mcp add --scope user`: registers with a running Claude Code session too, so no restart."""
-    tool = None if os.environ.get("KNOS_NO_CLAUDE_CLI") else shutil.which("claude")
-    if tool is None:
-        return False
-    cmd = server_command()
-    try:
-        subprocess.run([tool, "mcp", "remove", "--scope", "user", "knos"], capture_output=True, text=True, timeout=20)
-        got = subprocess.run([tool, "mcp", "add", "--scope", "user", "knos", "--", *cmd],
-                             capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return got.returncode == 0 or "already exists" in (got.stdout + got.stderr).lower()
-
-
-def _claude_cli_remove() -> bool:
-    tool = None if os.environ.get("KNOS_NO_CLAUDE_CLI") else shutil.which("claude")
-    if tool is None:
-        return False
-    try:
-        got = subprocess.run([tool, "mcp", "remove", "--scope", "user", "knos"], capture_output=True, text=True,
-                             timeout=20)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return got.returncode == 0
-
-
-_HOOKS = {
-    "claude": (guard.claude_settings, guard.install_claude, guard.uninstall_claude),
-    "cursor": (guard.cursor_hooks, guard.install_cursor, guard.uninstall_cursor),
-    "codex": (guard.codex_hooks, guard.install_codex, guard.uninstall_codex),
-    "opencode": (guard.opencode_plugin, guard.install_opencode, guard.uninstall_opencode),
-}
-
-
-def _hooks(host: str, backups: Backups) -> Path | None:
-    """Install the host's hooks; back the file up only if that changed it, so a second init changes nothing."""
-    if host not in _HOOKS:
-        return None
-    where, install_fn, _ = _HOOKS[host]
-    before = _snapshot(where())
-    got = install_fn()
-    if _snapshot(where()) != before:
-        backups.record(where(), before)
+        got = json.loads(path.read_text(encoding="utf-8-sig") or "{}")
+    except (ValueError, OSError) as why:
+        raise Unreadable(f"{path} is not readable JSON, so knos left it alone") from why
+    if not isinstance(got, dict):
+        raise Unreadable(f"{path} is not a JSON object, so knos left it alone")
     return got
 
 
-def _unhooks(host: str, backups: Backups) -> bool:
-    if host not in _HOOKS:
-        return False
-    where, _, uninstall_fn = _HOOKS[host]
-    before = _snapshot(where())
-    took = uninstall_fn()
-    if _snapshot(where()) != before:
-        backups.record(where(), before)
+def _save(path: Path, data: dict) -> None:
+    backup = path.with_name(path.name + ".knos-backup")
+    if path.exists() and not backup.exists():
+        shutil.copyfile(path, backup)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _strip(hooks: dict) -> bool:
+    """Remove every Knos hook (this version's and older ones) from a host's hooks table. True if any was there."""
+    took = False
+    for event in list(hooks):
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            continue
+        kept = [h for h in entries if MARK not in json.dumps(h)]
+        took = took or len(kept) != len(entries)
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event)
     return took
 
 
-def files_of(host: str) -> list[Path]:
-    got = [mcp_files()[host]]
-    if host in _HOOKS:
-        got.append(_HOOKS[host][0]())
-    return got
+def _set(host: str, install: bool) -> Path | None:
+    """Install (or remove) the Stop hook for one host. Returns the file when it was changed."""
+    path = HOSTS[host]()
+    data = _load(path)
+    before = json.dumps(data, sort_keys=True)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    _strip(hooks)
+    if install:
+        entry = {"type": "command", "command": hook_cmd(host), "timeout": 600}
+        if host == "codex":
+            entry["statusMessage"] = "Knos: proving what you said is done"
+        hooks.setdefault("Stop", []).append({"hooks": [entry]})
+    if hooks:
+        data["hooks"] = hooks
+    else:
+        data.pop("hooks", None)
+    if json.dumps(data, sort_keys=True) == before:
+        return None
+    _save(path, data)
+    return path
 
 
-RESTART = {
-    "desktop": "Claude Desktop: quit it from the tray and open it again.",
-    "cursor": "Cursor: quit and reopen.",
-    "opencode": "OpenCode: exit and start it again.",
-    "codex": "Codex: start a new session.",
-}
-NAMES = {"claude": "Claude Code", "codex": "Codex", "desktop": "Claude Desktop", "cursor": "Cursor",
-         "opencode": "OpenCode"}
+# ---- what Knos before 0.3.10 installed, removed on init and on undo ------------------------------------------------
+
+def _legacy_json() -> list[tuple[Path, str]]:
+    home = Path.home()
+    if sys.platform == "darwin":
+        desktop = home / "Library/Application Support/Claude/claude_desktop_config.json"
+    elif sys.platform.startswith("win"):
+        desktop = Path(os.environ.get("APPDATA", home / "AppData/Roaming")) / "Claude" / "claude_desktop_config.json"
+    else:
+        desktop = home / ".config/Claude/claude_desktop_config.json"
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return [(home / ".claude.json", "mcpServers"), (desktop, "mcpServers"), (home / ".cursor" / "mcp.json", "mcpServers"),
+            (Path(os.environ.get("OPENCODE_CONFIG") or xdg / "opencode" / "opencode.json"), "mcp")]
 
 
-def pick(hosts: str | None) -> list[str]:
-    if not hosts:
-        return [h for h in HOSTS if present(h)]
-    wanted = [h.strip().lower() for h in hosts.split(",") if h.strip()]
-    unknown = [h for h in wanted if h not in HOSTS]
-    if unknown:
-        raise ValueError(f"unknown host {', '.join(unknown)}; choose from {', '.join(HOSTS)}")
-    return wanted
-
-
-def install(hosts: list[str], team_repo: Path | None = None) -> Report:
-    rep = Report()
-    backups = Backups()
-    if team_repo is not None:
-        from . import team_setup
+def remove_legacy() -> list[str]:
+    """Take out the `knos` MCP server entries and the edit hooks earlier versions installed. Returns what it removed."""
+    gone: list[str] = []
+    for path, key in _legacy_json():
         try:
-            rep.done.extend(team_setup.install(team_repo, backups))
-        except (guard.Unreadable, OSError, UnicodeDecodeError) as why:
-            rep.problems.append(f"team setup: {why}")
-    for host in hosts:
-        name = NAMES[host]
-        try:
-            if host == "codex":
-                _codex_add(backups)
-            elif not (host == "claude" and _claude_cli_add()):
-                _add_mcp(host, backups)
-            hooked = _hooks(host, backups)
-        except (guard.Unreadable, OSError, UnicodeDecodeError) as why:
-            rep.problems.append(f"{name}: {why}")
+            data = _load(path)
+        except Unreadable:
             continue
-        what = ", edit guard (apply_patch and shell writes)" if host == "codex" else ", edit guard and session notice"
-        rep.done.append(f"{name}: memory server" + (what if hooked else ""))
-        if host in RESTART:
-            rep.restart.append(RESTART[host])
-    backups.seal()
-    rep.backups = backups.dir if backups.manifest else None
-    return rep
-
-
-def undo(hosts: list[str], repo: Path | None = None) -> Report:
-    """Byte-for-byte where the file is as knos left it; otherwise only knos's own entries come out."""
-    rep = Report()
-    exact = restore_exact()
-    if repo is not None:
-        from . import team_setup
-        try:
-            if team_setup.uninstall(repo):
-                rep.done.append("the team guard in this repo")
-        except (guard.Unreadable, OSError, UnicodeDecodeError) as why:
-            rep.problems.append(f"team setup: {why}")
-    backups = Backups("undo")
-    for host in hosts:
-        name = NAMES[host]
-        try:
-            took = any(str(p) in exact for p in files_of(host))
-            if host == "claude":
-                took = _claude_cli_remove() or took
-            if host == "codex":
-                took = _codex_remove(backups) or took
-            else:
-                took = _remove_mcp(host, backups) or took
-            took = _unhooks(host, backups) or took
-        except (guard.Unreadable, OSError, UnicodeDecodeError) as why:
-            rep.problems.append(f"{name}: {why}")
-            continue
-        (rep.done if took else rep.skipped).append(name)
-    backups.seal()
-    rep.backups = backups.dir if backups.manifest else None
-    return rep
-
-
-# ---- self-test --------------------------------------------------------------------------
-
-
-def _rpc(proc: subprocess.Popen, msg: dict) -> None:
-    assert proc.stdin is not None
-    proc.stdin.write((json.dumps(msg) + "\n").encode())
-    proc.stdin.flush()
-
-
-def _read_reply(proc: subprocess.Popen, want_id: int, deadline: float) -> dict | None:
-    import threading
-
-    got: dict = {}
-
-    def pump() -> None:
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            try:
-                msg = json.loads(raw)
-            except ValueError:
+        servers = data.get(key)
+        if isinstance(servers, dict) and "knos" in servers:
+            servers.pop("knos")
+            _save(path, data)
+            gone.append(f"the knos MCP server in {path}")
+    codex = codex_hooks().parent / "config.toml"
+    if codex.exists():
+        text = codex.read_text(encoding="utf-8")
+        out, skipping = [], False
+        for line in text.splitlines(keepends=True):
+            head = line.strip()
+            if head == "[mcp_servers.knos]" or head.startswith("[mcp_servers.knos."):
+                skipping = True
                 continue
-            if msg.get("id") == want_id:
-                got.update(msg)
-                return
-
-    t = threading.Thread(target=pump, daemon=True)
-    t.start()
-    t.join(max(0.1, deadline - time.monotonic()))
-    return got or None
-
-
-def selftest(timeout: float = 45.0, cwd: Path | None = None) -> list[str]:
-    """Start the server exactly as an agent would and speak MCP to it. Returns problems; empty means it works.
-    The handshake normally takes ~3 s; the deadline is generous because a busy spinning disk can make a cold start
-    take 20+ s, and a false "failed" is worse than a slow success."""
-    problems: list[str] = []
-    deadline = time.monotonic() + timeout
+            if skipping and head.startswith("["):
+                skipping = False
+            if not skipping:
+                out.append(line)
+        if "".join(out) != text:
+            shutil.copyfile(codex, codex.with_name(codex.name + ".knos-backup"))
+            codex.write_text("".join(out), encoding="utf-8")
+            gone.append(f"the knos MCP server in {codex}")
+    cursor = Path.home() / ".cursor" / "hooks.json"
     try:
-        proc = subprocess.Popen(server_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, cwd=str(cwd) if cwd else None)
-    except OSError as why:
-        return [f"the memory server would not start: {why}"]
-    try:
-        _rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                               "clientInfo": {"name": "knos-init", "version": "0"}}})
-        hello = _read_reply(proc, 1, deadline)
-        if not hello or (hello.get("result") or {}).get("serverInfo", {}).get("name") != "knos":
-            return ["the memory server started but did not answer the MCP handshake"]
-        _rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
-        _rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        listed = _read_reply(proc, 2, deadline)
-        names = {t.get("name") for t in ((listed or {}).get("result") or {}).get("tools", [])}
-        if not TOOLS <= names:
-            problems.append(f"the memory server is missing tools: {', '.join(sorted(TOOLS - names))}")
-    finally:
+        data = _load(cursor)
+        if isinstance(data.get("hooks"), dict) and _strip(data["hooks"]):
+            _save(cursor, data)
+            gone.append(f"the edit hook in {cursor}")
+    except Unreadable:
+        pass
+    plugin = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode" / "plugin" / "knos-guard.js"
+    if plugin.exists():
+        plugin.unlink()
+        gone.append(f"the edit plugin {plugin}")
+    return gone
+
+
+def install(hosts: list[str] | None = None) -> dict:
+    """{"done": [(host, file)], "skipped": [(host, why)], "removed": [what]}"""
+    rep: dict = {"done": [], "skipped": [], "removed": remove_legacy()}
+    for host in hosts or list(HOSTS):
+        if host not in HOSTS:
+            rep["skipped"].append((host, "unknown host: use claude or codex"))
+        elif not present(host) and not hosts:
+            rep["skipped"].append((host, "not installed here"))
+        else:
+            try:
+                _set(host, True)
+                rep["done"].append((host, str(HOSTS[host]())))
+            except Unreadable as why:
+                rep["skipped"].append((host, str(why)))
+    return rep
+
+
+def undo(hosts: list[str] | None = None) -> dict:
+    rep: dict = {"done": [], "skipped": [], "removed": remove_legacy()}
+    for host in hosts or list(HOSTS):
+        if host not in HOSTS:
+            continue
         try:
-            proc.kill()
-            proc.wait(5)
-        except Exception:
-            pass
-    try:
-        hook = subprocess.run(guard.knos_cmd_argv() + ["hook", "guard", "--client", "claude"], input="{}",
-                              capture_output=True, text=True, timeout=max(1.0, deadline - time.monotonic()))
-        if hook.returncode != 0:
-            problems.append(f"the edit guard exited {hook.returncode} on an empty event (it must allow)")
-    except (OSError, subprocess.SubprocessError) as why:
-        problems.append(f"the edit guard did not run: {why}")
-    return problems
+            if _set(host, False):
+                rep["done"].append((host, str(HOSTS[host]())))
+        except Unreadable as why:
+            rep["skipped"].append((host, str(why)))
+    return rep

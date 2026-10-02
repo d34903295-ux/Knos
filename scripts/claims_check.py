@@ -1,237 +1,174 @@
-"""Check every number and factual claim in the pitch-facing text against devnet, GitHub or a file in the repo.
+"""Check every number in the pitch-facing text against docs/facts.json, and every fact against its source.
 
-    python scripts/claims_check.py            # every claim (devnet RPC + `gh api`)
-    python scripts/claims_check.py --offline  # file-backed claims only
+    python scripts/claims_check.py --offline   # file-backed facts (the test suite runs this)
+    python scripts/claims_check.py             # also the live facts: devnet and GitHub
 
-A claim is (file, regex that must match the text, checker). The pitch-facing sections are README.md's opening (up to
-the first `## `), the home page hero (web/index.html, section#view-check), docs/submission/SUBMISSION.md and
-docs/submission/pitch_script.md. Every sentence there that contains a digit must be covered by a registered claim
-pattern for that file, or the check fails. Exit 1 on any mismatch.
+Pitch-facing text is README.md, the home page's first view (web/index.html), and docs/submission/*.md. Every number in
+it must be one a fact in docs/facts.json says ("say"), and every fact must hold:
+
+    {"say": ["27.2%"], "what": "...", "json": "docs/bench.json", "path": "market.index.overall.share", "equals": 0.2715}
+    {"say": ["21"], "what": "...", "file": "docs/TAMPER.md", "has": "fooled 17/21"}
+    {"say": ["1,470"], "what": "...", "source": "https://...", "read": "2026-10-02"}      an outside number, cited
+    {"say": [...], "what": "...", "live": "immutable"}                                   checked on devnet
+
+Numbers that are not claims are ignored: versions, dates, clock times in the scripts, list numbering, names such as
+RS256, and anything inside code or a link's address. The generated benchmark table is checked by bench_docs.py.
+Exit 1 on any number without a fact, any fact whose source no longer says it, or (online) a live fact that fails.
 """
 
 from __future__ import annotations
 
-import base64
 import html
 import json
-import os
 import re
-import subprocess
 import sys
 import urllib.request
-from dataclasses import dataclass
-from typing import Callable
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
-PROGRAM = "GwmbMFvyHHwHug5em9dv26oXz2zTgXKGsNdrBxPayRPq"
-VAULT = "4G3cznCnwCUPBCZwzKiLupjdgB5pSoCcGWNGuFv4TYFo"
-REPO = "drexthealpha/Knos"
-INDEX_TAG = "index-2026-10-02"
-RPC = os.environ.get("KNOS_SOLANA_RPC", "https://api.devnet.solana.com")
-
-README = "README.md"
-HOME = "web/index.html"
-SUB = "docs/submission/SUBMISSION.md"
-PITCH = "docs/submission/pitch_script.md"
-PITCH_SENTENCE = "AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed."
-
-
-def read(path: str) -> str:
-    with open(os.path.join(ROOT, path), encoding="utf-8") as f:
-        return f.read()
-
-
-# ---- pitch-facing sections ----------------------------------------------------------------------------------------
-
-
-def section(path: str) -> str:
-    text = read(path)
-    if path == README:
-        return text.split("\n## ", 1)[0]
-    if path == HOME:
-        m = re.search(r'<section id="view-check".*?</section>', text, re.S)
-        body = re.sub(r"<[^>]+>", " ", m.group(0) if m else "")
-        return html.unescape(body)
-    return text
-
-
-def sentences(text: str) -> list[str]:
-    out: list[str] = []
-    for para in re.split(r"\n\s*\n|\n(?=#)|\n(?=- )", text):
-        para = " ".join(para.split())
-        out += [s for s in re.split(r"(?<=[.!?])\s+(?=[A-Z*\[`(])", para) if s]
-    return out
-
-
-# ---- checkers: each returns (ok, detail) --------------------------------------------------------------------------
-
-
-def _rpc(method: str, params: list) -> dict:
-    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
-    req = urllib.request.Request(RPC, body, {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.load(r)["result"]
-
-
-def _account(addr: str) -> dict | None:
-    return _rpc("getAccountInfo", [addr, {"encoding": "base64", "commitment": "confirmed"}])["value"]
-
-
-def program_executable() -> tuple[bool, str]:
-    v = _account(PROGRAM)
-    ok = bool(v and v["executable"])
-    return ok, f"{PROGRAM} executable={bool(v and v['executable'])}"
-
-
-def _config() -> dict:
-    from solders.pubkey import Pubkey
-
-    from knos.jobs.sol import parse_config
-    pda = Pubkey.find_program_address([b"config2"], Pubkey.from_string(PROGRAM))[0]
-    v = _account(str(pda))
-    return parse_config(base64.b64decode(v["data"][0]))
-
-
-def fee_250_bps() -> tuple[bool, str]:
-    cfg = _config()
-    return cfg["fee_bps"] == 250 and cfg["min_fee"] == 50_000, f"config2 fee_bps={cfg['fee_bps']} min_fee={cfg['min_fee']}"
-
-
-def authority_is_vault() -> tuple[bool, str]:
-    from solders.pubkey import Pubkey
-    loader = Pubkey.from_string("BPFLoaderUpgradeab1e11111111111111111111111")
-    pd = Pubkey.find_program_address([bytes(Pubkey.from_string(PROGRAM))], loader)[0]
-    v = _account(str(pd))
-    raw = base64.b64decode(v["data"][0])
-    auth = str(Pubkey.from_bytes(raw[13:45])) if raw[12] == 1 else None
-    return auth == VAULT, f"upgrade authority {auth}"
-
-
-def _gh(path: str) -> dict:
-    out = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=30, check=True).stdout
-    return json.loads(out)
-
-
-def repo_public() -> tuple[bool, str]:
-    r = _gh(f"repos/{REPO}")
-    return r.get("full_name", "").lower() == REPO.lower() and not r.get("private"), f"repo {r.get('full_name')}"
-
-
-def index_release() -> tuple[bool, str]:
-    r = _gh(f"repos/{REPO}/releases/tags/{INDEX_TAG}")
-    names = [a["name"] for a in r.get("assets", [])]
-    return "index.json" in names, f"release {INDEX_TAG} assets {names}"
-
-
-def bench_18_2() -> tuple[bool, str]:
-    s = json.loads(read("docs/bench.json"))["market"]["sentence"]
-    return "**55 (18.2%) had a failing check" in s, "docs/bench.json market: 55 (18.2%) failed"
-
-
-def tamper_counts() -> tuple[bool, str]:
-    t = read("docs/TAMPER.md")
-    return "CI green fooled 16/20, Knos fooled 1/20" in t, "docs/TAMPER.md: CI green 16/20, Knos 1/20"
-
-
-def mainnet_cap_500() -> tuple[bool, str]:
-    t = read("src/knos/jobs/net.py")
-    return "MAINNET_CAP_UNITS = 500 * 1_000_000" in t, "src/knos/jobs/net.py MAINNET_CAP_UNITS = 500 USDC"
-
-
-def index_every_6h() -> tuple[bool, str]:
-    t = read(".github/workflows/index.yml")
-    return '"17 */6 * * *"' in t, "index.yml cron 17 */6 * * *"
-
-
-def plans_labelled() -> tuple[bool, str]:
-    t = read(PITCH)
-    ok = "## The next 12 months (plans, not shipped)" in t and "These are plans." in t
-    return ok, "pitch 12-month section is labelled as plans"
-
-
-def pitch_sentence() -> tuple[bool, str]:
-    return PITCH_SENTENCE in read(PITCH), "pitch sentence present"
-
-
-def cited(url: str) -> Callable[[], tuple[bool, str]]:
-    """An outside number: the claim must carry its source link in the same sentence (checked by the regex)."""
-    return lambda: (True, f"outside source, cited: {url}")
-
-
-@dataclass
-class Claim:
-    file: str
-    pattern: str
-    check: Callable[[], tuple[bool, str]]
-    online: bool = False
-
-
-CLAIMS = [
-    # README opening
-    Claim(README, r"Knos takes 2\.5% \(at least 0\.05 USDC\), only when\s+the agent is paid", fee_250_bps, True),
-    Claim(README, r"about 1\.8M marked pull requests in the week to 27 Sep\s+\(\[amplifying\.ai tracker\]"
-                  r"\(https://amplifying\.ai/coding-agents/trends\)\)", cited("amplifying.ai")),
-    Claim(README, r"567 Claude Code PRs, 54\.9% were\s+merged without changes requested \(\[arXiv 2509\.14745\]"
-                  r"\(https://arxiv\.org/abs/2509\.14745\)\)", cited("arXiv 2509.14745")),
-    Claim(README, r"18\.2% of agent PRs that\s+say \"tests pass\" had failing CI at that commit", bench_18_2),
-    Claim(README, r"Archestra's bounty issues drew 15–42 PRs each\s+\(\[example\]"
-                  r"\(https://github\.com/archestra-ai/archestra/issues/1301\)\)",
-          cited("github.com/archestra-ai/archestra/issues/1301")),
-    Claim(README, r"capped at\s+500 USDC per job until an external audit", mainnet_cap_500),
-    # home page hero
-    Claim(HOME, r"rebuilt every 6 hours, its Merkle root attested on Solana devnet", index_every_6h),
-    Claim(HOME, r"Agent PR Index", index_release, True),
-    # submission
-    Claim(SUB, r"Knos takes 2\.5% \(at least 0\.05 USDC\)", fee_250_bps, True),
-    Claim(SUB, r"The escrow program is `GwmbMFvyHHwHug5em9dv26oXz2zTgXKGsNdrBxPayRPq`", program_executable, True),
-    Claim(SUB, r"upgrade authority is the Squads vault `4G3cznCnwCUPBCZwzKiLupjdgB5pSoCcGWNGuFv4TYFo`",
-          authority_is_vault, True),
-    Claim(SUB, r"capped at 500 USDC per job until an external audit", mainnet_cap_500),
-    Claim(SUB, r"github\.com/drexthealpha/Knos", repo_public, True),
-    # pitch script
-    Claim(PITCH, re.escape(PITCH_SENTENCE), pitch_sentence),
-    Claim(PITCH, r"18\.2% of agent\s+PRs that say tests pass had failing CI", bench_18_2),
-    Claim(PITCH, r"CI green fooled 16/20, Knos fooled 1/20", tamper_counts),
-    Claim(PITCH, r"The fee is 2\.5%", fee_250_bps, True),
-    Claim(PITCH, r"The next 12 months \(plans, not shipped\)", plans_labelled),
-    Claim(PITCH, r"Bring in an outside signer and a 24 h time lock on the upgrade multisig", plans_labelled),
+PITCH = ["README.md", "web/index.html", "docs/submission/SUBMISSION.md", "docs/submission/pitch_script.md",
+         "docs/submission/demo_script.md"]
+SENTENCE = "AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed."
+NUMBER = re.compile(r"\$?\d[\d,]*(?:\.\d+)?%?")
+NOT_CLAIMS = [
+    r"<!-- bench:(\w+) -->.*?<!-- /bench:\1 -->",            # generated; bench_docs.py --check covers it
+    r"```.*?```", r"`[^`\n]*`", r"<pre.*?</pre>", r"<code>.*?</code>",   # code
+    r"\]\([^)]*\)", r"https?://\S+",                           # link addresses
+    r"\b\d+\.\d+\.\d+\b", r"\bKnos 0\.\d+\b", r"\b0\.\d–0\.\d\.\d\b",     # versions
+    r"\b\d{1,2}(?:–\d{1,2})? (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*(?: \d{4})?\b", r"\b(?:Sep|Oct)[a-z]* 20\d\d\b",
+    r"\b20[12]\d\b",                                           # years
+    r"\(\d:\d\d\)",                                            # clock times in the scripts
+    r"(?m)^\s*\d+\.\s",                                        # list numbering
+    r"(?m)^#+ \d+\.\s", r"\bsection \d+\b", r"\babout \d+ words\b",       # headings, cross-references, the word count
+    r"\b0\.\d and\b",                                         # "0.2 and 0.3.0-0.3.9"
+    r"bounty 20\b", r"\b20\.00 USDC\b",                        # the amount typed in the example
+    r"#\d+\b|#N\b", r"\bRS256\b|\bSHA-256\b|\bRSA-\d+\b|\bHS256\b|\buid \d+\b|\b360px\b",
 ]
 
 
-def uncovered(path: str) -> list[str]:
-    pats = [re.compile(c.pattern) for c in CLAIMS if c.file == path]
-    flat = [re.compile(" ".join(c.pattern.replace(r"\s+", " ").split())) for c in CLAIMS if c.file == path]
-    bad = []
-    for s in sentences(section(path)):
-        if re.search(r"\d", s) and not any(p.search(s) for p in pats + flat):
-            bad.append(s)
-    return bad
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def pitch_text(path: str) -> str:
+    text = read(path)
+    if path.endswith(".html"):
+        m = re.search(r'<section id="view-check".*?</section>', text, re.S)
+        text = m.group(0) if m else ""
+    for pat in NOT_CLAIMS:
+        text = re.sub(pat, " ", text, flags=re.S)
+    if path.endswith(".html"):
+        text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    return text
+
+
+def numbers(path: str) -> list[tuple[str, str]]:
+    """(number, the line it is on) for every number in the file's pitch-facing text."""
+    out = []
+    for line in pitch_text(path).splitlines():
+        for m in NUMBER.finditer(line):
+            tok = m.group(0).rstrip(",.")
+            if tok and tok not in ("$",):
+                out.append((tok, " ".join(line.split())[:140]))
+    return out
+
+
+# ---- checking a fact ----------------------------------------------------------------------------------------------
+
+def _dig(obj, path: str):
+    for part in path.split("."):
+        obj = obj[int(part)] if isinstance(obj, list) else obj[part]
+    return obj
+
+
+def _rpc(method: str, params: list):
+    import os
+    url = os.environ.get("KNOS_RPC", "https://api.devnet.solana.com")
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+    with urllib.request.urlopen(urllib.request.Request(url, body, {"Content-Type": "application/json"}), timeout=20) as r:  # noqa: S310
+        return json.load(r)["result"]
+
+
+def live_immutable() -> tuple[bool, str]:
+    """Both programs are deployed on devnet and have no upgrade authority."""
+    import base64
+
+    from knos import mainnet_check as mc
+    from knos.settle import oidc
+
+    def account(addr: str):
+        v = _rpc("getAccountInfo", [addr, {"encoding": "base64", "commitment": "confirmed"}])["value"]
+        return (v["owner"], base64.b64decode(v["data"][0])) if v else None
+    fetch = mc.Fetch(account=account, verified=lambda n: None, program_checks=lambda: (False, ""), get=lambda u: None,
+                     audit=lambda: (False, ""))
+    got = [(name, *mc.program_data(fetch, oidc.IDS[name])[:2]) for name in mc.PROGRAMS]
+    ok = all(deployed and authority is None for _n, deployed, authority in got)
+    return ok, "; ".join(f"{n}: {'not deployed' if not d else 'immutable' if a is None else f'upgradeable by {a}'}" for n, d, a in got)
+
+
+def live_run() -> tuple[bool, str]:
+    """A whole bounty has run on the deployed programs: at least one GitHub account has been paid on devnet."""
+    import base64
+
+    from knos.settle import pay
+    got = _rpc("getProgramAccounts", [str(pay.PAY_ID), {"encoding": "base64", "commitment": "confirmed",
+                                                         "filters": [{"dataSize": 32}]}]) or []
+    paid = sum(pay.read_rep(base64.b64decode(a["account"]["data"][0])).paid_jobs for a in got)
+    return paid > 0, f"{paid} payment(s) to {len(got)} GitHub account(s) recorded by knos-pay on devnet"
+
+
+LIVE = {"immutable": live_immutable, "run": live_run}
+
+
+def check(fact: dict, offline: bool) -> tuple[bool | None, str]:
+    """(ok, detail); ok is None for a fact that is not checked in this mode."""
+    if "json" in fact:
+        got = _dig(json.loads(read(fact["json"])), fact["path"])
+        return got == fact["equals"], f"{fact['json']} {fact['path']} = {got!r}"
+    if "file" in fact:
+        text = read(fact["file"])
+        found = re.search(fact["matches"], text) if "matches" in fact else fact["has"] in text
+        return bool(found), f"{fact['file']} {'has' if found else 'does not have'} {fact.get('has') or fact.get('matches')!r}"
+    if "source" in fact:
+        ok = fact["source"].startswith("https://") and bool(fact.get("read"))
+        return ok, f"cited: {fact['source']} (read {fact.get('read')})"
+    if "live" in fact:
+        if offline:
+            return None, f"live: {fact['live']}"
+        return LIVE[fact["live"]]()
+    return False, "a fact needs json, file, source or live"
 
 
 def main(argv: list[str] | None = None) -> int:
     offline = "--offline" in (argv if argv is not None else sys.argv[1:])
+    facts = json.loads(read("docs/facts.json"))["facts"]
+    allowed = {s for f in facts for s in f["say"]}
     fails = 0
-    for path in (README, HOME, SUB, PITCH):
-        for s in uncovered(path):
+    used: set[str] = set()
+    for path in PITCH:
+        for tok, line in numbers(path):
+            used.add(tok)
+            if tok not in allowed:
+                fails += 1
+                print(f"FAIL  {path}: {tok!r} has no fact in docs/facts.json: {line}")
+    for path in ("README.md", "docs/submission/SUBMISSION.md", "docs/submission/pitch_script.md", "web/index.html"):
+        if SENTENCE not in html.unescape(read(path)):
             fails += 1
-            print(f"FAIL  {path}: number-bearing sentence not covered by any claim: {s[:160]}")
-    for c in CLAIMS:
-        if not re.search(c.pattern, section(c.file)):
+            print(f"FAIL  {path}: the one sentence is missing")
+    for f in facts:
+        if not (set(f["say"]) & used) and "live" not in f:
             fails += 1
-            print(f"FAIL  {c.file}: claim text not found: /{c.pattern[:80]}/")
-            continue
-        if c.online and offline:
-            print(f"SKIP  {c.file}: {c.check.__name__} (online)")
+            print(f"FAIL  docs/facts.json: nothing says {f['say']} any more ({f['what']}): remove the fact")
             continue
         try:
-            ok, detail = c.check()
-        except Exception as why:  # a checker that cannot run is a failure, not a pass
+            ok, detail = check(f, offline)
+        except Exception as why:  # noqa: BLE001 - a checker that cannot run is a failure, not a pass
             ok, detail = False, f"{type(why).__name__}: {why}"
-        fails += not ok
-        print(f"{'PASS' if ok else 'FAIL'}  {c.file}: {detail}")
-    print(f"{len(CLAIMS)} claims, {fails} failures" + (" (offline)" if offline else ""))
+        fails += ok is False
+        print(f"{'SKIP' if ok is None else 'PASS' if ok else 'FAIL'}  {', '.join(f['say']) or f['what'][:40]}: {detail}")
+    print(f"{len(facts)} facts, {len(used)} numbers in the pitch-facing text, {fails} failures" + (" (offline)" if offline else ""))
     return 1 if fails else 0
 
 

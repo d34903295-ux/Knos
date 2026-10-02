@@ -1,9 +1,9 @@
 """Reachability: which knos modules are imported (statically, at any depth, including imports inside functions) from
 the product's entry points. Anything not reached is unused.
 
-Entry points: the console script (knos.cli:main), `python -m knos`, the MCP server (knos mcp, through cli), the public
-SDKs (knos.sdk, knos.jobs.api, knos.core), and the repo scripts and examples. CI runs `python scripts/deadcode.py` and
-fails if any module is unreached; functions are checked by vulture (scripts/vulture_whitelist.py).
+Entry points: the console script (knos.cli:main), `python -m knos`, the relay the always-on worker runs
+(knos.proof.ghrelay), and the repo's scripts. CI runs `python scripts/deadcode.py` and fails if any module is
+unreached; functions are checked by vulture (scripts/vulture_whitelist.py).
 """
 import ast
 import sys
@@ -11,9 +11,7 @@ from pathlib import Path
 
 ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-ENTRY = ["knos.cli", "knos.__main__", "knos.sdk", "knos.jobs.api", "knos.mcp",
-         "knos.core",  # knos.core: the embeddable claims API documented in docs/INTEGRATE.md
-         "knos.proof.ghrelay"]  # run by the always-on worker (worker.yml: python -m knos.proof.ghrelay)
+ENTRY = ["knos.cli", "knos.__main__", "knos.proof.ghrelay"]
 SCRIPTS = [p for p in list((ROOT / "scripts").glob("*.py")) + list((ROOT / "examples").glob("*.py"))
            if p.name not in ("deadcode.py", "vulture_whitelist.py")]
 

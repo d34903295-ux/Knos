@@ -23,7 +23,7 @@ from pathlib import Path
 from . import checks, claims, history
 
 KIND_CHECKS = {"tests": "tests", "ci": "ci", "pypi": "pypi", "urls": "urls", "deleted": "deleted", "author": "author",
-               "release": "author"}
+               "release": "author", "done": "tests"}
 
 
 def config(repo: Path) -> dict:
@@ -55,9 +55,6 @@ class Verdict:
     def digest(self) -> str:
         return hashlib.sha256("".join(sorted(r.digest() for r in self.results)).encode()).hexdigest()
 
-    def failures(self) -> list[checks.Result]:
-        return [r for r in self.results if not r.ok]
-
     def explain(self) -> str:
         lines = [f"{'ok ' if r.ok else 'NO '} {r.name}: {r.detail}" for r in self.results]
         if self.required_by_history:
@@ -83,6 +80,8 @@ def _cache_path() -> Path:
 def needed(claim: claims.Claim, cfg: dict, store, repo: Path | None = None,
            agent: str | None = None) -> tuple[list[str], set[str]]:
     names = {KIND_CHECKS[k] for k in claim.kinds if k in KIND_CHECKS}
+    if "tests" in names and "tests" not in claim.kinds and repo is not None and not checks.test_command(repo, cfg.get("tests")):
+        names.discard("tests")   # a bare "done" in a repository with no test command Knos can find: nothing to run
     if repo is not None and any(r.get("origin") == "contributing" for r in history.repo_rules(store, repo)):
         names.add("repo-rules")
     learned = history.required(store, claim.kinds | ({"release"} if "pypi" in claim.kinds else set()))
@@ -160,7 +159,7 @@ def run_check(name: str, repo: Path, claim: claims.Claim, cfg: dict, runners: di
         spec = next((c for c in cfg.get("check", []) if f"custom:{c.get('name')}" == name), {})
         return checks.custom(repo, spec.get("name", name), spec.get("run", "false"))
     if name.startswith("tamper:"):   # fail closed: only the prove judge (passed in as a runner) can clear it
-        return checks.Result(name, False, f"required since {name[7:]} was caught here; run by knos.jobs.prove.judge")
+        return checks.Result(name, False, f"required since {name[7:]} was caught here; run by the judge (knos.judge)")
     return checks.Result(name, False, "unknown check")
 
 

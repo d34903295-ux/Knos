@@ -1,0 +1,17 @@
+[package]
+name = "oidc_gate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "MIT"
+description = "Example: any Solana program can require a GitHub-signed fact by reading a knos-oidc token account."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "=2.2.1"
+knos_oidc = { path = "../../programs/knos_oidc", features = ["no-entrypoint"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

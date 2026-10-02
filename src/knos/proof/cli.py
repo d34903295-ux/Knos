@@ -1,4 +1,4 @@
-"""`knos proof ...`: the same engine the Stop hook runs, by hand."""
+"""`knos proof ...`: the engine the Stop hook runs, by hand; and the judge prove.yml runs on GitHub."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
         from . import history
         try:
             return history.SibylStore.for_repo(repo)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - no store: still prove, just without memory
             return history.NullStore()
 
     @proof.command("check")
@@ -55,56 +55,87 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
     @proof.command("checks-hash")
     def checks_hash(dir_: Path = typer.Option(..., "--dir", help="e.g. .knos/acceptance/<issue>")) -> None:
         """Print the sha256 of an acceptance bundle (sorted "path\\0sha256(content)\\n" lines), as fixed on chain."""
-        from ..jobs import prove
+        from .. import judge
         try:
-            out.print(prove.checks_hash(dir_), markup=False)
+            out.print(judge.checks_hash(dir_), markup=False)
         except ValueError as why:
             raise Stop(str(why)) from None
 
-    @proof.command("aud")
-    def aud(job: str = typer.Option(..., "--job"), head: str = typer.Option(..., "--head"),
-            checks: str = typer.Option(..., "--checks"), payout: str = typer.Option(..., "--payout")) -> None:
-        """Print the OIDC audience knos:<job>:<head>:<checks>:<payout>, refusing a malformed part."""
-        from ..jobs import prove
-        try:
-            out.print(prove.build_aud(job, head, checks, payout), markup=False)
-        except ValueError as why:
-            raise Stop(f"Bad audience: {why}") from None
+    def _say(v: dict, evidence: Path | None) -> None:
+        if evidence:
+            evidence.write_text(json.dumps(v, indent=1, default=str), encoding="utf-8")
+        for r in v["evidence"].get("required_by_history", []):
+            out.print(f"REQUIRED by this repo's history: {r}", markup=False, emoji=False)
+        for r in v["reasons"]:
+            out.print(f"NO  {r}", markup=False, emoji=False)
+        if v["checks_hash"]:
+            out.print(f"checks_hash {v['checks_hash']}", markup=False)
+        if not v["passed"]:
+            out.print("[red]not proven[/red]")
+            raise typer.Exit(1)
+        out.print("[green]proven[/green]")
+
+    def _inputs(store, diff, body_file, checks_file, repo_name, head, wait):
+        from .. import judge
+        from . import history
+        st = history.SibylStore.local(store) if store else history.NullStore()
+        diff_text = diff.read_text(encoding="utf-8", errors="replace") if diff else None
+        body = body_file.read_text(encoding="utf-8", errors="replace") if body_file else ""
+        runs = None
+        if checks_file:
+            got = json.loads(checks_file.read_text(encoding="utf-8"))
+            runs = got.get("check_runs", []) if isinstance(got, dict) else got
+        elif head and repo_name:
+            runs = judge.check_runs(repo_name, head, wait=wait, body=body)
+        return st, diff_text, body, runs
+
+    common = dict(
+        diff=typer.Option(None, "--diff", help="the pull request's unified diff from the base"),
+        evidence=typer.Option(None, "--evidence", help="write the evidence JSON here"),
+        store=typer.Option(None, "--store", help="a directory the judge remembers in (Sibyl's local store: <dir>/sibyl.db)"),
+        repo_name=typer.Option("", "--repo", help="owner/name"),
+        agent=typer.Option("", "--agent", help="the pull request's author"),
+        body_file=typer.Option(None, "--body-file", help="the pull request's description"),
+        checks_file=typer.Option(None, "--checks-file", help="the head commit's check runs, as JSON (else fetched)"),
+        head=typer.Option("", "--head", help="the head commit, to fetch its check runs from GitHub"),
+        wait=typer.Option(0, "--wait", help="seconds to wait for the commit's other checks to finish"),
+    )
+
+    @proof.command("gate")
+    def gate(base: Path = typer.Option(..., "--base", help="the base branch checkout"),
+             issue: str = typer.Option("", "--issue"),
+             diff: Path = common["diff"], evidence: Path = common["evidence"], store: Path = common["store"],
+             repo_name: str = common["repo_name"], agent: str = common["agent"], body_file: Path = common["body_file"],
+             checks_file: Path = common["checks_file"], head: str = common["head"], wait: int = common["wait"]) -> None:
+        """Every bounty pull request, before merge, running none of its code: the repo's rules, what its history
+        requires, and whether the description's "tests pass" is true at the head commit. Exit 1 unless it passes."""
+        from .. import judge
+        st, diff_text, body, runs = _inputs(store, diff, body_file, checks_file, repo_name, head, wait)
+        _say(judge.gate(base, diff_text, st, repo_name or None, agent or None, body, runs, issue), evidence)
 
     @proof.command("judge")
-    def judge(base: Path = typer.Option(..., "--base", help="the base branch checkout"),
-              pr: Path = typer.Option(..., "--pr", help="the pull request head source"),
-              issue: str = typer.Option(..., "--issue", help="the acceptance bundle: .knos/acceptance/<issue>/"),
-              changed: Path = typer.Option(None, "--changed", help="file listing the PR's changed paths"),
-              evidence: Path = typer.Option(None, "--evidence", help="write the evidence JSON here"),
-              diff: Path = typer.Option(None, "--diff", help="the PR's unified diff from the base (for repo rules)"),
-              store: Path = typer.Option(None, "--store", help="a directory the judge remembers tampering in (Sibyl's local store: <dir>/sibyl.db)"),
-              repo_name: str = typer.Option("", "--repo", help="owner/name, the key tamper rules are kept under"),
-              agent: str = typer.Option("", "--agent", help="the PR author, the other tamper key")) -> None:
-        """prove.yml's check job: the repo's CONTRIBUTING rules first, then overlay, protected paths, sentinel,
-        fail-to-pass. A violation is learned: that check is required on every later PR to this repo or by this agent.
-        Exit 1 unless it passes."""
-        from ..jobs import prove
-        from . import engine, history
+    def judge_cmd(base: Path = typer.Option(..., "--base", help="the base branch checkout"),
+                  pr: Path = typer.Option(..., "--pr", help="the pull request head source"),
+                  issue: str = typer.Option(..., "--issue", help="the acceptance bundle: .knos/acceptance/<issue>/"),
+                  changed: Path = typer.Option(None, "--changed", help="file listing the PR's changed paths"),
+                  setup: str = typer.Option("", "--setup", help="shell command that installs a tree's dependencies"),
+                  sandbox: str = typer.Option("auto", "--sandbox", help="auto, require or off"),
+                  diff: Path = common["diff"], evidence: Path = common["evidence"], store: Path = common["store"],
+                  repo_name: str = common["repo_name"], agent: str = common["agent"],
+                  body_file: Path = common["body_file"], checks_file: Path = common["checks_file"],
+                  head: str = common["head"], wait: int = common["wait"]) -> None:
+        """Tests mode: the gate, then the funder's acceptance checks in a sandbox (fail on the base, pass on the pull
+        request). Exit 1 unless it passes."""
+        from .. import judge
+        from . import engine
         cfg = dict(engine.config(base))
         cfg["issue"] = issue
         names = None
         if changed:
             names = [x.strip() for x in changed.read_text(encoding="utf-8").splitlines() if x.strip()]
-        st = history.SibylStore.local(store) if store else history.NullStore()
-        diff_text = diff.read_text(encoding="utf-8", errors="replace") if diff else None
-        v = prove.judge_with_rules(base, pr, cfg, names, diff_text, st, repo_name or None, agent or None)
-        if evidence:
-            evidence.write_text(json.dumps(v, indent=1), encoding="utf-8")
-        for r in v["evidence"].get("required_by_history", []):
-            out.print(f"REQUIRED by this repo's history: {r}", markup=False, emoji=False)
-        for r in v["reasons"]:
-            out.print(f"NO  {r}", markup=False, emoji=False)
-        out.print(f"checks_hash {v['checks_hash']}", markup=False)
-        if not v["passed"]:
-            out.print("[red]not proven[/red]")
-            raise typer.Exit(1)
-        out.print("[green]proven[/green]")
+        st, diff_text, body, runs = _inputs(store, diff, body_file, checks_file, repo_name, head, wait)
+        _say(judge.judge_with_rules(base, pr, cfg, names, diff_text, st, repo_name or None, agent or None, body, runs,
+                                    setup or None, sandbox), evidence)
 
     @proof.command("observe")
     def observe(sha: str = typer.Argument(...), check: str = typer.Argument(..., help="e.g. ci"),
@@ -134,26 +165,3 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
             out.print(f"  a {r['when']} claim now requires {r['require']}  ({r.get('because', '')})", markup=False)
         if not rules:
             out.print("No false done in this repo's history yet.")
-
-    @proof.command("receipt")
-    def receipt(claim: str = typer.Argument(...), publish: bool = typer.Option(False, "--publish",
-                                                                                 help="attest it on Solana devnet")) -> None:
-        """Prove the claim, then print the Merkle root of the evidence (and, with --publish, a devnet receipt)."""
-        from . import checks, engine
-        from . import receipt as rc
-        repo = repo_of(None)
-        v = engine.evaluate(repo, claim, _store(repo))
-        if not v.ok or not v.results:
-            out.print(v.explain(), markup=False)
-            raise Stop("Not proven: no receipt for a claim Knos cannot prove.")
-        ev = rc.evidence(v.results)
-        root = rc.merkle_root(rc.leaves(ev))
-        out.print(f"evidence root {root.hex()}")
-        (repo / ".knos").mkdir(exist_ok=True)
-        (repo / ".knos" / f"receipt-{root.hex()[:16]}.json").write_text(json.dumps(
-            {"claim": claim, "commit": checks.head(repo), "evidence": ev, "root": root.hex()}, indent=1), "utf-8")
-        if publish:
-            from ..jobs import net
-            from ..team import rpc
-            sig, att = rc.publish(rpc.CLUSTERS["devnet"], net.key(), root, checks.head(repo), claim)
-            out.print(f"receipt on devnet: {sig}\n  {rc.page_url(att)}", markup=False)

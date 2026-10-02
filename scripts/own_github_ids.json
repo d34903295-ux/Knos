@@ -1,0 +1,6 @@
+{
+ "note": "GitHub account ids that are Knos's own (the maintainer and the accounts its live tests run as). scripts/network_stats.py never counts their activity as outside use.",
+ "ids": [
+  142920951
+ ]
+}

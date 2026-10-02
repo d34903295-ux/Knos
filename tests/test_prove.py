@@ -1,12 +1,10 @@
-"""GitHub-proven jobs: prove.yml keeps untrusted pull request code and the OIDC token apart, `knos prove --job` refuses
+"""prove.yml keeps untrusted pull request code and the OIDC token apart, the judge refuses what it should, and
 a token the chain would refuse before it costs a transaction, and `knos proof run` is the check job's verdict."""
 
 from __future__ import annotations
 
-import base64
 import json
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
@@ -14,9 +12,6 @@ import pytest
 from knos.cli import main
 
 ROOT = Path(__file__).resolve().parents[1]
-JOB = "ab" * 32
-AUD = f"knos:{JOB}:{'c' * 40}:{'d' * 64}:CVhqj6hcR1Vd6r1c7m1V1rQ2T5p3h7sQyYxWbF2kFqL"
-REF = "drexthealpha/Knos/.github/workflows/prove.yml@refs/tags/v0.3.7"
 
 
 def run(capsys, *args: str) -> tuple[int, str]:
@@ -34,18 +29,31 @@ def _yaml(path: Path) -> dict:
 
 # ---- prove.yml ---------------------------------------------------------------------------------------------------
 
-def test_prove_yml_is_a_reusable_workflow_taking_the_job_and_issue():
+def test_prove_yml_is_a_reusable_workflow_taking_the_issue_and_no_secret():
     doc = _yaml(ROOT / ".github" / "workflows" / "prove.yml")
     call = doc["on"]["workflow_call"]
     assert set(doc["on"]) == {"workflow_call"}
-    assert call["inputs"]["job"]["required"] is True and call["inputs"]["issue"]["required"] is True
-    assert call["secrets"]["KNOS_PROVER_KEY"]["required"] is False     # permissionless: the relay sends the token
+    assert call["inputs"]["issue"]["required"] is True and "job" not in call["inputs"]
+    assert "secrets" not in call                                   # permissionless: anyone relays the token
     assert doc["permissions"] == {}
 
 
-def test_check_judges_pr_code_without_any_token_it_could_misuse():
+def test_a_merge_mints_the_token_in_a_job_that_runs_no_pr_code():
+    merged = _yaml(ROOT / ".github" / "workflows" / "prove.yml")["jobs"]["merged"]
+    assert merged["if"] == "github.event.action == 'closed' && github.event.pull_request.merged == true"
+    assert merged["permissions"] == {"id-token": "write"}
+    assert not any(str(s.get("uses", "")).startswith("actions/checkout") for s in merged["steps"])
+    run = "\n".join(str(s.get("run", "")) for s in merged["steps"])
+    assert 'aud="knos:pay:$REPO_ID:$ISSUE:$author:$HEAD:' in run and run.count(":0\"") == 1     # mode 0, zero checks
+    envs = {k: v for s in merged["steps"] for k, v in (s.get("env") or {}).items()}
+    assert envs["AUTHOR_ID"] == "${{ github.event.pull_request.user.id }}" and envs["REPO_ID"] == "${{ github.repository_id }}"
+    assert "pull_request.body" not in json.dumps(merged) and "github.event" not in run          # event data via env only
+
+
+def test_check_runs_on_every_bounty_pr_with_no_token_it_could_misuse():
     check = _yaml(ROOT / ".github" / "workflows" / "prove.yml")["jobs"]["check"]
-    assert check["permissions"] == {"contents": "read"}
+    assert check["if"] == "github.event.action != 'closed'" and "needs" not in check       # both modes: the status to require
+    assert check["permissions"] == {"contents": "read", "checks": "read"}                  # read-only; no id-token
     text = json.dumps(check)
     assert "secrets." not in text and "id-token" not in text
     co = next(s for s in check["steps"] if str(s.get("uses", "")).startswith("actions/checkout"))
@@ -53,124 +61,76 @@ def test_check_judges_pr_code_without_any_token_it_could_misuse():
     assert co["with"]["persist-credentials"] is False
     runs = "\n".join(str(s.get("run", "")) for s in check["steps"])
     assert 'archive "$HEAD" | tar -x -C pr' in runs                               # PR source in its own dir
-    assert "knos proof judge --base base --pr pr" in runs
-    assert set(check["outputs"]) == {"passed", "head_sha", "checks_hash"}
+    assert "knos proof gate" in runs and "knos proof judge" in runs
+    assert "--sandbox require" in runs                                            # PR code never runs unboxed
+    assert "pull_request.body" not in runs and "github.event" not in runs         # event data via env only
+    assert set(check["outputs"]) == {"passed", "mode", "head_sha", "checks_hash"}
+    # the pull request's own dependency install is the judge's to run, in the sandbox: no step runs it as the runner
+    assert not any("inputs.setup" in str(s.get("run", "")) or s.get("working-directory") == "pr" for s in check["steps"])
+    judge = next(s for s in check["steps"] if s.get("id") == "judge")
+    assert judge["env"]["SETUP"] == "${{ inputs.setup }}" and set(judge["env"]) == {"ISSUE", "HEAD", "AUTHOR", "SETUP", "GH_TOKEN"}
 
 
-def test_attest_runs_no_pr_code_and_mints_the_five_part_audience():
-    jobs = _yaml(ROOT / ".github" / "workflows" / "prove.yml")["jobs"]
+def test_memory_is_saved_only_after_a_refusal_that_ran_no_pr_code():
+    check = _yaml(ROOT / ".github" / "workflows" / "prove.yml")["jobs"]["check"]
+    save = next(s for s in check["steps"] if str(s.get("uses", "")).startswith("actions/cache/save"))
+    assert save["if"] == "always() && steps.judge.outputs.learn == 'true'"
+    run = next(s for s in check["steps"] if s.get("id") == "judge")["run"]
+    assert 'startswith("repo rule:") or startswith("touches protected path") or startswith("claim:")' in run
+    restore = next(s for s in check["steps"] if str(s.get("uses", "")).startswith("actions/cache/restore"))
+    assert restore["with"]["key"] != save["with"]["key"] and save["with"]["key"].startswith(restore["with"]["key"])
+
+
+def test_attest_runs_no_pr_code_and_mints_the_pay_audience():
+    doc = _yaml(ROOT / ".github" / "workflows" / "prove.yml")
+    jobs = doc["jobs"]
     attest = jobs["attest"]
     assert attest["needs"] == "check"
-    assert attest["if"] == "needs.check.outputs.passed == 'true'"
+    assert attest["if"] == "needs.check.outputs.passed == 'true' && needs.check.outputs.mode == 'tests'"
     assert attest["permissions"] == {"id-token": "write"}
     co = [s for s in attest["steps"] if str(s.get("uses", "")).startswith("actions/checkout")]
     assert len(co) == 1 and co[0]["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert co[0]["with"]["sparse-checkout"] == ".knos/acceptance/${{ inputs.issue }}"
     runs = "\n".join(str(s.get("run", "")) for s in attest["steps"])
     assert 'test "$got" = "$CHECKS"' in runs                                     # recomputed from the base
-    assert "knos-payout:" in runs and 'knos proof aud --job "$JOB" --head "$HEAD"' in runs
+    assert 'aud="knos:pay:$REPO_ID:$ISSUE:$author:$HEAD:$CHECKS:1"' in runs      # the author's GitHub id, no address
+    assert "knos-payout" not in runs and "KNOS_PROVER_KEY" not in json.dumps(attest)
     assert "audience=$aud" in runs and "ACTIONS_ID_TOKEN_REQUEST_URL" in runs
     up = next(s for s in attest["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact"))
     assert up["with"]["name"] == "knos-proof"
     envs = {k: v for s in attest["steps"] for k, v in (s.get("env") or {}).items()}
-    assert envs["JOB"] == "${{ inputs.job }}" and envs["CHECKS"] == "${{ needs.check.outputs.checks_hash }}"
-    assert envs["KNOS_MEMBER_KEY"] == "${{ secrets.KNOS_PROVER_KEY }}"
-    assert 'knos prove --job "$JOB" --jwt-file' in runs
+    assert envs["CHECKS"] == "${{ needs.check.outputs.checks_hash }}" and envs["AUTHOR_ID"] == "${{ github.event.pull_request.user.id }}"
     assert "pip install --system \"knos==" in runs                  # knos from PyPI, never from the PR
+    # the judge is the code at this workflow file's own commit (what the bounty pinned); no caller input can swap it
+    assert set(doc["on"]["workflow_call"]["inputs"]) == {"issue", "setup"}
+    for job in ("check", "attest"):
+        install = next(s for s in jobs[job]["steps"] if "install knos" in str(s.get("name", "")))
+        assert install["env"] == {"REF": "${{ job.workflow_sha }}", "REPO": "${{ job.workflow_repository }}"}
+        assert "inputs." not in install["run"]
+    try:
+        import tomllib
+    except ModuleNotFoundError:   # Python 3.10
+        import tomli as tomllib  # type: ignore[no-redef]
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    assert f'"knos=={version}"' in runs                              # the fallback is this very release
+    # a token exists only after tests mode passed or a maintainer merged: a merge-mode check that passes mints nothing
+    assert doc["on"]["workflow_call"]["outputs"]["passed"]["value"] == \
+        "${{ jobs.attest.result == 'success' || jobs.merged.result == 'success' }}"
 
 
 def test_the_caller_template_uses_pull_request_target_and_a_pinned_commit():
     doc = _yaml(ROOT / "examples" / "knos-workflow.yml")
-    assert {"pull_request_target", "issue_comment"} <= set(doc["on"])
+    assert set(doc["on"]) == {"pull_request_target", "issue_comment", "issues"}
     prove = doc["jobs"]["prove"]
     pin = prove["uses"].split("@")
-    assert pin[0] == "drexthealpha/Knos/.github/workflows/prove.yml" and len(pin[1]) == 40   # a commit, never a tag
-    assert prove["with"]["job"] == "${{ needs.job.outputs.id }}"
-    assert prove["with"]["issue"] == "${{ needs.job.outputs.issue }}"
-    assert prove["permissions"] == {"contents": "read", "id-token": "write"}
+    # a commit, never a tag: the placeholder becomes the site's own commit sha when Pages is built (network.yml)
+    assert pin[0] == "drexthealpha/Knos/.github/workflows/prove.yml" and pin[1] == "KNOS_COMMIT_SHA"
+    assert "closed" in doc["on"]["pull_request_target"]["types"]                 # a merge is what pays in merge mode
+    assert prove["with"] == {"issue": "${{ needs.job.outputs.issue }}"}        # the caller chooses nothing else
+    assert prove["permissions"] == {"contents": "read", "checks": "read", "id-token": "write"}
     finder = doc["jobs"]["job"]
     assert "pull_request.body" not in json.dumps(finder["steps"][0]["run"])   # via env, never inlined into a script
     assert not any(str(s.get("uses", "")).startswith("actions/checkout") for s in finder["steps"])
-
-
-# ---- knos prove --job --------------------------------------------------------------------------------------------
-
-def _jwt(**claims) -> str:
-    body = {"aud": AUD, "iss": "https://token.actions.githubusercontent.com",
-            "exp": int(time.time()) + 300, "job_workflow_ref": REF, "job_workflow_sha": "a" * 40, **claims}
-    enc = [base64.urlsafe_b64encode(json.dumps(x).encode()).rstrip(b"=").decode() for x in ({"alg": "RS256"}, body)]
-    return ".".join(enc + ["c2ln"])
-
-
-@pytest.fixture()
-def chain(monkeypatch, knos_home):
-    from knos.jobs import market, net
-    sent = []
-    monkeypatch.setattr(net, "ledger", lambda: "LEDGER")
-    monkeypatch.setattr(net, "key", lambda: "PAYER")
-    monkeypatch.setattr(market, "prove_github",
-                        lambda ledger, payer, job_id, jwt: sent.append((ledger, payer, job_id, jwt)) or ("SIG1", "SIG2"),
-                        raising=False)
-    return sent
-
-
-def _token(tmp_path: Path, jwt: str) -> str:
-    p = tmp_path / "token.txt"
-    p.write_text(jwt + "\n", encoding="utf-8")
-    return str(p)
-
-
-def test_a_good_token_is_sent_and_both_signatures_printed(chain, tmp_path, capsys):
-    jwt = _jwt()
-    rc, said = run(capsys, "prove", "--job", JOB, "--jwt-file", _token(tmp_path, jwt))
-    assert rc == 0, said
-    assert chain == [("LEDGER", "PAYER", bytes.fromhex(JOB), jwt)]
-    assert "SIG1" in said and "SIG2" in said
-
-
-@pytest.mark.parametrize("claims,why", [
-    ({"aud": AUD.replace(JOB, "cd" * 32)}, "audience"),
-    ({"aud": f"knos:{JOB}"}, "audience"),                      # the old 2-part audience
-    ({"aud": AUD[:-1] + "0"}, "payout"),
-    ({"aud": "sts.amazonaws.com"}, "audience"),
-    ({"iss": "https://evil.example"}, "issuer"),
-    ({"exp": int(time.time()) - 5}, "expired"),
-    ({"job_workflow_sha": ""}, "job_workflow_sha"),
-    ({"job_workflow_sha": "v0.3.8"}, "job_workflow_sha"),
-])
-def test_a_token_the_chain_would_refuse_is_refused_before_sending(chain, tmp_path, capsys, claims, why):
-    rc, said = run(capsys, "prove", "--job", JOB, "--jwt-file", _token(tmp_path, _jwt(**claims)))
-    assert rc == 1
-    assert "Not sent" in said and why in said
-    assert chain == []
-
-
-def test_not_a_jwt_and_half_the_options_are_refused(chain, tmp_path, capsys):
-    rc, said = run(capsys, "prove", "--job", JOB, "--jwt-file", _token(tmp_path, "nope"))
-    assert rc == 1 and "not a JWT" in said
-    rc, said = run(capsys, "prove", "--job", JOB)
-    assert rc == 1 and "--jwt-file" in said
-    assert chain == []
-
-
-def test_the_escrow_refusing_is_one_line(chain, monkeypatch, tmp_path, capsys):
-    from knos.jobs import market
-
-    def refuse(*a):
-        raise RuntimeError("repo does not match the job")
-    monkeypatch.setattr(market, "prove_github", refuse, raising=False)
-    rc, said = run(capsys, "prove", "--job", JOB, "--jwt-file", _token(tmp_path, _jwt()))
-    assert rc == 1 and "The escrow refused: repo does not match the job" in said
-    assert "Traceback" not in said
-
-
-def test_without_on_chain_verification_it_says_so(monkeypatch, knos_home, tmp_path, capsys):
-    from knos.jobs import market, net
-    monkeypatch.setattr(net, "ledger", lambda: "LEDGER")
-    monkeypatch.setattr(net, "key", lambda: "PAYER")
-    monkeypatch.delattr(market, "prove_github", raising=False)
-    rc, said = run(capsys, "prove", "--job", JOB, "--jwt-file", _token(tmp_path, _jwt()))
-    assert rc == 1 and "prove_github" in said
 
 
 # ---- knos proof run ----------------------------------------------------------------------------------------------

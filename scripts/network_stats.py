@@ -1,197 +1,136 @@
-"""The public Knos network page: every Knos team on Solana, counted from the chain. Public data only; anyone can run it.
+"""The public Knos numbers, counted from Solana devnet: what was funded, what was paid, and to and by whom.
 
-    python scripts/network_stats.py            writes docs/network/index.html and docs/network/data.json
+    python scripts/network_stats.py --out _site/stats.json
 
-A credential counts as a Knos team only if its name starts with `knos-` AND its `knos.claim.v1` schema matches Knos's
-layout byte for byte (the schema account is recomputed from src/knos/team/schemas.py). Anyone can create one, so
-counts are not proof of distinct teams, and the page says so. Devnet and mainnet are reported separately.
+Every number comes from knos-pay's own log lines in its transaction history (`knos:funded`, `knos:paid`,
+`knos:claimed`, `knos:refunded`, `knos:vetoed`) and from its live accounts. Nothing is self-reported.
 
-Per team: live claims, renewals, members, records; and from the credential's recent history, closes (releases, lost
-races and sweeps together). GitHub numbers come from GitHub's public API.
+The split that matters is "outside": a bounty counts as outside only if neither the GitHub account that funded it nor
+the one that was paid is one of Knos's own (OWN, below), and they are two different accounts. Bounties Knos funded or
+earned itself, and ones where the funder paid themselves, are counted separately and never added to the outside total.
 """
 
 from __future__ import annotations
 
-import base64
-import html
+import argparse
 import json
 import os
+import re
+import statistics
 import sys
 import time
-import urllib.request
-from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from knos.team import rpc, sas, schemas  # noqa: E402
-from solders.pubkey import Pubkey  # noqa: E402
+from knos import chain  # noqa: E402
+from knos.settle import oidc, pay  # noqa: E402
 
-CLUSTERS = {"devnet": os.environ.get("KNOS_DEVNET_RPC", "https://api.devnet.solana.com"),
-            "mainnet": os.environ.get("KNOS_MAINNET_RPC", "https://api.mainnet-beta.solana.com")}
-REPO = "drexthealpha/Knos"
-
-
-def _b58(raw: bytes) -> str:
-    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    n, out = int.from_bytes(raw, "big"), ""
-    while n:
-        n, r = divmod(n, 58)
-        out = alphabet[r] + out
-    return "1" * (len(raw) - len(raw.lstrip(b"\0"))) + out
+# GitHub account ids that are Knos's own: the maintainer, and the accounts its live tests run as. Activity that
+# touches any of these is "own", never "outside". (ids, not logins: a login can be renamed.)
+OWN = frozenset(json.loads((ROOT / "scripts" / "own_github_ids.json").read_text(encoding="utf-8"))["ids"])
+EVENT = re.compile(r"Program log: knos:(\w+) (.*)")
 
 
-def credentials(url: str) -> list[tuple[Pubkey, sas.Credential]]:
-    cfg = {"encoding": "base64", "commitment": "confirmed",
-           "filters": [{"memcmp": {"offset": 0, "bytes": _b58(b"\x00")}},
-                       {"memcmp": {"offset": 37, "bytes": _b58(b"knos-")}}]}
-    got = rpc.call(url, "getProgramAccounts", [str(sas.PROGRAM_ID), cfg], timeout=60) or []
+def events_of(tx: dict | None) -> list[dict]:
+    """knos-pay's log lines in one confirmed transaction, as dicts with "event", "at" and "signer"."""
+    if not tx or (tx.get("meta") or {}).get("err") is not None:
+        return []
     out = []
-    for item in got:
-        try:
-            out.append((Pubkey.from_string(item["pubkey"]),
-                        sas.parse_credential(base64.b64decode(item["account"]["data"][0]))))
-        except (ValueError, KeyError, IndexError):
+    for line in (tx.get("meta") or {}).get("logMessages") or []:
+        m = EVENT.match(line)
+        if not m:
             continue
+        ev = {"event": m.group(1), "at": tx.get("blockTime") or 0,
+              "signer": tx["transaction"]["message"]["accountKeys"][0]}
+        for part in m.group(2).split():
+            k, _, v = part.partition("=")
+            ev[k] = int(v) if v.lstrip("-").isdigit() else v
+        out.append(ev)
     return out
 
 
-def is_knos_team(url: str, credential: Pubkey) -> bool:
-    _, raw = rpc.account_data(url, sas.schema_pda(credential, schemas.CLAIM[0]), timeout=30)
-    return raw == schemas.schema_account_bytes(credential, schemas.CLAIM)
-
-
-def attestations_by_schema(url: str, credential: Pubkey) -> Counter:
-    cfg = {"encoding": "base64", "commitment": "confirmed", "dataSlice": {"offset": 65, "length": 32},
-           "filters": [{"memcmp": {"offset": 0, "bytes": _b58(b"\x02")}},
-                       {"memcmp": {"offset": 33, "bytes": str(credential)}}]}
-    got = rpc.call(url, "getProgramAccounts", [str(sas.PROGRAM_ID), cfg], timeout=60) or []
-    names = {str(sas.schema_pda(credential, spec[0])): spec[0].split(".")[1] for spec in schemas.ALL}
-    return Counter(names.get(str(Pubkey.from_bytes(base64.b64decode(i["account"]["data"][0]))), "other")
-                   for i in got)
-
-
-def closes(url: str, credential: Pubkey, limit: int = 1000) -> int:
-    """CloseAttestation instructions in the credential's recent history (every close names the credential)."""
-    n = 0
-    for s in rpc.call(url, "getSignaturesForAddress", [str(credential), {"limit": limit}], timeout=60) or []:
-        if s.get("err"):
-            continue
-        tx = rpc.call(url, "getTransaction", [s["signature"], {"encoding": "json", "maxSupportedTransactionVersion": 0}],
-                      timeout=30)
-        if not tx:
-            continue
-        keys = tx["transaction"]["message"]["accountKeys"]
-        for ix in tx["transaction"]["message"]["instructions"]:
-            if keys[ix["programIdIndex"]] == str(sas.PROGRAM_ID) and _b58_first_byte(ix["data"]) == 7:
-                n += 1
-    return n
-
-
-def _b58_first_byte(data: str) -> int | None:
-    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    n = 0
-    for ch in data:
-        n = n * 58 + alphabet.index(ch)
-    raw = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
-    raw = b"\0" * (len(data) - len(data.lstrip("1"))) + raw
-    return raw[0] if raw else None
-
-
-def cluster_stats(name: str, url: str, with_history: bool = True) -> dict:
-    out = {"cluster": name, "teams": 0, "claims_live": 0, "renewals_live": 0, "members": 0, "records": 0,
-           "closes_recent": 0, "rejected_lookalikes": 0, "error": ""}
-    try:
-        creds = credentials(url)
-    except Exception as e:  # noqa: BLE001 - a public RPC refusing getProgramAccounts is reported, not hidden
-        out["error"] = f"{type(e).__name__}: {str(e)[:160]}"
-        return out
-    for addr, _cred in creds:
+def history(url: str, limit: int = 1000) -> tuple[list[dict], int]:
+    """(events oldest first, transactions left unread because the public RPC throttled)."""
+    sigs = [s["signature"] for s in chain.call(url, "getSignaturesForAddress", [str(pay.PAY_ID), {"limit": limit}],
+                                               timeout=30) or [] if s.get("err") is None]
+    events, unread = [], 0
+    for sig in reversed(sigs):
         try:
-            if not is_knos_team(url, addr):
-                out["rejected_lookalikes"] += 1
-                continue
-            c = attestations_by_schema(url, addr)
-            out["teams"] += 1
-            out["claims_live"] += c.get("claim", 0)
-            out["renewals_live"] += c.get("renew", 0)
-            out["members"] += c.get("member", 0)
-            out["records"] += c.get("record", 0)
-            if with_history:
-                out["closes_recent"] += closes(url, addr)
-        except Exception as e:  # noqa: BLE001
-            out["error"] = f"{type(e).__name__}: {str(e)[:160]}"
-    return out
+            tx = chain.call(url, "getTransaction", [sig, {"encoding": "json", "commitment": "confirmed",
+                                                          "maxSupportedTransactionVersion": 0}], timeout=30)
+        except Exception:  # noqa: BLE001 - still throttled after the backoff: counted, never guessed
+            unread += 1
+            continue
+        events += [{**ev, "tx": sig} for ev in events_of(tx)]
+    return events, unread
 
 
-def github() -> dict:
-    def get(path):
-        req = urllib.request.Request(f"https://api.github.com/repos/{REPO}{path}",
-                                     headers={"User-Agent": "knos-network", "Accept": "application/vnd.github+json",
-                                              **({"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}"}
-                                                 if os.environ.get("GITHUB_TOKEN") else {})})
-        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
-            return json.loads(r.read())
-    try:
-        repo = get("")
-        contributors = get("/contributors?per_page=100")
-        return {"stars": repo.get("stargazers_count", 0), "forks": repo.get("forks_count", 0),
-                "open_issues": repo.get("open_issues_count", 0), "contributors": len(contributors)}
-    except Exception as e:  # noqa: BLE001
-        return {"error": f"{type(e).__name__}"}
+def summarize(events: list[dict], own: frozenset = OWN) -> dict:
+    funded = {}      # (repo, issue) -> the funding event
+    paid = []
+    for ev in events:
+        if ev["event"] == "funded":
+            funded[(ev.get("repo"), ev.get("issue"))] = ev
+        elif ev["event"] == "paid":
+            src = funded.get((ev.get("repo"), ev.get("issue")), {})
+            funder = src.get("by", f"wallet:{src.get('signer', '?')}")
+            if funder in own or ev.get("author") in own:
+                kind = "own"
+            elif funder == ev.get("author"):
+                kind = "self"
+            else:
+                kind = "outside"
+            paid.append({"repo": ev.get("repo"), "issue": ev.get("issue"), "author": ev.get("author"), "funder": funder,
+                         "amount": ev.get("amount", 0), "fee": ev.get("fee", 0), "kind": kind, "tx": ev.get("tx"),
+                         "seconds": ev["at"] - src["at"] if src.get("at") and ev.get("at") else None})
+
+    def side(kind: str) -> dict:
+        mine = [p for p in paid if p["kind"] == kind]
+        took = sorted(p["seconds"] for p in mine if p["seconds"] is not None)
+        return {"paid": len(mine), "amount": sum(p["amount"] for p in mine), "fees": sum(p["fee"] for p in mine),
+                "repositories": len({p["repo"] for p in mine}), "funders": len({p["funder"] for p in mine}),
+                "authors": len({p["author"] for p in mine}),
+                "median_seconds_fund_to_paid": int(statistics.median(took)) if took else None}
+
+    count = lambda name: sum(1 for e in events if e["event"] == name)  # noqa: E731
+    return {"funded": count("funded"), "funded_amount": sum(e.get("amount", 0) for e in events if e["event"] == "funded"),
+            "outside": side("outside"), "own": side("own"), "self_funded": side("self"),
+            "claimed": count("claimed"), "claimed_amount": sum(e.get("amount", 0) for e in events if e["event"] == "claimed"),
+            "refunded": count("refunded"), "vetoed": count("vetoed"), "recent": paid[-20:][::-1]}
 
 
-def render(data: dict) -> str:
-    def row(c):
-        if c["error"] and not c["teams"]:
-            return f"<tr><td>{c['cluster']}</td><td colspan=7>not readable now: {html.escape(c['error'])}</td></tr>"
-        return ("<tr>" + "".join(f"<td>{html.escape(str(c[k]))}</td>" for k in
-                                 ("cluster", "teams", "members", "claims_live", "renewals_live", "records",
-                                  "closes_recent")) + "</tr>")
-    gh = data["github"]
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Knos network</title>
-<style>
-:root{{--bg:#fbfaf7;--ink:#1d1d1b;--dim:#6b6a66;--line:#e2dfd8}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#141413;--ink:#ecebe6;--dim:#9b9a95;--line:#2c2b29}}}}
-body{{background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px 16px}}
-main{{max-width:880px;margin:auto}} table{{border-collapse:collapse;width:100%;margin:16px 0}}
-td,th{{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left}} .dim{{color:var(--dim)}}
-.wrap{{overflow-x:auto}}
-</style></head><body><main>
-<h1>Knos network</h1>
-<p>Every Knos team is a public Solana Attestation Service credential. These numbers are read from the chain by
-<code>scripts/network_stats.py</code>; run it yourself to check them.</p>
-<p class="dim">Updated {html.escape(data['updated'])}. Anyone can create a credential named <code>knos-*</code>
-with the Knos schema, so counts are not proof of distinct teams. Devnet is a test network.</p>
-<div class="wrap"><table><tr><th>cluster</th><th>teams</th><th>members</th><th>live claims</th><th>live renewals</th>
-<th>records</th><th>recent closes</th></tr>
-{''.join(row(c) for c in data['clusters'])}</table></div>
-<p class="dim">Recent closes are CloseAttestation instructions in each team's last 1,000 transactions: released
-claims, claims that lost a race, and sweeps of lapsed claims, together. Look-alike credentials whose claim schema is
-not Knos's, byte for byte, are left out
-({sum(c['rejected_lookalikes'] for c in data['clusters'])} this run).</p>
-<h2>The project</h2>
-<p>GitHub: {gh.get('stars', '?')} stars, {gh.get('forks', '?')} forks, {gh.get('contributors', '?')} contributors,
-{gh.get('open_issues', '?')} open issues and pull requests.</p>
-</main></body></html>
-"""
+def live(ledger) -> dict:
+    """What is in escrow now and what is waiting to be claimed, from the program's accounts."""
+    jobs = [pay.read_job(d) for _, d in ledger.program_accounts(pay.PAY_ID, 256)]
+    dues = [pay.read_due(d) for _, d in ledger.program_accounts(pay.PAY_ID, 48)]
+    return {"open": sum(1 for j in jobs if j and j.state == "open"),
+            "open_amount": sum(j.amount for j in jobs if j and j.state == "open"),
+            "proven_waiting": sum(1 for j in jobs if j and j.state == "proven"),
+            "unclaimed_accounts": sum(1 for d in dues if d), "unclaimed_amount": sum(dues)}
 
 
 def main() -> int:
-    data = {"updated": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
-            "clusters": [cluster_stats(n, u) for n, u in CLUSTERS.items()],
-            "github": github()}
-    out = ROOT / "docs" / "network"
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "data.json").write_text(json.dumps(data, indent=1), encoding="utf-8")
-    (out / "index.html").write_text(render(data), encoding="utf-8")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default="_site/stats.json")
+    a = ap.parse_args()
+    url = os.environ.get("KNOS_RPC") or chain.CLUSTERS["devnet"]
+    data: dict = {"updated": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()), "cluster": "devnet",
+                  "programs": {"knos_oidc": str(oidc.OIDC_ID), "knos_pay": str(pay.PAY_ID)}}
+    try:
+        events, unread = history(url)
+        data.update(summarize(events))
+        data["live"] = live(chain.Ledger(url))
+        if unread:
+            data["error"] = f"{unread} transactions unread (the public RPC throttled); counts are a lower bound"
+    except Exception as e:  # noqa: BLE001 - the site still ships, and says the numbers could not be read
+        data["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(a.out).write_text(json.dumps(data, indent=1), encoding="utf-8")
     print(json.dumps(data, indent=1))
     return 0
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     raise SystemExit(main())

@@ -1,5 +1,5 @@
 """The Agent PR Index, offline: fixture PRs through agent_pr_ci's classification, then a deterministic Merkle root;
-Wilson intervals, self-repo exclusion, and proven counts by distinct funder from devnet escrow transactions."""
+Wilson intervals, self-repo exclusion, and a root that refuses an edited list."""
 
 from __future__ import annotations
 
@@ -53,10 +53,10 @@ def test_classification_and_deterministic_root(monkeypatch):
     b = agent_pr_index.build(list(reversed(claimed)), "2026-10-01", WINDOW)
     assert a == b and len(a["root"]) == 64
     assert a["agents"]["copilot"] == {"claimed_green": 1, "actually_failed": 1, "share": 1.0,
-                                      "ci95": agent_pr_index.wilson(1, 1), "proven": 0}
+                                      "ci95": agent_pr_index.wilson(1, 1)}
     assert a["agents"]["codex"]["share"] == 0.0 and a["agents"]["codex"]["ci95"][0] == 0.0
-    assert a["agents"]["devin"] == {"claimed_green": 0, "actually_failed": 0, "share": None, "ci95": None,
-                                    "proven": 0}  # no CI is not green
+    assert a["agents"]["devin"] == {"claimed_green": 0, "actually_failed": 0, "share": None,
+                                    "ci95": None}  # no CI is not green
     assert a["overall"]["claimed_green"] == 2 and a["overall"]["actually_failed"] == 1
     assert set(a["prs"][0]) == set(agent_pr_index.PR_KEYS)
     assert a["n_prs"] == 2  # the no-CI PR is not listed: only finished CI at the head SHA counts
@@ -98,41 +98,17 @@ def test_scan_excludes_self_repos_and_counts_them(monkeypatch):
     assert [k["number"] for k in kept] == [2] and n == {"hits": 3, "excluded": 1, "no_claim": 1}
 
 
-def test_proven_counts_distinct_funders_only():
-    pays = [{"worker": "W", "funder": "F1", "verified": True}, {"worker": "W", "funder": "F1", "verified": True},
-            {"worker": "W", "funder": "F2", "verified": True}, {"worker": "W", "funder": "F3", "verified": False},
-            {"worker": "V", "funder": "F1", "verified": True}]
-    assert agent_pr_index.distinct_funders(pays) == {"V": 1, "W": 2}  # repeat payouts from one funder count once
-
-
-def test_payments_from_devnet_tx():
-    keys = ["signer", "job", "vault", "auth", "workerTok", "fee", "cfg", "token", "buyer", "PROG"]
-    ix = {"programIdIndex": 9, "accounts": list(range(9)), "data": "C"}  # base58 "C" = byte 11, verify_release
-    tx = {"meta": {"err": None}, "transaction": {"message": {"accountKeys": keys, "instructions": [ix]}}}
-    assert agent_pr_index.payments_from_tx(tx, "PROG") == [{"worker": "workerTok", "funder": "buyer",
-                                                            "verified": True}]
-    assert agent_pr_index.payments_from_tx(tx, "OTHER") == []
-    assert agent_pr_index.payments_from_tx({**tx, "meta": {"err": {"x": 1}}}, "PROG") == []  # failed tx pays nothing
-    ix["data"] = "2"  # byte 1: not a verified release
-    assert agent_pr_index.payments_from_tx(tx, "PROG") == []
-    idx = agent_pr_index.build([], "2026-10-02", ("a", "b"), excluded=7,
-                               payments=[{"worker": "W", "funder": "F", "verified": True}])
-    assert idx["proven"] == {"W": 1} and idx["excluded_self_repo"] == 7 and idx["n_prs"] == 0
-
-
-def test_attest_refuses_a_tampered_list(tmp_path, monkeypatch):
+def test_check_refuses_a_tampered_list(tmp_path):
     import json
 
     import pytest
     idx = agent_pr_index.build([{"agent": "codex", "repo": "o/r", "number": 1, "sha": "a", "class": "failed"}],
-                               "2026-10-02", ("a", "b"))
-    calls = []
-    monkeypatch.setattr(agent_pr_index, "attest", lambda index, key: calls.append(index["root"]))
+                               "2026-10-02", ("a", "b"), excluded=7)
+    assert idx["excluded_self_repo"] == 7 and idx["n_prs"] == 1
     p = tmp_path / "index.json"
     p.write_text(json.dumps(idx), encoding="utf-8")
-    assert agent_pr_index.attest_file(str(p), "[]")["root"] == idx["root"] and calls == [idx["root"]]
-    idx["prs"][0]["class"] = "passed"  # edited after the count: the root no longer matches, nothing is attested
+    assert agent_pr_index.check(str(p))["root"] == idx["root"]
+    idx["prs"][0]["class"] = "passed"  # edited after the count: the root no longer matches
     p.write_text(json.dumps(idx), encoding="utf-8")
     with pytest.raises(SystemExit):
-        agent_pr_index.attest_file(str(p), "[]")
-    assert len(calls) == 1
+        agent_pr_index.check(str(p))

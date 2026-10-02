@@ -1,9 +1,9 @@
-"""Write every benchmark number in the docs from docs/bench.json, the one source.
+"""Write the Agent PR Index numbers in the docs from docs/bench.json, the one source.
 
     python scripts/bench_docs.py           rewrite the marked blocks
     python scripts/bench_docs.py --check   exit 1 if a doc has drifted from the source (the test suite runs this)
 
-A block is `<!-- bench:NAME -->` ... `<!-- /bench:NAME -->` in README.md, docs/BENCH.md or docs/WHY.md.
+A block is `<!-- bench:market -->` ... `<!-- /bench:market -->` in README.md or docs/BENCH.md.
 """
 
 from __future__ import annotations
@@ -14,20 +14,11 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS = ["README.md", "docs/BENCH.md", "docs/WHY.md"]
-RETIRED = ["acceptance-headline", "acceptance-table", "models"]  # modelled or headline numbers, removed from every doc
+DOCS = ["README.md", "docs/BENCH.md"]
 
 
 def blocks(src: dict) -> dict[str, str]:
-    rc = src["recall"]
-    recall = [f"{rc['benchmark']}, measured {rc['date']}.", "",
-              "| | baseline (0.3.1) | dev | **held-out** |", "|---|---|---|---|"]
-    recall += [f"| {r['what']} | {r['baseline']} | {r['dev']} | **{r['heldout']}** |" for r in rc["rows"]]
-    out = {"recall-table": "\n".join(recall)}
-    if src.get("market"):
-        m = src["market"]
-        out["market"] = (market_index(m["index"]) + "\n\n" if m.get("index") else "") + m["sentence"]
-    return out
+    return {"market": market_index(src["market"]["index"])}
 
 
 def _pct(x: float) -> str:
@@ -50,18 +41,14 @@ def market_index(ix: dict) -> str:
                          f"{_pct(a['ci95'][0])}–{_pct(a['ci95'][1])} |")
     lines.append(f"| **all** | **{o['claimed_green']:,}** | **{o['actually_failed']:,} ({_pct(o['share'])})** | "
                  f"**{_pct(o['ci95'][0])}–{_pct(o['ci95'][1])}** |")
-    return "\n".join(lines) + "\n\nEarlier sample (0.3.4):"
+    return "\n".join(lines)
 
 
 def apply(text: str, gen: dict[str, str]) -> str:
     def repl(m):
         name = m.group(1)
         return f"<!-- bench:{name} -->\n{gen[name]}\n<!-- /bench:{name} -->" if name in gen else m.group(0)
-    text = re.sub(r"<!-- bench:([\w-]+) -->.*?<!-- /bench:\1 -->", repl, text, flags=re.S)
-    # Retired blocks are removed outright and never regenerated.
-    for name in RETIRED:
-        text = re.sub(rf"(?:- )?<!-- bench:{name} -->.*?<!-- /bench:{name} -->\n\n?", "", text, flags=re.S)
-    return text
+    return re.sub(r"<!-- bench:([\w-]+) -->.*?<!-- /bench:\1 -->", repl, text, flags=re.S)
 
 
 def main(check: bool = False) -> int:

@@ -45,7 +45,7 @@ def with_sibyl(store, releases: list[dict], repo: Path) -> list[tuple[str, bool,
     out = []
     for rel in releases:
         v = engine.evaluate(repo, CLAIM.format(**rel), store, _runners(rel), use_cache=False)
-        out.append((rel["version"], v.ok, "; ".join(r.detail for r in v.failures()) or "proven"))
+        out.append((rel["version"], v.ok, "; ".join(r.detail for r in v.results if not r.ok) or "proven"))
         history.observe(store, rel["sha"], "ci", rel["ci"] == "success")
         history.learn(store)
     return out

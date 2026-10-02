@@ -1,63 +1,52 @@
 # Contributing
 
-Knos is the work network for AI agents (jobs paid only on acceptance), plus claims, Sibyl memory, budgets and records
-for coding agents. Changes that delete something are the most welcome kind.
+Knos is one product: AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.
+Changes that delete something are the most welcome kind.
 
 ## Run the tests
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-pytest                               # everything that needs no chain
-bash scripts/devchain.sh start       # a local validator with the devnet-deployed SAS and Lighthouse
-pytest -m "" tests/test_team_*.py tests/test_sas.py tests/test_chain_budgets.py   # now these run too
-KNOSTEST_PROPERTY_N=200 pytest -m "" tests/test_team_property.py                  # the claim protocol's property test
-python scripts/deadcode.py && vulture src/knos scripts --min-confidence 60          # nothing unused ships
+pytest -q -n auto                          # offline; includes both programs in LiteSVM and the judge in four languages
+node sdk/settle/test.mjs                   # the JavaScript client against the Python client's fixtures
+python scripts/deadcode.py && vulture src/knos scripts --min-confidence 60     # nothing unused ships
+python scripts/claims_check.py --offline   # every number in the README, site and submission has a source
 ```
 
-The suite is offline apart from the local validator: `tests/conftest.py` refuses every non-loopback connection and
-gives each test its own home. It reads real repos, drives a real MCP server over stdio and sends real transactions
-rather than mocking them. Please keep it that way.
+The suite refuses every non-loopback connection and gives each test its own home. It runs the real programs, real
+git repositories and real test runners rather than mocks. Please keep it that way. The Go and Rust judge tests are
+skipped when those toolchains are not installed.
 
-## Add an agent adapter
+## Change a program
 
-The most useful first change. There are three kinds.
+`programs/knos_oidc` and `programs/knos_pay` are deployed once and made immutable, so a change to either is a new
+deployment with a new address, not an upgrade.
 
-**1. A host's memory server (MCP config).** Edit `src/knos/init.py`:
-- `mcp_files()` gets the path of the host's MCP config. Use the host's own environment variable if it has one.
-- `_add_mcp()` / `_remove_mcp()` get a branch if the host uses a different shape. OpenCode is the worked example:
-  key `mcp`, `"type": "local"`, one command array.
+```bash
+bash scripts/build_programs.sh             # needs cargo build-sbf (agave 2.3); refreshes tests/fixtures/*.so
+cd programs/knos_oidc && cargo test --release      # the Wycheproof vectors
+KNOS_FUZZ_N=10000 pytest -q -s tests/test_pay_chain.py -k random_walk
+python scripts/settle_fixtures.py          # if an address, an audience or an instruction changed
+```
 
-Then add a test in `tests/test_cli.py` asserting the exact shape the host reads. **Copy the shape from the host's own
-docs and link them in the PR.** A config written in the wrong shape looks like it worked and does nothing.
+A change to an instruction's bytes must change `src/knos/settle` (the authority), then `sdk/settle/index.js`, and
+the fixtures will tell you whether they still agree.
 
-**2. A host's edit guard.** Edit `src/knos/guard.py`:
-- `targets_of()`: which paths this host's pre-tool payload writes. Codex is the worked example: it parses
-  `apply_patch` bodies and the write targets of shell commands.
-- `render()`: how this host wants a refusal said. Exit 2 is always the refusal.
-- `install_<host>()` / `uninstall_<host>()`: add them to `_HOOKS` in `init.py`, so `init --undo` restores every
-  byte.
+## Add a language to the judge
 
-`tests/test_codex_guard.py` is the pattern: a real subprocess, a real payload in the host's documented shape, and the
-exit code. Link the host's hook docs.
+`src/knos/judge.py`: a runner is one function that takes a sandbox `Box` and returns a `Run` (test ids and states,
+which ids are the acceptance checks, and the sentinel and canary ids). Add its test directories and protected paths
+beside the others, and a test in `tests/test_judge_langs.py` with an honest fix, a no-op and a cheat.
 
-**3. A framework adapter (agents beyond code).** Use `knos.sdk.Knos`: `claim`, `release`, `remember`, `recall`.
-Units are generic (`task:`, `market:`, `wallet:`). For memory, hand the framework Sibyl's own adapter, backed by
-`Knos.memory_client()`. `examples/langgraph_team.py` is the pattern. It must run in CI with no API key, using scripted
-models.
-
-## What a good first PR looks like
+## A good pull request
 
 - One thing, with a test that fails before it and passes after.
-- A comment that says *why*, not *what*. The code says what.
-- No new dependency without saying what it replaces.
-- Numbers measured on your machine, with the command you used.
+- If its description says tests pass, they pass: this repository runs its own check on pull requests.
+- No number in the README, the site or `docs/submission/` without an entry in `docs/facts.json`.
 
-## Things deliberately not wanted
+Some issues carry a bounty (`/knos bounty` by a maintainer). The pull request that is merged for one is paid to its
+author's GitHub account, on devnet, in test USDC. See the site's "Get paid" page.
 
-- A server anyone has to run. Teams coordinate through the chain.
-- Anything on the edit path that waits on the network. The guard reads the local mirror, and makes at most one read
-  of about a second when the mirror is stale. `knos mirror` is the only background process: it starts on demand and
-  exits after 30 idle minutes.
-- Plaintext on chain: paths, repo names, user names, descriptions.
-- Routing around Sibyl's tier gate or cap: only `MemoryClient` methods, never `tier=` (a test greps for it).
-- Summarising. Knos returns what somebody actually said, with its source.
+## Licence
+
+MIT. By contributing you agree your contribution is under the same licence.

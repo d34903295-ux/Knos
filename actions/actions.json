@@ -1,5 +1,0 @@
-{
-  "rules": [
-    { "pathPattern": "/jobs/**", "apiPath": "/api/jobs/**" }
-  ]
-}

@@ -15,11 +15,8 @@ _REAL_HOME = Path.home()
 _WATCHED = [
     _REAL_HOME / ".claude" / "settings.json",
     _REAL_HOME / ".claude.json",
-    _REAL_HOME / ".cursor" / "hooks.json",
-    _REAL_HOME / ".cursor" / "mcp.json",
-    _REAL_HOME / ".knos" / "licence.json",
-    _REAL_HOME / ".knos" / "budget.json",
-    _REAL_HOME / ".sibyl-memory" / "memory.db",  # knos 0.3 keeps memory in Sibyl's own store: tests must never touch yours
+    _REAL_HOME / ".codex" / "hooks.json",
+    _REAL_HOME / ".sibyl-memory" / "memory.db",  # Knos remembers in Sibyl's own store: tests must never touch yours
 ]
 
 
@@ -64,18 +61,9 @@ def _isolated(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("KNOS_HOME", str(fake / ".knos"))
     monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
     monkeypatch.setattr(socket.socket, "connect", _loopback_only)
-    from knos import code, paths, refresh
-
-    def _reset() -> None:
-        refresh._last_check.clear()
-        paths.shared_root.cache_clear()
-        paths.work_root.cache_clear()
-        for cached in (code._find_binary, code.readtags):  # a test may have swapped one for a plain function
-            getattr(cached, "cache_clear", lambda: None)()
-
-    _reset()
+    monkeypatch.setenv("SIBYL_MEMORY_DB", str(fake / ".sibyl-memory" / "memory.db"))
+    monkeypatch.delenv("SIBYL_CREDENTIALS", raising=False)
     yield fake
-    _reset()
 
 
 @pytest.fixture()

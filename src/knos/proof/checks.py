@@ -56,11 +56,36 @@ def head(repo: Path) -> str:
 
 # ---- tests in a fresh venv ---------------------------------------------------------------------------------------
 
+def test_command(repo: Path, command: str | None = None) -> str:
+    """The command that runs this repository's tests: proof.toml's `tests`, else what its language's own files say."""
+    repo = Path(repo)
+    if command:
+        return command
+    if (repo / "pyproject.toml").exists() or (repo / "setup.py").exists():
+        return "pytest -q"
+    try:
+        if (json.loads((repo / "package.json").read_text(encoding="utf-8")).get("scripts") or {}).get("test"):
+            return "npm test"
+    except (OSError, ValueError):
+        pass
+    if (repo / "Cargo.toml").exists():
+        return "cargo test"
+    if (repo / "go.mod").exists():
+        return "go test ./..."
+    return ""
+
+
 def tests(repo: Path, command: str | None = None, install: str | None = None) -> Result:
-    """The tests, as a newcomer would run them: a fresh virtual environment, the project installed, the command run."""
-    command = command or ("pytest -q" if (repo / "pyproject.toml").exists() or (repo / "setup.py").exists() else "")
+    """The tests, as a newcomer would run them. Python: a fresh virtual environment, the project installed, the
+    command run. JavaScript, Rust and Go: the language's own test command, in the repository."""
+    python = (repo / "pyproject.toml").exists() or (repo / "setup.py").exists()
+    command = test_command(repo, command)
     if not command:
         return Result("tests", False, "no test command: set tests = \"...\" in .knos/proof.toml")
+    if not python:
+        code, out = _run(command, repo, 280)
+        tail = out.strip().splitlines()[-1] if out.strip() else ""
+        return Result("tests", code == 0, f"`{command}`: {tail}", {"command": command, "exit": code, "head": head(repo)})
     venv = Path(tempfile.mkdtemp(prefix="knos-proof-venv-"))
     try:
         uv = shutil.which("uv")
@@ -71,7 +96,8 @@ def tests(repo: Path, command: str | None = None, install: str | None = None) ->
             code, out = _run([sys.executable, "-m", "venv", str(venv)], repo, 120)
         if code:
             return Result("tests", False, f"could not create a fresh venv: {out[-200:]}")
-        spec = install or (".[dev]" if "dev" in (repo / "pyproject.toml").read_text(encoding="utf-8", errors="ignore")
+        toml = repo / "pyproject.toml"
+        spec = install or (".[dev]" if toml.exists() and "dev" in toml.read_text(encoding="utf-8", errors="ignore")
                            else ".")
         pip = [uv, "pip", "install", "-q", "--python", str(py), "-e", spec] if uv else [str(py), "-m", "pip", "install",
                                                                                       "-q", "-e", spec]

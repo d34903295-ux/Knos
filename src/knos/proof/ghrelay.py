@@ -1,26 +1,29 @@
-"""The zero-secret GitHub relay: the always-on worker (worker.yml) carries proof and fund tokens that repos' own
-workflows minted, to the escrow, and pays the gas.
+"""The zero-secret GitHub relay: the always-on worker (worker.yml) carries the tokens that repositories' own workflows
+minted to Solana, and pays the gas. Anyone else can run it too; a relayer decides nothing.
 
 Transport (caller -> worker). A repo that installed Knos (examples/knos-workflow.yml) has NO Knos secret, so it cannot
 call the Knos repo or its API with auth. Its workflow posts the GitHub Actions OIDC token it minted as a comment with
 its own GITHUB_TOKEN:
 
-    knos-fund: <jwt>      on the issue, after a maintainer's `/knos bounty <amount> [stake]`
-    knos-proof: <jwt>     on the pull request, after prove.yml's checks passed
+    knos-fund: <jwt>      on the issue, after a maintainer's `/knos bounty <amount>`
+    knos-veto: <jwt>      on the issue, after a maintainer's `/knos veto`
+    knos-proof: <jwt>     on the pull request, when it is merged (or, in tests mode, when the acceptance checks pass)
+    knos-claim: <jwt>     on an issue in a repository the claimer owns (examples/knos-claim.yml)
+    knos-key: <jwt>       on an issue in drexthealpha/knos-oidc-rotate (a new issuer key, attested by GitHub)
 
-Posting the token in public is acceptable ONLY because it is not a general bearer credential here: its audience binds
-it to one action (knos:fund:<issue>:<units>:<checks>:<stake> or knos:<job>:<head sha>:<checks>:<payout>), it expires
-in about 5 minutes, it is valid only from Knos's workflow at the pinned commit (job_workflow_sha), and the escrow
-consumes it once. Whoever relays it first only pays the gas; the money goes where the audience says.
+Posting the token in public is acceptable ONLY because it is not a bearer credential here: its audience names one
+action (see knos.settle.pay's audiences), knos-pay accepts it for at most an hour and has a replay guard per action,
+and it is valid only from the workflow commit the bounty pinned. Whoever relays it first only pays the gas; the money
+goes where the audience says.
 
-Discovery (worker finds the comments). Public reads, no install: GitHub issue search for the markers, plus the repos
-in KNOS_RELAY_REPOS, plus every recently pushed repo of an owner the relay has served before (kept in KNOS_HOME).
-For each repo it reads issue comments since the last scan (REST, public).
+Discovery (worker finds the comments). Public reads, no install: one GitHub issue search for the word every token
+comment carries (`knosrelay`), plus the repos in KNOS_RELAY_REPOS, plus every recently pushed repo of an owner the relay has served before (kept in KNOS_HOME),
+plus the rotate repository. For each repo it reads issue comments since the last scan (REST, public).
 
 Result (worker -> caller). The worker cannot write to other repos. It appends one line per relayed token to the open
-issue labelled `knos-relay` in the Knos repo (its own GITHUB_TOKEN can do that):
+issue labelled `knos-relay` in its own repository (its own GITHUB_TOKEN can do that):
 
-    knos-relay <kind> <owner/repo>#<n> <token id> ok job=<hex> sig=<s1>[,<s2>] [receipt=<url>]
+    knos-relay <kind> <owner/repo>#<n> <token id> ok sig=<s1>[,<s2>...] note=<what happened, in words>
     knos-relay <kind> <owner/repo>#<n> <token id> fail <reason>
 
 The caller's last job polls that issue (public) for its token id and comments the verdict with its own token.
@@ -38,9 +41,14 @@ import sys
 import time
 from pathlib import Path
 
-TOKEN = re.compile(r"knos-(proof|fund):\s*(eyJ[\w-]+\.[\w-]+\.[\w-]+)")
+TOKEN = re.compile(r"knos-(proof|fund|veto|claim|key):\s*(eyJ[\w-]+\.[\w-]+\.[\w-]+)")
+MARK = "knosrelay"   # one word every token comment carries, so one search finds them all
+ROTATE_REPO = "drexthealpha/knos-oidc-rotate"
+RELAY_KIND = {"proof": "pay"}   # the comment marker says proof; knos.settle.relay calls that audience pay
 LOG_LABEL = "knos-relay"
-HOME_REPO = "drexthealpha/Knos"
+# The repository the relay keeps its public log in, and whose own issues it always scans: the one whose worker.yml runs
+# it (worker.yml passes its own name), Knos's by default. relay.yml polls the log of the repository it was called from.
+HOME_REPO = os.environ.get("KNOS_RELAY_LOG_REPO") or "drexthealpha/Knos"
 
 
 def claims(jwt: str) -> dict:
@@ -51,16 +59,6 @@ def claims(jwt: str) -> dict:
 def token_id(jwt: str) -> str:
     """What the relay log names a token by (never the token itself)."""
     return hashlib.sha256(jwt.strip().encode()).hexdigest()[:16]
-
-
-def parse_aud(aud: str) -> dict:
-    """knos:fund:<issue>:<units>:<checks>:<0|1> or knos:<job hex>:<head sha>:<checks>:<payout>."""
-    p = aud.split(":")
-    if len(p) == 6 and p[0] == "knos" and p[1] == "fund":
-        return {"kind": "fund", "issue": int(p[2]), "units": int(p[3]), "checks": p[4], "stake": p[5] == "1"}
-    if len(p) == 5 and p[0] == "knos" and re.fullmatch(r"[0-9a-f]{64}", p[1]):
-        return {"kind": "proof", "job": p[1], "sha": p[2], "checks": p[3], "payout": p[4]}
-    raise ValueError(f"not a Knos audience: {aud!r}")
 
 
 def checks_hash(root: Path) -> str:
@@ -87,13 +85,13 @@ def _api(path: str) -> list | dict:
 
 def discover(since: str, state: dict, getter=_api) -> set[str]:
     repos = {r.strip() for r in os.environ.get("KNOS_RELAY_REPOS", "").split(",") if "/" in r}
-    for marker in ("knos-fund", "knos-proof"):
-        try:
-            res = getter(f"search/issues?q=%22{marker}%22+in:comments+updated:%3E={since[:10]}&per_page=50")
-            for it in res.get("items", []):
-                repos.add("/".join(it["repository_url"].split("/")[-2:]))
-        except Exception:  # noqa: BLE001, S110 - search is one source of several
-            pass
+    repos.add(ROTATE_REPO)
+    try:
+        res = getter(f"search/issues?q=%22{MARK}%22+in:comments+updated:%3E={since[:10]}&sort=updated&order=desc&per_page=50")
+        for it in res.get("items", []):
+            repos.add("/".join(it["repository_url"].split("/")[-2:]))
+    except Exception:  # noqa: BLE001, S110 - search is one source of several
+        pass
     for owner in set(state.get("owners", [])) | {HOME_REPO.split("/")[0]}:
         try:
             for r in getter(f"users/{owner}/repos?sort=pushed&per_page=30"):
@@ -101,7 +99,7 @@ def discover(since: str, state: dict, getter=_api) -> set[str]:
                     repos.add(r["full_name"])
         except Exception:  # noqa: BLE001, S110
             pass
-    repos.discard(HOME_REPO)
+    repos.add(HOME_REPO)     # Knos funds its own issues the same way, and calls the rotate workflow from here
     return repos
 
 
@@ -116,39 +114,49 @@ def found(repo: str, since: str, getter=_api) -> list[tuple[str, int, str, str]]
 
 # ---- the relay -----------------------------------------------------------------------------------------------------
 
-def relay_one(ledger, payer, kind: str, jwt: str, market=None, receipt=None) -> dict:
-    """Send one token to the escrow. Returns {"ok", "job", "sigs", "receipt"?, "why"?}."""
-    if market is None:
-        from ..jobs import market
-    c = claims(jwt)
-    a = parse_aud(c["aud"] if isinstance(c["aud"], str) else c["aud"][0])
-    if a["kind"] != kind:
-        return {"ok": False, "why": f"marker {kind} but audience {a['kind']}"}
-    if c.get("exp", 0) < time.time():
-        return {"ok": False, "why": "token expired"}
-    try:
-        if kind == "fund":
-            job_id, sig = market.fund_with_token(ledger, payer, jwt)
-            return {"ok": True, "job": job_id.hex(), "sigs": [sig]}
-        job_id = bytes.fromhex(a["job"])
-        s1, s2 = market.prove_github(ledger, payer, job_id, jwt)
-        out = {"ok": True, "job": a["job"], "sigs": [s1, s2]}
-        if receipt is not None:
-            try:
-                out["receipt"] = receipt(job_id, a, c)
-            except Exception:  # noqa: BLE001, S110 - the payment happened; the receipt is a convenience
-                pass
-        return out
-    except Exception as why:  # noqa: BLE001 - one bad token never stops the loop
-        return {"ok": False, "why": f"{type(why).__name__}: {str(why)[:160]}"}
+def relay_one(ledger, payer, kind: str, jwt: str, submit=None) -> dict:
+    """Send one token to the chain (knos.settle.relay.submit). Returns its result, plus "note": what happened in words."""
+    if submit is None:
+        from ..settle.relay import submit
+    r = submit(ledger, payer, jwt)
+    want = RELAY_KIND.get(kind, kind)
+    if r.get("ok") and r.get("kind") != want:
+        return {"ok": False, "why": f"marker {kind} but audience {r.get('kind')}"}
+    if r.get("ok"):
+        r["note"] = note(r)
+    return r
+
+
+def _usdc(units: int) -> str:
+    return f"{units / 1_000_000:.2f}"
+
+
+def note(r: dict) -> str:
+    """One sentence for the verdict comment."""
+    k = r["kind"]
+    wait = lambda s: "at once" if not s else f"{s // 3600} h after" if s >= 3600 else f"{s} s after"  # noqa: E731
+    if k == "fund":
+        what = "a maintainer merges the pull request that closes this issue" if r["mode"] == 0 else "the acceptance checks pass"
+        held = f" The payment is released {wait(r.get('review', 0))} that; until then /knos veto takes it back." if r.get("review") else ""
+        return f"{_usdc(r['amount'])} test USDC is in escrow for issue #{r['issue']}, paid when {what}.{held} Job {r['job']}."
+    if k == "pay":
+        net = sum(p["amount"] - p["fee"] for p in r["paid"])
+        hold = max(p["waits"] for p in r["paid"])
+        when = "is now waiting under" if not hold else f"will be released in {wait(hold).replace(' after', '')} (a maintainer's /knos veto on the issue takes it back) to"
+        return (f"{_usdc(net)} {when} GitHub user id {r['author_id']} for issue #{r['issue']}. "
+                f"Claim it to any address: https://drexthealpha.github.io/Knos/#claim")
+    if k == "veto":
+        return f"{len(r['vetoed'])} payment(s) taken back."
+    if k == "claim":
+        return "Sent " + ", ".join(f"{_usdc(c['amount'])} of {c['mint'][:4]}…" for c in r["claimed"]) + f" to {r['address']}."
+    return f"Key {r['key']} {'added' if r.get('added') else 'already known'}."
 
 
 def log_line(kind: str, repo: str, n: int, jwt: str, r: dict) -> str:
     head = f"knos-relay {kind} {repo}#{n} {token_id(jwt)}"
     if not r["ok"]:
         return f"{head} fail {r['why']}"
-    line = f"{head} ok job={r['job']} sig={','.join(r['sigs'])}"
-    return line + (f" receipt={r['receipt']}" if r.get("receipt") else "")
+    return f"{head} ok sig={','.join(r['sigs'][-3:])} note={r['note']}"
 
 
 def _log_issue() -> int:
@@ -174,24 +182,6 @@ def _state_path() -> Path:
     return paths.home() / "ghrelay.json"
 
 
-def receipt_root(aud: str) -> bytes:
-    """The receipt's evidence root for a paid proof: sha256 of its audience (job, head, checks hash, payout)."""
-    return hashlib.sha256(aud.encode()).digest()
-
-
-def _receipt_for(payer, repo: str, n: int):
-    """A paid proof gets a SAS receipt on devnet, attested by the relaying key: root = sha256(audience), commit = the
-    PR head, claim = what was paid. Returns the receipt page URL."""
-    def publish(job_id: bytes, a: dict, c: dict) -> str:
-        from ..team import rpc
-        from . import receipt as rc
-        aud = c["aud"] if isinstance(c["aud"], str) else c["aud"][0]
-        claim = f"{repo}#{n} passed .knos/acceptance and was paid: job {a['job']} to {a['payout']}"
-        _sig, att = rc.publish(rpc.CLUSTERS["devnet"], payer, receipt_root(aud), a["sha"], claim)
-        return rc.page_url(att)
-    return publish
-
-
 def once(ledger=None, payer=None, now: float | None = None) -> list[str]:
     sp = _state_path()
     try:
@@ -199,27 +189,48 @@ def once(ledger=None, payer=None, now: float | None = None) -> list[str]:
     except (OSError, ValueError):
         state = {}
     now = now or time.time()
-    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 15 * 60))   # tokens live ~5 min
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 70 * 60))   # a token is accepted for an hour
     seen = set(state.get("seen", []))
     if ledger is None:
-        from ..jobs import net
-        ledger, payer = net.ledger(), net.key()
+        from .. import chain
+        ledger, payer = chain.ledger(), chain.key()
     lines = []
     for repo in sorted(discover(since, state)):
         try:
             items = found(repo, since)
         except Exception:  # noqa: BLE001, S112
             continue
-        for kind, n, jwt, _who in items:
+        def issued(item) -> int:
+            try:
+                return int(claims(item[2]).get("iat", 0))
+            except Exception:  # noqa: BLE001 - not a token: relay_one reports it
+                return 0
+        # oldest first: a repository's fund tokens must reach the chain in the order GitHub issued them
+        for kind, n, jwt, _who in sorted(items, key=issued):
             tid = token_id(jwt)
             if tid in seen:
                 continue
             seen.add(tid)
-            r = relay_one(ledger, payer, kind, jwt, receipt=_receipt_for(payer, repo, n))
+            r = relay_one(ledger, payer, kind, jwt)
+            if r.get("retry"):          # e.g. one funding per repository per minute: the next pass tries again
+                seen.discard(tid)
+                continue
+            if r.get("ok") and not r.get("sigs"):
+                continue                # nothing had to be done (a key the chain already has): no log line
             lines.append(log_line(kind, repo, n, jwt, r))
             state.setdefault("owners", [])
             if r["ok"] and repo.split("/")[0] not in state["owners"]:
                 state["owners"].append(repo.split("/")[0])
+    # tests-mode payments whose review window has passed, and bounties past their deadline
+    try:
+        from ..settle import relay as settle
+        chain_now = int(ledger.now())
+        for sig in settle.settle_due(ledger, payer, chain_now):
+            lines.append(f"knos-relay settle - - ok sig={sig} note=a proven bounty's review window passed; paid")
+        for sig in settle.refund_due(ledger, payer, chain_now):
+            lines.append(f"knos-relay refund - - ok sig={sig} note=a bounty passed its deadline unproven; refunded")
+    except Exception as why:  # noqa: BLE001 - the crank is best effort; the next pass tries again
+        print(f"settle/refund: {why}", file=sys.stderr)
     state["seen"] = sorted(seen)[-2000:]
     sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text(json.dumps(state), encoding="utf-8")

@@ -1,10 +1,13 @@
 name: always-on worker
 
-# Knos's reference worker and verifier, in public, every 5 minutes (GitHub may start a scheduled run late: the web app
-# shows the measured pickup time). Each run takes the open devnet jobs it can do, delivers them, re-runs the checks
-# on every delivered job that names the Knos verifier, and releases or refunds by proof; then it settles jobs past
-# their deadline. Keys are repository secrets; the Sibyl stores (buyer preferences, the worker's past jobs) are
-# carried between runs in the Actions cache, so recall goes into every brief.
+# Knos's relay, in public. Repositories that installed Knos (examples/knos-workflow.yml) post GitHub-signed tokens as
+# comments; this job finds them (src/knos/proof/ghrelay.py), carries each to Solana devnet, where knos-oidc verifies
+# GitHub's signature and knos-pay does what the token says, and pays the transaction fees. It also releases tests-mode
+# payments whose review window has passed and refunds bounties past their deadline. It decides nothing: the money goes
+# where the token says, and anyone can run the same command (`knos relay`).
+#
+# It loops for about 4.5 minutes, then starts the next run itself (GitHub's cron is only a restart safety net).
+# The one secret is the fee-paying key; it holds devnet SOL for fees and nobody's money.
 on:
   schedule:
     - cron: "*/5 * * * *"
@@ -16,16 +19,14 @@ concurrency:
 
 permissions:
   contents: read
-  actions: write      # each run starts the next: GitHub's cron is a restart safety net, not the pickup clock
-  issues: write       # the relay log (ghrelay.py): one line per token relayed for a repo running examples/knos-workflow.yml
+  actions: write      # each run starts the next
+  issues: write       # the relay log: one line per token relayed, in the open issue labelled knos-relay
 
 jobs:
-  work:
+  relay:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      KNOS_RELAY: pointer
-      KNOS_WORKER_MODEL: gemini:gemini-3.5-flash-lite
       KNOS_HOME: ${{ github.workspace }}/.knos-home
     steps:
       - uses: actions/checkout@v4
@@ -40,22 +41,18 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .knos-home
-          key: knos-worker-home-${{ github.run_id }}
-          restore-keys: knos-worker-home-
-      - name: worker + verifier + deadline crank, every 10 s for about 4.5 minutes
+          key: knos-relay-home-${{ github.run_id }}
+          restore-keys: knos-relay-home-
+      - name: relay, every 10 s for about 4.5 minutes
         env:
-          WORKER_KEY: ${{ secrets.KNOS_WORKER_KEY }}
-          VERIFIER_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          KNOS_RELAY_KEY: ${{ secrets.KNOS_RELAY_KEY || secrets.KNOS_WORKER_KEY }}
           GH_TOKEN: ${{ github.token }}
+          KNOS_RELAY_LOG_REPO: ${{ github.repository }}
         run: |
-          [ -n "$WORKER_KEY" ] && [ -n "$VERIFIER_KEY" ] || { echo "no worker/verifier key secrets: skipped"; exit 0; }
+          [ -n "$KNOS_RELAY_KEY" ] || { echo "no KNOS_RELAY_KEY secret: skipped"; exit 0; }
           end=$(( $(date +%s) + 270 ))
           while [ "$(date +%s)" -lt "$end" ]; do
-            KNOS_MEMBER_KEY="$WORKER_KEY" knos work --once --model "$KNOS_WORKER_MODEL" || true
-            KNOS_MEMBER_KEY="$VERIFIER_KEY" knos verify --all --once || true
-            KNOS_MEMBER_KEY="$VERIFIER_KEY" knos jobs settle --all || true
-            KNOS_MEMBER_KEY="$WORKER_KEY" python -m knos.proof.ghrelay || true   # zero-secret repos: fund + prove tokens, we pay gas
+            knos relay || true
             sleep 10
           done
       - name: start the next run (always on)

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.10 (2 Oct 2026)
+
+AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.
+
+One product. Everything else moved to [drexthealpha/knos-labs](https://github.com/drexthealpha/knos-labs).
+
+- **Nobody controls the proof.** Two new programs replace the escrow: `knos-oidc` verifies GitHub Actions and GitLab
+  CI tokens on chain, and `knos-pay` holds and pays bounties. Neither has an admin instruction, and both are made
+  immutable after deployment. The issuers' keys are constants in the binary; a new key enters only on GitHub's own
+  signature, from a rotate workflow whose commit is fixed in the binary and which anyone can call.
+- **Paid to a GitHub account.** A bounty is paid to the pull request author's GitHub user id. No wallet, stake or
+  address is needed to do the work. The author claims later, to any address, by running one workflow in a
+  repository they own.
+- **Funded with one comment.** `/knos bounty 20` on an issue, or as a line of a new issue.
+- **Paid on merge, in any language.** The default mode pays when a maintainer merges the pull request that closes
+  the issue, an hour later unless a maintainer vetoes (the pull request's own description names the issue, so a
+  wrong claim can be taken back). `review 0` pays at once.
+- **A check on every bounty pull request**, running none of its code: the repo's CONTRIBUTING rules, what its
+  history made required, and whether "tests pass" in the description is true at the head commit. This is the Stop
+  hook's check at the place an agent cannot remove it.
+- **Tests mode, hardened.** Python, Node, Go, Rust, any command, and a black-box runner whose verdict the pull
+  request's code cannot touch. Pull request code runs in a sandbox: another user, an empty environment, no network
+  during tests. The judge is the code at the workflow's own commit; the calling repository cannot swap it.
+- **The real tokens fit.** Tokens up to 8,192 bytes (0.3.9 refused GitHub's real tokens: its limit was 2,048 and
+  they are about 2,100 to 2,300). RSA-4096 for GitLab.
+- **Tested like something that will not be changed.** 517 Wycheproof vectors, a differential test against OpenSSL,
+  a 10,000-step random walk over the escrow, 21 cheating pull requests against three judges
+  ([docs/BENCH.md](docs/BENCH.md), [docs/TAMPER.md](docs/TAMPER.md)).
+- **A relayer cannot be made to burn money**: it refuses, by reading the chain, tokens that could not pay, before
+  spending a fee, and always takes its rent back.
+- **The site**: fund, read an escrow, see what is waiting for a GitHub account, claim, and the public numbers with
+  outside use counted apart from Knos's own. A JavaScript client with no dependency (`sdk/settle`).
+- **`knos mainnet-check`** now checks immutability and provenance. It fails on one line on purpose: no outside audit.
+- **Removed**: the admin-registered escrow and its Squads multisig, coordination claims and the edit guard, the MCP
+  server, budgets, Knos Pro, the jobs market, Tempo. `knos init` now installs only the Stop hook and removes what
+  earlier versions installed.
+
 ## 0.3.9 (2 Oct 2026)
 
 AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.

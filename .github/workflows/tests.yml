@@ -1,8 +1,8 @@
 name: tests
 
-# PRs and main stay under 5 minutes of wall time: uv with a cache, pytest -n auto, the Solana CLI pinned and cached,
-# mac and windows on 3.12 only, and 10 property rounds. The full matrix runs nightly; the 200 property rounds run
-# nightly in fuzz.yml.
+# PRs and main stay under 5 minutes of wall time: uv with a cache and pytest -n auto. The suite is offline (conftest
+# refuses every non-loopback connection) and includes the two Solana programs in LiteSVM, the judge on Python, Node,
+# Go and Rust repositories, its sandbox, and the tamper benchmark.
 on:
   push:
     branches: [main]
@@ -18,21 +18,18 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  SOLANA_VERSION: v2.3.13
-
 jobs:
   pytest:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.10", "3.12"]
-        shard: ["1/1"]
-        exclude: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[{"os":"windows-latest"}]' || '[{"os":"macos-latest","python":"3.10"},{"os":"windows-latest"}]') }}
-        # Windows runs the suite in two halves at once (its runner is the slowest): 3.12 on PRs, both nightly.
-        include: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[{"os":"windows-latest","python":"3.10","shard":"1/2"},{"os":"windows-latest","python":"3.10","shard":"2/2"},{"os":"windows-latest","python":"3.12","shard":"1/2"},{"os":"windows-latest","python":"3.12","shard":"2/2"}]' || '[{"os":"windows-latest","python":"3.12","shard":"1/2"},{"os":"windows-latest","python":"3.12","shard":"2/2"}]') }}
+        include:
+          - {os: ubuntu-latest, python: "3.10"}
+          - {os: ubuntu-latest, python: "3.12"}
+          - {os: macos-latest, python: "3.12"}
+          - {os: windows-latest, python: "3.12"}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,12 +41,9 @@ jobs:
           cache-dependency-glob: pyproject.toml
       - run: uv pip install --system -e ".[dev]"
       - run: git config --global user.email ci@example.invalid && git config --global user.name ci
-      # The suite is offline: conftest.py refuses every non-loopback connection and gives each test its own home.
       - run: pytest -q -n auto
-        env:
-          KNOS_SHARD: ${{ matrix.shard }}
-      # The 30-second story, on every OS: the wheel installs into a clean venv, and `knos init` wires a fresh home,
-      # starts the server, passes its self-test, and undoes cleanly.
+      # The 30-second story, on every OS: the wheel installs into a clean venv, `knos init` installs the Stop hook
+      # into a fresh home, the hook answers, and `knos init --undo` leaves the settings as they were.
       - name: wheel installs and knos init works in a clean home
         shell: bash
         run: |
@@ -58,24 +52,44 @@ jobs:
           if [ -d "$RUNNER_TEMP/clean/bin" ]; then BIN="$RUNNER_TEMP/clean/bin"; else BIN="$RUNNER_TEMP/clean/Scripts"; fi
           VIRTUAL_ENV="$RUNNER_TEMP/clean" uv pip install -q dist/*.whl
           export PATH="$BIN:$PATH" HOME="$RUNNER_TEMP/home" USERPROFILE="$RUNNER_TEMP/home"
-          mkdir -p "$HOME/.cursor"
+          mkdir -p "$HOME/.claude"
           start=$(date +%s)
-          knos init --hosts cursor --no-read
-          echo "init took $(( $(date +%s) - start ))s"
+          knos init --hosts claude
+          grep -q "hook proof --client claude" "$HOME/.claude/settings.json"
+          echo '{"cwd": ".", "last_assistant_message": "Here is a plan."}' | knos hook proof --client claude
           test $(( $(date +%s) - start )) -le 30
-          knos init --undo --hosts cursor
+          knos init --undo --hosts claude
+          ! grep -q "knos" "$HOME/.claude/settings.json"
 
-  # Every number in the README opening, the home hero, the submission and the pitch script is checked against devnet,
-  # GitHub or a file in the repo (scripts/claims_check.py).
+  # The JavaScript client against the byte-exact fixtures the Python client wrote (sdk/settle/fixtures.json), and the
+  # web app that uses it.
+  sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node sdk/settle/test.mjs
+      - name: the built site in headless Chromium (mocked GitHub and Solana)
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.56.0
+          npx playwright install --with-deps chromium
+          bash scripts/build_site.sh "$RUNNER_TEMP/site" "$(printf 'c%.0s' $(seq 40))"   # the commit the mocked chain pins
+          node tests/web/site.mjs "$RUNNER_TEMP/site"
+
+  # Every number in the README opening, the home page, the submission and the pitch script is checked against a file
+  # in the repo, devnet or GitHub (scripts/claims_check.py).
   claims:
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -q solders
+      - run: pip install -q -e .
       - run: python scripts/claims_check.py
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,6 +98,7 @@ jobs:
   # framework-called names listed (with reasons) in scripts/vulture_whitelist.py.
   deadcode:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -96,40 +111,4 @@ jobs:
       - run: uv pip install --system -e . vulture==2.14
       - run: python scripts/deadcode.py
       - run: vulture src/knos scripts --min-confidence 60
-
-  # The team registry against the real programs: a local validator with the devnet-deployed Solana Attestation Service
-  # and Lighthouse cloned into it (scripts/devchain.sh). The claim protocol's property test runs 10 rounds here and
-  # 200 nightly (fuzz.yml).
-  chain:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-          cache-dependency-glob: pyproject.toml
-      - run: uv pip install --system -e ".[dev]"
-      - run: git config --global user.email ci@example.invalid && git config --global user.name ci
-      - uses: actions/cache@v4
-        with:
-          path: ~/.local/share/solana/install
-          key: solana-${{ env.SOLANA_VERSION }}-${{ runner.os }}
-      - name: Solana CLI (pinned, cached)
-        run: |
-          [ -x "$HOME/.local/share/solana/install/active_release/bin/solana" ] || sh -c "$(curl -sSfL https://release.anza.xyz/$SOLANA_VERSION/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      - run: bash scripts/devchain.sh start
-      - run: pytest -q -m "" tests/test_sas.py tests/test_team_protocol.py tests/test_team_two_homes.py tests/test_team_records.py tests/test_chain_budgets.py tests/test_bench_chain.py tests/test_network_stats.py tests/test_team_property.py
-        env:
-          KNOSTEST_PROPERTY_N: "10"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: TypeScript SDK (two agents over the Knos MCP server)
-        run: |
-          cd sdk/ts && npm install --no-audit --no-fund
-          R="$RUNNER_TEMP/tsrepo"; mkdir -p "$R" && cd "$R" && git init -q && echo x > a.txt && git add -A && git commit -qm init
-          cd "$GITHUB_WORKSPACE/sdk/ts" && KNOS_TEST_REPO="$R" node test.mjs
+      - run: python scripts/settle_fixtures.py --check

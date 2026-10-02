@@ -47,25 +47,38 @@ class SibylStore:
     def local(cls, root, tenant_id: str = "knos-judge") -> "SibylStore":
         """Sibyl's own local store at <root>/sibyl.db: what prove.yml's judge keeps between runs in the caller repo's
         Actions cache. Offline: no secret, no network, no Sibyl service on the runner."""
-        from pathlib import Path
-        from sibyl_memory_client import MemoryClient
-        Path(root).mkdir(parents=True, exist_ok=True)
-        return cls(MemoryClient.local(str(Path(root) / "sibyl.db"), tenant_id=tenant_id))
+        from .. import store
+        return cls(store.local(root, tenant_id))
 
     @classmethod
     def for_repo(cls, repo) -> "SibylStore":
-        from ..memory import Memory
-        mem = Memory(repo)
-        store = cls(mem.client)
-        store._mem = mem   # keep the connection open for the store's lifetime
-        return store
+        from .. import store
+        client, storage = store.for_repo(repo)
+        got = cls(client)
+        got._storage = storage
+        return got
+
+    def _release(self) -> None:
+        """Close Sibyl's connections after each call: an open SQLite handle locks memory.db (and its -wal/-shm) on
+        Windows, so the store could not be moved, deleted or restored from a cache while a SibylStore is alive.
+        Sibyl's Storage reopens on the next call."""
+        storage = getattr(self.client, "storage", None)
+        if storage is not None:
+            storage.close()
 
     def put(self, category: str, name: str, body: dict) -> None:
-        self.client.set_entity(category, name, body, status="active")
+        try:
+            self.client.set_entity(category, name, body, status="active")
+        finally:
+            self._release()
 
     def all(self, category: str) -> list[dict]:
+        try:
+            rows = self.client.list_entities(category, status="active", limit=10000)
+        finally:
+            self._release()
         out = []
-        for row in self.client.list_entities(category, status="active", limit=10000):
+        for row in rows:
             body = row.get("body")
             if isinstance(body, str):
                 try:
@@ -134,6 +147,9 @@ def learn(store, flagged: list["RuleViolation"] | None = None) -> list[dict]:
         store.client.learn()
     except Exception:  # noqa: BLE001 - free tier, or a NullStore
         pass
+    finally:
+        if hasattr(store, "_release"):
+            store._release()
     return rules(store)
 
 
@@ -188,75 +204,6 @@ def tamper_checks_required(store, repo=None, agent=None) -> set[str]:
 
 
 # ---- a delivery against what the buyer told us before (Sibyl) ---------------------------------------------------
-
-@dataclass
-class PreferenceViolation:
-    preference: str
-    line: int          # 1-based line of the delivery
-    text: str
-    why: str
-
-    def __str__(self) -> str:
-        return (f"line {self.line}: {self.text.strip()!r} contradicts the buyer's preference "
-                f"{self.preference!r} ({self.why})")
-
-
-_EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿⭐⭕‼⁉]")
-_BULLET = re.compile(r"^\s*([-*+•]|\d+[.)])\s+")
-_WORDS = re.compile(r"\b(?:under|fewer than|less than|at most|max(?:imum)?(?: of)?|no more than|up to)\s+(\d+)\s+words?\b")
-_US_UK = {"color": "colour", "colors": "colours", "colored": "coloured", "favor": "favour", "favorite": "favourite",
-          "behavior": "behaviour", "honor": "honour", "labor": "labour", "neighbor": "neighbour", "flavor": "flavour",
-          "humor": "humour", "organize": "organise", "organization": "organisation", "realize": "realise",
-          "recognize": "recognise", "analyze": "analyse", "optimize": "optimise", "apologize": "apologise",
-          "center": "centre", "theater": "theatre", "catalog": "catalogue", "gray": "grey", "defense": "defence",
-          "traveled": "travelled", "canceled": "cancelled", "customize": "customise", "prioritize": "prioritise"}
-
-
-def _prefs_of(store_or_memory, buyer: str | None) -> list[str]:
-    if store_or_memory is None:
-        return []
-    if isinstance(store_or_memory, (list, tuple)):
-        return [str(p) for p in store_or_memory]
-    if hasattr(store_or_memory, "preferences"):       # jobs.buyer_memory.BuyerMemory
-        return list(store_or_memory.preferences())
-    rows = store_or_memory.all("buyer_preference")    # a proof store: {"buyer", "preference"}
-    return [r["preference"] for r in rows if r.get("preference") and (buyer is None or r.get("buyer") == buyer)]
-
-
-def lint_preferences(store_or_memory, buyer: str | None, delivery_text: str) -> list[PreferenceViolation]:
-    """Each place the delivery contradicts a preference the buyer stated before (recalled from Sibyl), citing the
-    delivery's line. Deterministic patterns, no model: no emojis, British spelling, under/at most N words, no bullet
-    points, no exclamation marks."""
-    lines = delivery_text.splitlines()
-    out: list[PreferenceViolation] = []
-    for pref in _prefs_of(store_or_memory, buyer):
-        p = pref.lower()
-        if re.search(r"\b(no|without|avoid|never|don'?t)\b.*\bemoji", p):
-            out += [PreferenceViolation(pref, i, ln, "emoji") for i, ln in enumerate(lines, 1) if _EMOJI.search(ln)]
-        if re.search(r"\b(british|uk)\b.*\b(spelling|english)\b", p):
-            for i, ln in enumerate(lines, 1):
-                for w in re.findall(r"[A-Za-z]+", ln):
-                    if w.lower() in _US_UK:
-                        out.append(PreferenceViolation(pref, i, ln, f"US spelling {w!r}; British is "
-                                                                    f"{_US_UK[w.lower()]!r}"))
-        if re.search(r"\b(no|without|avoid|never|don'?t)\b.*\bbullet", p):
-            out += [PreferenceViolation(pref, i, ln, "bullet point") for i, ln in enumerate(lines, 1)
-                    if _BULLET.match(ln)]
-        if re.search(r"\b(no|without|avoid|never|don'?t)\b.*\bexclamation", p):
-            out += [PreferenceViolation(pref, i, ln, "exclamation mark") for i, ln in enumerate(lines, 1) if "!" in ln]
-        m = _WORDS.search(p)
-        if m:
-            strict = re.match(r"(under|fewer than|less than)", m.group(0))
-            limit = int(m.group(1)) - (1 if strict else 0)
-            n = 0
-            for i, ln in enumerate(lines, 1):
-                n += len(ln.split())
-                if n > limit:
-                    out.append(PreferenceViolation(pref, i, ln, f"{len(delivery_text.split())} words; the limit is "
-                                                                f"passed on this line"))
-                    break
-    return out
-
 
 # ---- a PR against the repo's own rules: CONTRIBUTING.md and past rejections (Sibyl) ------------------------------
 

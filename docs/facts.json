@@ -1,0 +1,184 @@
+{
+ "facts": [
+  {
+   "say": [
+    "2,431"
+   ],
+   "what": "agent pull requests in the index that claim tests or CI pass and have finished CI",
+   "json": "docs/bench.json",
+   "path": "market.index.overall.claimed_green",
+   "equals": 2431
+  },
+  {
+   "say": [
+    "660"
+   ],
+   "what": "of those, the ones with a failing check at the head commit",
+   "json": "docs/bench.json",
+   "path": "market.index.overall.actually_failed",
+   "equals": 660
+  },
+  {
+   "say": [
+    "27.2%"
+   ],
+   "what": "660 of 2,431",
+   "json": "docs/bench.json",
+   "path": "market.index.overall.share",
+   "equals": 0.2715
+  },
+  {
+   "say": [
+    "6"
+   ],
+   "what": "the index is rebuilt every 6 hours",
+   "file": ".github/workflows/index.yml",
+   "has": "cron: \"17 */6 * * *\""
+  },
+  {
+   "say": [
+    "21",
+    "17"
+   ],
+   "what": "cheating pull requests in the tamper benchmark, and how many fooled plain CI",
+   "file": "docs/TAMPER.md",
+   "has": "CI green fooled 17/21. Knos, tests: fooled 2/21. Knos, black box: fooled 0/21."
+  },
+  {
+   "say": [
+    "2.5%"
+   ],
+   "what": "the fee, fixed in the escrow program",
+   "file": "programs/knos_pay/src/lib.rs",
+   "has": "pub const FEE_BPS: u64 = 250;"
+  },
+  {
+   "say": [
+    "0.05"
+   ],
+   "what": "the minimum fee in USDC (6 decimals)",
+   "file": "programs/knos_pay/src/lib.rs",
+   "has": "pub const FEE_MIN: u64 = 50_000;"
+  },
+  {
+   "say": [
+    "14"
+   ],
+   "what": "days before an unproven bounty is refunded, by default",
+   "file": ".github/workflows/fund.yml",
+   "matches": "work-days:[^\\n]*\\n(?:[^\\n]*\\n){0,4}?\\s+default: 14"
+  },
+  {
+   "say": [
+    "24"
+   ],
+   "what": "hours a tests-mode payment waits, by default",
+   "file": ".github/workflows/fund.yml",
+   "has": "int(m.group(2) or 86400)"
+  },
+  {
+   "say": [
+    "2048",
+    "4096"
+   ],
+   "what": "RSA key sizes the verifier is tested with",
+   "file": "docs/BENCH.md",
+   "has": "517 vectors, for 2048- and 4096-bit keys"
+  },
+  {
+   "say": [
+    "517"
+   ],
+   "what": "Wycheproof vectors run against the RSA arithmetic",
+   "file": "docs/BENCH.md",
+   "has": "517 vectors"
+  },
+  {
+   "say": [
+    "10,000"
+   ],
+   "what": "steps in the escrow's random walk, with no violation",
+   "file": "docs/BENCH.md",
+   "has": "Last 10,000-step run: 0 violations."
+  },
+  {
+   "say": [
+    "105,000"
+   ],
+   "what": "lamports of fees to relay a whole bounty",
+   "file": "docs/BENCH.md",
+   "has": "costs a relayer 105,000"
+  },
+  {
+   "say": [
+    "2,100",
+    "3"
+   ],
+   "what": "a GitHub Actions token's size and the transactions that write it",
+   "file": "docs/BENCH.md",
+   "matches": "2,086 to 2,276 bytes[^.]*\\n?[^.]*writing it takes 3 transactions"
+  },
+  {
+   "say": [
+    "2",
+    "1"
+   ],
+   "what": "an RSA-2048 signature check is 2 transactions, each under 1M compute units",
+   "file": "docs/BENCH.md",
+   "has": "| 2 | 764,395 and 832,314 |"
+  },
+  {
+   "say": [
+    "1.4"
+   ],
+   "what": "Solana's compute limit per transaction, in millions",
+   "file": "docs/BENCH.md",
+   "has": "The limit is 1,400,000 per transaction."
+  },
+  {
+   "say": [
+    "22,515"
+   ],
+   "what": "compute units for another program to read a verified token",
+   "file": "docs/BENCH.md",
+   "has": "| part of its own | 22,515 |"
+  },
+  {
+   "say": [
+    "1,470",
+    "175"
+   ],
+   "what": "payouts on the Algora bounty board in 2025, and in 2026 to 10 Aug",
+   "source": "https://incubagent.com/research/agent-bounty-market/",
+   "read": "2026-10-02"
+  },
+  {
+   "say": [
+    "$5",
+    "5"
+   ],
+   "what": "run-rate revenue of coding agents sold by usage, about $5B (Claude Code over $2.5B, Cursor $2B, Cognition $492M); the three sources are in docs/MARKET.md",
+   "source": "https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation",
+   "read": "2026-10-02"
+  },
+  {
+   "say": [
+    "75.41",
+    "75"
+   ],
+   "what": "x402 agent payments in 30 days, in millions of transactions",
+   "source": "https://solanacompass.com/news/solana-processes-76-of-all-x402-ai-agent-transactions-232-million-in-four-weeks",
+   "read": "2026-10-02"
+  },
+  {
+   "say": [],
+   "what": "both programs are deployed on devnet with no upgrade authority",
+   "live": "immutable"
+  },
+  {
+   "say": [],
+   "what": "a whole bounty has been paid on the deployed programs",
+   "live": "run"
+  }
+ ]
+}

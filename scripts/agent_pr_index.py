@@ -5,24 +5,20 @@ actually say at the head SHA? Same agents, claim regexes and CI verdict as agent
 Two steps, so the Pages build never scans:
 
     python scripts/agent_pr_index.py scan --rows rows.json     # >=2,000 PRs (slow; .github/workflows/index.yml, 6 h)
-    python scripts/agent_pr_index.py build --rows rows.json --out index.json   # offline + devnet proofs
-    python scripts/agent_pr_index.py attest --out _site/index.json   # Pages build: re-check root, attest on SAS
+    python scripts/agent_pr_index.py build --rows rows.json --out index.json   # offline
 
 index.yml uploads index.json as the asset of a GitHub Release tagged index-<date> (a release, not a data commit);
-network.yml downloads the newest one into the Pages site and attests its root with env KNOS_ATTEST_KEY.
+network.yml downloads the newest one into the Pages site.
 
 The scan searches each agent over date windows (GitHub caps a query at 1,000 results), drops PRs on repos owned by
 the PR's author or the human who assigned the agent (self repos are not a market observation; the count is kept),
 and classifies CI at each head SHA. The build writes:
 
     {"date", "window", "n_prs", "excluded_self_repo", "overall": {...}, "agents": {name: {claimed_green,
-     actually_failed, share, ci95: [lo, hi], proven}}, "proven": {worker: distinct funders}, "prs": [...], "root",
-     "attestation"?, "signature"?, "attest_error"?}
+     actually_failed, share, ci95: [lo, hi]}}, "prs": [...], "root"}
 
-`ci95` is the 95% Wilson interval of `share`. `proven` counts, per worker, the distinct funders (buyer wallets) that
-paid it through a verified proof (the escrow's verify_release, read from devnet): ten payments from one funder
-count once. `root` is the sha256 Merkle root over the per-PR records; with env KNOS_ATTEST_KEY it is attested on
-Solana devnet SAS, so anyone can check the published list is the one that was counted.
+`ci95` is the 95% Wilson interval of `share`. `root` is the sha256 Merkle root over the per-PR records, so anyone can
+check that the published list is the one that was counted: recompute it with `python scripts/agent_pr_index.py check`.
 """
 import argparse
 import datetime as dt
@@ -35,13 +31,18 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent_pr_ci  # noqa: E402
-from knos.proof.receipt import merkle_root  # noqa: E402
 
-DEVNET = "https://api.devnet.solana.com"
+
+def merkle_root(leaves: list[bytes]) -> bytes:
+    level = sorted(leaves) or [hashlib.sha256(b"").digest()]
+    while len(level) > 1:
+        if len(level) % 2:
+            level.append(level[-1])
+        level = [hashlib.sha256(level[i] + level[i + 1]).digest() for i in range(0, len(level), 2)]
+    return level[0]
+
 PR_KEYS = ("agent", "repo", "number", "sha", "class", "failed_checks", "phrase")
 COMPLETED = ("failed", "passed", "other")
-VERIFY_RELEASE = 11  # escrow instruction tag (knos.jobs.sol.verify_release): paid on a verified proof
-WORKER_TOKEN, BUYER = 4, 8  # its account positions (knos.jobs.sol._payout)
 
 
 def record(c):
@@ -70,91 +71,23 @@ def tally(mine):
             "share": round(failed / green, 4) if green else None, "ci95": wilson(failed, green)}
 
 
-def distinct_funders(payments):
-    """payments: [{"worker", "funder", "verified"}]. Reputation counts each funder once: {worker: n distinct}."""
-    out = {}
-    for p in payments:
-        if p.get("verified") and p.get("worker") and p.get("funder"):
-            out.setdefault(p["worker"], set()).add(p["funder"])
-    return {w: len(f) for w, f in sorted(out.items())}
-
-
-def payments_from_tx(tx, program):
-    """The verify_release payouts in one confirmed devnet transaction (json encoding): worker token account and the
-    buyer who funded the job. A failed transaction pays nothing."""
-    if not tx or (tx.get("meta") or {}).get("err") is not None:
-        return []
-    from network_stats import _b58_first_byte
-    msg = tx["transaction"]["message"]
-    keys = msg["accountKeys"] + [k for side in ("writable", "readonly")
-                                 for k in ((tx.get("meta") or {}).get("loadedAddresses") or {}).get(side, [])]
-    out = []
-    for ix in msg["instructions"]:
-        if keys[ix["programIdIndex"]] != program or _b58_first_byte(ix["data"]) != VERIFY_RELEASE:
-            continue
-        acc = ix["accounts"]
-        if len(acc) > BUYER:
-            out.append({"worker": keys[acc[WORKER_TOKEN]], "funder": keys[acc[BUYER]], "verified": True})
-    return out
-
-
-def chain_payments(url=os.environ.get("KNOS_DEVNET_RPC", DEVNET), limit=1000):
-    """Every verify_release in the escrow program's recent devnet history (settled jobs are closed accounts, so
-    their payouts live only in transaction history). Returns (payments, n transactions left unread)."""
-    from knos.jobs import sol
-    from knos.team import rpc
-    from concurrent.futures import ThreadPoolExecutor
-    pid = sol.program_id()
-    sigs = [s["signature"] for s in rpc.signatures_for(url, pid, limit=limit, timeout=30.0) if s.get("err") is None]
-
-    def read(sig):
-        try:
-            return rpc.transaction(url, sig, timeout=30.0)  # rpc.call backs off on the endpoint's 429s
-        except Exception:  # still throttled: counted as unread, never guessed
-            return False
-
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        txs = list(ex.map(read, sigs))
-    return [p for tx in txs if tx for p in payments_from_tx(tx, str(pid))], sum(1 for tx in txs if tx is False)
-
-
-def build(rows, date, window, excluded=0, payments=()):
+def build(rows, date, window, excluded=0):
     """rows: classified candidates with a claim; only those whose CI had finished at the head SHA are counted and
     listed. Deterministic for the same rows (order-independent)."""
     prs = sorted((record(r) for r in rows if r.get("class") in COMPLETED), key=lambda r: (r["repo"].lower(), r["number"]))
-    proven = distinct_funders(payments)
-    agents = {}
-    for name, _ in agent_pr_ci.AGENTS:
-        agents[name] = tally([r for r in prs if r["agent"] == name])
-        agents[name]["proven"] = proven.get(name, 0)
+    agents = {name: tally([r for r in prs if r["agent"] == name]) for name, _ in agent_pr_ci.AGENTS}
     root = merkle_root([leaf(r) for r in prs])
     return {"date": date, "window": list(window), "n_prs": len(prs), "excluded_self_repo": excluded,
-            "overall": tally(prs), "agents": agents, "proven": proven, "prs": prs, "root": root.hex()}
+            "overall": tally(prs), "agents": agents, "prs": prs, "root": root.hex()}
 
 
-def attest(index, key_json):
-    from solders.keypair import Keypair
-
-    from knos.proof import receipt
-    key = Keypair.from_bytes(bytes(json.loads(key_json)))
-    sig, att = receipt.publish(DEVNET, key, bytes.fromhex(index["root"]), "", f"agent-pr-index {index['date']}")
-    index.update({"attestation": str(att), "signature": str(sig), "attester": str(key.pubkey())})
-
-
-def attest_file(path, key_json):
-    """Re-derive the root from the published per-PR records (a tampered list does not attest), then attest it."""
+def check(path):
+    """Recompute the root from the published per-PR records; exits non-zero if the list was edited after the count."""
     with open(path, encoding="utf-8") as f:
         index = json.load(f)
-    if merkle_root([leaf(r) for r in index["prs"]]).hex() != index["root"]:
-        raise SystemExit(f"{path}: root does not match its prs; not attested")
-    for k in ("attestation", "signature", "attester", "attest_error"):
-        index.pop(k, None)
-    try:
-        attest(index, key_json)
-    except Exception as e:  # the site still ships; the missing attestation is visible in the JSON
-        index["attest_error"] = str(e)[:300]
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False)
+    got = merkle_root([leaf(r) for r in index["prs"]]).hex()
+    if got != index["root"]:
+        raise SystemExit(f"{path}: root {index['root']} does not match its {len(index['prs'])} records ({got})")
     return index
 
 
@@ -173,7 +106,7 @@ def scan(end, days, per_agent, max_seconds):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("step", choices=["scan", "build", "attest"])
+    ap.add_argument("step", choices=["scan", "build", "check"])
     ap.add_argument("--rows", default="rows.json")
     ap.add_argument("--out", default="_site/index.json")
     ap.add_argument("--end", default=(dt.date.today() - dt.timedelta(days=1)).isoformat())
@@ -187,34 +120,18 @@ def main():
             json.dump(got, f, ensure_ascii=False)
         print(f"scanned {len(got['rows'])} PRs, counts {got['counts']}", file=sys.stderr)
         return 0
-    if a.step == "attest":
-        if not os.environ.get("KNOS_ATTEST_KEY"):
-            print("KNOS_ATTEST_KEY unset; index.json ships unattested", file=sys.stderr)
-            return 0
-        index = attest_file(a.out, os.environ["KNOS_ATTEST_KEY"])
-        print(f"agent PR index root {index['root']}: attestation {index.get('attestation') or index.get('attest_error')}",
-              file=sys.stderr)
+    if a.step == "check":
+        index = check(a.out)
+        print(f"agent PR index: {index['n_prs']} PRs, root {index['root']} matches", file=sys.stderr)
         return 0
     with open(a.rows, encoding="utf-8") as f:
         got = json.load(f)
-    try:
-        payments, unread = chain_payments()
-        chain_error = f"{unread} escrow transactions unread (RPC throttled)" if unread else None
-    except Exception as e:  # the index still ships; proven counts are then zero and the error is in the JSON
-        payments, chain_error = [], str(e)[:300]
-    index = build(got["rows"], dt.date.today().isoformat(), got["window"], got["counts"]["excluded"], payments)
-    if chain_error:
-        index["proven_error"] = chain_error
-    if os.environ.get("KNOS_ATTEST_KEY"):
-        try:
-            attest(index, os.environ["KNOS_ATTEST_KEY"])
-        except Exception as e:  # the site still ships; the missing attestation is visible in the JSON
-            index["attest_error"] = str(e)[:300]
+    index = build(got["rows"], dt.date.today().isoformat(), got["window"], got["counts"]["excluded"])
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as f:
         json.dump(index, f, ensure_ascii=False)
     print(f"agent PR index: {index['n_prs']} PRs, {index['excluded_self_repo']} self-repo PRs excluded, "
-          f"root {index['root']}, attestation {index.get('attestation') or index.get('attest_error') or 'none'}",
+          f"root {index['root']}",
           file=sys.stderr)
     return 0
 

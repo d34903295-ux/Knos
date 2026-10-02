@@ -1,29 +1,44 @@
 name: knos fund
 
-# A reusable workflow, called from a repo's own knos.yml (examples/knos-workflow.yml) on issue_comment:
+# A reusable workflow, called from a repo's own knos.yml (examples/knos-workflow.yml). A user with write access
+# (author_association OWNER, MEMBER or COLLABORATOR) funds a bounty in one action, from GitHub itself:
 #
-#     /knos bounty <amount> [stake]
+#     /knos bounty <amount> [review <seconds>]      as a comment on issue N, or as a line of a NEW issue's description
+#     /knos veto                                    as a comment: takes back a tests-mode payment in its review window
 #
-# by a user with write access (author_association OWNER, MEMBER or COLLABORATOR) on issue N funds a Knos bounty for
-# the acceptance tests in .knos/acceptance/N/ on the default branch. No secret, wallet or faucet in the calling repo:
-#   mint     checks out the DEFAULT branch (never a pull request), hashes .knos/acceptance/<N>/, and mints a GitHub
-#            Actions OIDC token with audience knos:fund:<N>:<amount in units>:<checks hash>:<stake 0|1>. The escrow
-#            accepts it only from this file at the commit Knos pinned (job_workflow_sha). Published as artifact
-#            `knos-fund`.
-#   relay    the CALLER then runs relay.yml (a sibling job in knos.yml, not nested here), which posts `knos-fund: <token>` on the issue; the always-on worker funds the escrow with it,
-#            paying the gas, and logs the result; relay.yml then comments the verdict with the caller's own token.
+# No secret, wallet or faucet in the calling repo. This job checks out the DEFAULT branch only (never a pull request)
+# and asks GitHub for an OIDC token whose audience says exactly what to do. knos-pay accepts it only from this file
+# at the commit the bounty pins (job_workflow_sha), on a GitHub-hosted runner:
+#
+#     knos:fund:<issue>:<amount in units>:<mode>:<checks hash>:<work seconds>:<review seconds>
+#     knos:veto:<repository id>:<issue>
+#
+# mode 0 (merge) is the default: the bounty is paid when a maintainer merges the pull request that closes the issue,
+# after the review window (default 1 hour; `review 0` pays at once) unless vetoed.
+# mode 1 (tests) applies when .knos/acceptance/<N>/ exists on the default branch: the bounty is paid when those
+# acceptance checks pass on a pull request, after the review window (default 24 hours) unless vetoed. The checks hash
+# is sha256 over that directory (sorted relative paths, each "path\0sha256(content)\n"); it is 64 zeros in mode 0.
+# The token is published as artifact `knos-fund` or `knos-veto`; the caller's relay.yml job posts it for the worker.
 on:
   workflow_call:
     inputs:
       decimals:
-        description: the bounty token's decimals (devnet USDC 6)
+        description: the bounty token's decimals (USDC has 6)
         required: false
         type: number
         default: 6
+      work-days:
+        description: days until an unproven bounty is refunded
+        required: false
+        type: number
+        default: 14
     outputs:
       issue:
-        description: the issue the bounty was funded on ('' when the comment was not a valid /knos bounty)
+        description: the issue number ('' when the comment was not a valid command)
         value: ${{ jobs.mint.outputs.issue }}
+      kind:
+        description: fund or veto
+        value: ${{ jobs.mint.outputs.kind }}
 
 permissions: {}
 
@@ -32,14 +47,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: >-
-      github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/knos bounty ') &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+       (startsWith(github.event.comment.body, '/knos bounty ') || startsWith(github.event.comment.body, '/knos veto')) &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'issues' && github.event.action == 'opened' && contains(github.event.issue.body, '/knos bounty ') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
     permissions:
       contents: read
       id-token: write
     outputs:
       issue: ${{ steps.parse.outputs.issue }}
+      kind: ${{ steps.parse.outputs.kind }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,40 +65,55 @@ jobs:
           persist-credentials: false
       - id: parse
         env:
-          BODY: ${{ github.event.comment.body }}
+          BODY: ${{ github.event_name == 'issues' && github.event.issue.body || github.event.comment.body }}
+          EVENT: ${{ github.event_name }}
           ISSUE: ${{ github.event.issue.number }}
+          REPO_ID: ${{ github.repository_id }}
           DECIMALS: ${{ inputs.decimals }}
+          WORK_DAYS: ${{ inputs.work-days }}
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import hashlib, os, re, sys
           from decimal import Decimal
           from pathlib import Path
-          m = re.match(r"/knos bounty\s+(\d+(?:\.\d+)?)(\s+stake)?\s*$", os.environ["BODY"].strip().splitlines()[0])
-          if not m:
-              sys.exit("usage: /knos bounty <amount> [stake]")
-          units = int(Decimal(m.group(1)) * 10 ** int(os.environ["DECIMALS"]))
+          lines = [x.strip() for x in os.environ["BODY"].strip().splitlines()]
+          if os.environ["EVENT"] == "issues":      # a new issue: the command is any line of its description
+              lines = [x for x in lines if x.startswith("/knos bounty ")] or [""]
+          line = lines[0]
           issue = int(os.environ["ISSUE"])
-          root = Path(".knos/acceptance") / str(issue)
-          if not root.is_dir():
-              sys.exit(f"no {root}/ on the default branch: nothing to check a fix against")
-          # identical to knos.proof.ghrelay.checks_hash
-          h = hashlib.sha256()
-          for f in sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: p.relative_to(root).as_posix()):
-              h.update(f"{f.relative_to(root).as_posix()}\0{hashlib.sha256(f.read_bytes()).hexdigest()}\n".encode())
           print(f"issue={issue}")
-          print(f"aud=knos:fund:{issue}:{units}:{h.hexdigest()}:{1 if m.group(2) else 0}")
+          if re.fullmatch(r"/knos veto", line):
+              print("kind=veto")
+              print(f"aud=knos:veto:{int(os.environ['REPO_ID'])}:{issue}")
+              sys.exit(0)
+          m = re.fullmatch(r"/knos bounty\s+(\d+(?:\.\d+)?)(?:\s+review\s+(\d+))?", line)
+          if not m:
+              sys.exit("usage: /knos bounty <amount> [review <seconds>]   or   /knos veto")
+          units = int(Decimal(m.group(1)) * 10 ** int(os.environ["DECIMALS"]))
+          root = Path(".knos/acceptance") / str(issue)
+          if root.is_dir() and any(p.is_file() for p in root.rglob("*")):
+              # identical to knos.judge.checks_hash
+              h = hashlib.sha256()
+              for f in sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: p.relative_to(root).as_posix()):
+                  h.update(f"{f.relative_to(root).as_posix()}\0{hashlib.sha256(f.read_bytes()).hexdigest()}\n".encode())
+              mode, checks, review = 1, h.hexdigest(), int(m.group(2) or 86400)
+          else:      # paid on merge, an hour later: the pull request names the issue it closes, so a maintainer
+              mode, checks, review = 0, "0" * 64, int(m.group(2) or 3600)   # can still veto a wrong claim
+          work = int(os.environ["WORK_DAYS"]) * 86400
+          print("kind=fund")
+          print(f"aud=knos:fund:{issue}:{units}:{mode}:{checks}:{work}:{review}")
           PY
       - name: mint the OIDC token
         env:
           AUD: ${{ steps.parse.outputs.aud }}
+          KIND: ${{ steps.parse.outputs.kind }}
         run: |
           mkdir -p "$RUNNER_TEMP/knos"
           curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD" | jq -r .value > "$RUNNER_TEMP/knos/token.txt"
-          echo "minted a token for $AUD"
+          echo "minted a $KIND token for $AUD"
       - uses: actions/upload-artifact@v4
         with:
-          name: knos-fund
+          name: knos-${{ steps.parse.outputs.kind }}
           path: ${{ runner.temp }}/knos/token.txt
           retention-days: 1
-

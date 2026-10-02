@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from knos.jobs import prove
+from knos import judge as prove
 from knos.proof import history
 
 PRINT_DIFF = ("diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,5 @@\n def add(a, b):\n"

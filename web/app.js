@@ -1,361 +1,259 @@
-// Knos web app: hire an agent, review its work, see every agent's record. It reads the escrow on Solana devnet
-// directly and builds each transaction here (web/chain.js), so it works with no Knos server at all; your wallet shows
-// the transaction and signs it. The API (the relay that carries briefs and sealed work, and Solana Actions) is found
-// through a devnet pointer memo, or ?api=. Deliverables are sealed to a key only your wallet can re-derive.
-import * as chain from "./chain.js";
+// The Knos web app beyond the front door (front.js): fund an issue, read an escrow, see what is waiting for a GitHub
+// account, claim it, the public numbers. Everything is read in the browser from the public GitHub API and Solana
+// devnet; the only writes are links to GitHub (where GitHub asks you to confirm) and, for a sponsor, one transaction
+// your own wallet signs. No Knos server exists.
+import * as knos from "./settle.js";
+import { KNOS_SHA } from "./front.js";
 
-const params = new URLSearchParams(location.search);
-const CHAIN = params.get("chain") || "solana:devnet";
 const $ = (id) => document.getElementById(id);
-const state = { wallet: null, account: null, sealKey: null, api: undefined };
+const RPC = "https://api.devnet.solana.com";
+const GH = "https://api.github.com";
+const EXPLORER = (kind, id) => `https://explorer.solana.com/${kind}/${id}?cluster=devnet`;
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const usdc = (units) => (units / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const say = (el, html, kind = "") => { el.innerHTML = `<p class="status ${kind}">${html}</p>`; };
 
-// ---- theme -------------------------------------------------------------------------------------------------------
+// ---- theme and routing ---------------------------------------------------------------------------------------------
 function setTheme(t) {
-  if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
-  try { t ? localStorage.setItem("knos-theme", t) : localStorage.removeItem("knos-theme"); } catch {}
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("knos-theme", t); } catch { /* private mode */ }
 }
-try { const t = localStorage.getItem("knos-theme"); if (t) setTheme(t); } catch {}
-$("theme").onclick = () => {
-  const dark = document.documentElement.dataset.theme
-    ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
-  setTheme(dark ? "light" : "dark");
-};
+try { const t = localStorage.getItem("knos-theme"); if (t) setTheme(t); } catch { /* private mode */ }
+$("theme").onclick = () => setTheme((document.documentElement.dataset.theme
+  || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")) === "dark" ? "light" : "dark");
 
-// ---- routing -----------------------------------------------------------------------------------------------------
-const VIEWS = ["check", "hire", "jobs", "agents", "network", "bounty"];
+const VIEWS = ["check", "bounty", "claim", "network", "build"];
 function route() {
-  const v = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "check";
-  for (const name of VIEWS) $(`view-${name}`).hidden = name !== v;
-  document.querySelectorAll("nav a").forEach((a) => (a.getAttribute("href") === `#${v}`
-    ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
-  ({ jobs: loadJobs, agents: loadAgents, network: loadNetwork })[v]?.();
+  const [name, arg] = location.hash.replace(/^#/, "").split("=");
+  const view = VIEWS.includes(name) ? name : "check";
+  for (const v of VIEWS) $(`view-${v}`).hidden = v !== view;
+  for (const a of document.querySelectorAll("nav a")) a.toggleAttribute("aria-current", a.getAttribute("href") === `#${view}`);
+  if (view === "network") loadNetwork();
+  if (view === "bounty" && arg) { $("st-issue").value = decodeURIComponent(arg); readEscrow(); }
+  if (view === "claim" && arg) { $("due-login").value = decodeURIComponent(arg); readDue(); }
 }
 addEventListener("hashchange", route);
 
-// ---- helpers -----------------------------------------------------------------------------------------------------
-const b64 = { dec: (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0)),
-  enc: (u8) => btoa(String.fromCharCode(...u8)) };
-const hex = (u8) => [...u8].map((b) => b.toString(16).padStart(2, "0")).join("");
-const unhex = (h) => Uint8Array.from(h.match(/../g).map((x) => parseInt(x, 16)));
-const usdc = (n) => Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 });
-const short = (s) => (s ? `${s.slice(0, 4)}…${s.slice(-4)}` : "—");
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const sha256 = async (u8) => new Uint8Array(await crypto.subtle.digest("SHA-256", u8));
-function say(el, text, kind = "") { el.textContent = text; el.className = `status ${kind}`; }
-const store = {
-  get: (k, d) => { try { return JSON.parse(localStorage.getItem(k) || "null") ?? d; } catch { return d; } },
-  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+// ---- the deployed programs -----------------------------------------------------------------------------------------
+let idsP;
+const ids = () => (idsP ||= fetch("program_ids.json").then((r) => r.json()));
+const client = async () => knos.client(await ids());
+
+async function gh(path) {
+  const r = await fetch(GH + path, { headers: { Accept: "application/vnd.github+json" } });
+  if ((r.status === 403 || r.status === 429) && r.headers.get("x-ratelimit-remaining") === "0") {
+    throw new Error("GitHub's free limit for this network is used up (60 reads an hour without login). Try again in an hour.");
+  }
+  if (r.status === 404) throw new Error("GitHub has no such public repository, issue or user.");
+  if (!r.ok) throw new Error(`GitHub said ${r.status}`);
+  return r.json();
+}
+
+export function parseIssue(s) {
+  const m = /^(?:https:\/\/github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:#|\/issues\/)(\d+)\/?$/.exec((s || "").trim());
+  return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : null;
+}
+export function parseRepo(s) {
+  const m = /^(?:https:\/\/github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec((s || "").trim());
+  return m ? { owner: m[1], repo: m[2] } : null;
+}
+
+// ---- fund: a new issue whose description carries the command -------------------------------------------------------
+export function newIssueUrl(owner, repo, title, amount) {
+  const body = `<!-- describe what done looks like; whoever's pull request is merged for this issue is paid -->\n\n\n/knos bounty ${amount}`;
+  return `https://github.com/${owner}/${repo}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+}
+
+$("new-issue-form").onsubmit = (ev) => {
+  ev.preventDefault();
+  const ref = parseRepo($("ni-repo").value), amount = Number($("ni-amount").value);
+  if (!ref) return say($("ni-result"), "Enter the repository as owner/repo.", "bad");
+  if (!(amount >= 1 && amount <= 100)) return say($("ni-result"), "On devnet a bounty is 1 to 100 test USDC.", "bad");
+  const url = newIssueUrl(ref.owner, ref.repo, $("ni-title").value.trim(), amount);
+  $("ni-result").innerHTML = `<a class="button" id="ni-open" href="${esc(url)}" target="_blank" rel="noopener">Open it on ${esc(ref.owner)}/${esc(ref.repo)}</a>
+    <p class="fine">GitHub shows the issue with <code>/knos bounty ${esc(amount)}</code> on its last line: submit it. The repo
+      must already run Knos (<a href="#check">protect it first</a>), and you need write access to it.</p>`;
 };
 
-// The API: ?api=, else this origin when it is one (knos jobs serve), else the devnet pointer. Optional everywhere.
-async function api() {
-  if (state.api !== undefined) return state.api;
-  const tries = [params.get("api")];
-  if (!/github\.io$/.test(location.hostname)) tries.push(location.origin);
-  try { tries.push(await chain.apiUrl()); } catch {}
-  for (const u of tries.filter(Boolean)) {
-    try {
-      const r = await fetch(`${u.replace(/\/$/, "")}/actions.json`, { signal: AbortSignal.timeout(4000) });
-      if (r.ok) return (state.api = u.replace(/\/$/, ""));
-    } catch {}
+// ---- read an issue's escrow ----------------------------------------------------------------------------------------
+function jobHtml(address, job, now, author) {
+  const left = Math.max(0, job.deadline - now), hours = Math.floor(left / 3600);
+  const held = job.review ? `, held ${job.review >= 3600 ? `${Math.round(job.review / 3600)} h` : `${job.review} s`} first` : "";
+  const how = (job.mode === knos.MERGE ? "paid when a maintainer merges the pull request that closes the issue"
+    : "paid when its acceptance checks pass") + held;
+  let state;
+  if (job.state === "open") state = `<strong class="status ok">open</strong>, ${how}`;
+  else {
+    const wait = Math.max(0, job.payAfter - now);
+    state = `<strong>proven</strong> for ${author ? esc(author) : `GitHub user ${job.authorId}`}; released in `
+      + `${wait >= 3600 ? `${Math.ceil(wait / 3600)} h` : `${wait} s`} unless a maintainer vetoes`;
   }
-  return (state.api = null);
+  return `<dl class="facts">
+    <dt>In escrow</dt><dd><strong>${usdc(job.amount)} USDC</strong> (fee when paid: ${usdc(knos.feeOf(job.amount))})</dd>
+    <dt>State</dt><dd>${state}</dd>
+    <dt>Funded by</dt><dd>${job.tokenFunded ? "the repository, with a GitHub-signed comment" : `wallet <span class="mono">${esc(job.funder)}</span>`}</dd>
+    <dt>If unproven</dt><dd>refunded in ${hours} h</dd>
+    <dt>Pinned workflow</dt><dd class="mono">${esc(job.wfSha)}</dd>
+    <dt>Account</dt><dd><a class="mono" href="${EXPLORER("address", address)}" target="_blank" rel="noopener">${esc(address)}</a></dd>
+  </dl>`;
 }
 
-// Briefs posted while the relay was unreachable wait here, and go up the next time it answers.
-async function flushPendingBriefs() {
-  const pending = store.get("knos-pending-briefs", []);
-  const base = pending.length ? await api() : null;
-  if (!base) return;
-  const left = [];
-  for (const b of pending) {
-    try { const r = await fetch(`${base}/briefs`, { method: "PUT", body: b64.dec(b) }); if (!r.ok) left.push(b); }
-    catch { left.push(b); }
-  }
-  store.set("knos-pending-briefs", left);
-}
-
-// ---- wallet (wallet-standard) ------------------------------------------------------------------------------------
-let walletsApi;
-async function wallets() {
-  walletsApi ||= (await import("https://cdn.jsdelivr.net/npm/@wallet-standard/app@1.1.0/+esm")).getWallets();
-  return walletsApi.get().filter((w) => w.chains.some((c) => c.startsWith("solana:")) && w.features["standard:connect"]);
-}
-async function connect() {
-  const list = await wallets();
-  if (!list.length) throw new Error("No Solana wallet found. Install Phantom, Solflare or Backpack, or pay with a passkey.");
-  const w = list.length === 1 ? list[0] : list.find((x) => confirm(`Connect ${x.name}?`)) || list[0];
-  const { accounts } = await w.features["standard:connect"].connect();
-  state.wallet = w; state.account = accounts[0];
-  $("connect").textContent = short(state.account.address);
-  return state.account;
-}
-$("connect").onclick = () => connect().then(route).catch((e) => alert(e.message));
-
-async function signAndSend(txBytes) {
-  const f = state.wallet.features["solana:signAndSendTransaction"];
-  if (!f) throw new Error("This wallet cannot send transactions.");
-  const [out] = await f.signAndSendTransaction({ account: state.account, chain: CHAIN, transaction: txBytes });
-  return out.signature;
-}
-
-// The delivery key: an X25519 key derived from your wallet's signature of a fixed message. Ed25519 signatures are
-// deterministic, so the same wallet re-derives the same key on any device; the key never leaves this page.
-let sodiumP;
-const sodium = () => (sodiumP ||= import("https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.15/+esm")
-  .then(async (m) => { const s = m.default || m; await s.ready; return s; }));
-async function sealKey() {
-  if (state.sealKey) return state.sealKey;
-  const f = state.wallet.features["solana:signMessage"];
-  if (!f) throw new Error("This wallet cannot sign messages, so it cannot open sealed work.");
-  const msg = new TextEncoder().encode(`Knos delivery key v1\n${state.account.address}`);
-  const [{ signature }] = await f.signMessage({ account: state.account, message: msg });
-  const sk = await sha256(signature);
-  const s = await sodium();
-  state.sealKey = { sk, pk: s.crypto_scalarmult_base(sk) };
-  return state.sealKey;
-}
-
-// ---- hire (Solana): the brief goes to the relay, the post transaction is built here ------------------------------
-// The key that may pay the worker on proof (`knos verify`); keep in sync with src/knos/jobs/verify.py.
-const KNOS_VERIFIER = "9TGQPftNmrt8T6ETUZJ5CeQf27z3pFR8En3FkKrA2PbT";
-$("verifier").onchange = () => { $("verifier-key").hidden = $("verifier").value !== "custom"; };
-function chosenVerifier() {
-  const v = $("verifier").value;
-  if (v === "none") return null;
-  if (v === "custom") {
-    const k = $("verifier-key").value.trim();
-    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(k)) throw new Error("Enter the verifier's public key (base58).");
-    return k;
-  }
-  if (!KNOS_VERIFIER) throw new Error("The Knos reference verifier is not set up yet: choose None or a custom key.");
-  return KNOS_VERIFIER;
-}
-$("hire-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const st = $("hire-status"); const btn = $("post"); btn.disabled = true;
+async function readEscrow(ev) {
+  ev?.preventDefault();
+  const out = $("st-result"), ref = parseIssue($("st-issue").value);
+  if (!ref) return say(out, "Enter the issue as owner/repo#7.", "bad");
+  say(out, "Reading GitHub and Solana…");
   try {
-    if (!state.account) await connect();
-    say(st, "Preparing your delivery key…");
-    const { pk } = await sealKey();
-    const task = $("task").value.trim(), kind = $("kind").value, units = Math.round(Number($("price").value) * 1e6);
-    if (!task || !(units > 0)) throw new Error("Describe the task and set a price.");
-    const ghRepo = ($("gh-repo")?.value || "").trim().replace(/^https:\/\/github\.com\//, "").replace(/\/$/, "");
-    const gh = ghRepo ? { repo: ghRepo, issue: String(Number($("gh-issue").value) || ""),
-      ref: `refs/heads/${($("gh-branch").value || "main").trim()}` } : null;
-    if (gh && (!/^[\w.-]+\/[\w.-]+$/.test(gh.repo) || !gh.issue)) throw new Error("Enter the repository (owner/repo) and the issue number.");
-    const verifier = gh ? null : chosenVerifier();
-    const jobId = crypto.getRandomValues(new Uint8Array(32));
-    let checks = null;
-    if (gh) { say(st, "Hashing the acceptance tests on GitHub…"); checks = await chain.checksHash(gh.repo, gh.ref.slice(11), gh.issue); }
-    const brief = new TextEncoder().encode(JSON.stringify({ title: task.split("\n")[0].slice(0, 80), task, kind,
-      checks: null, buyer: state.account.address, price_units: units, created: Math.floor(Date.now() / 1000),
-      job_id: hex(jobId), seal_to: hex(pk),
-      ...(gh ? { github: { repo: gh.repo, issue: gh.issue, ref: gh.ref, checks_hash: hex(checks) } } : {}) }));
-    const briefHash = await sha256(brief);
-    const base = await api();
-    let held = false;
-    if (base) {
-      const r = await fetch(`${base}/briefs`, { method: "PUT", body: brief }).catch(() => null);
-      held = !r || !r.ok;
-    } else held = true;
-    if (held) store.set("knos-pending-briefs", [...store.get("knos-pending-briefs", []), b64.enc(brief)]);
-    say(st, "Approve in your wallet…");
-    const sig = await signAndSend(gh
-      ? await chain.postGithubTx(state.account.address, jobId, units, briefHash, gh.repo, gh.ref, checks)
-      : await chain.postTx(state.account.address, jobId, units, briefHash, 3600, 86400, verifier));
-    const addr = await chain.jobAddress(jobId);
-    store.set("knos-job-ids", { ...store.get("knos-job-ids", {}), [addr]: hex(jobId) });
-    say(st, `Posted: ${usdc(units / 1e6)} USDC in escrow (${typeof sig === "string" ? sig.slice(0, 10) : "signed"}…).`
-      + (gh ? ` A pull request to ${gh.repo} that says "Fixes #${gh.issue}" and "knos-job: ${hex(jobId)}" is paid on proof.` : "")
-      + (held ? " The relay is offline right now; this browser hands it the brief when it is back." : ""), "ok");
-  } catch (err) { say(st, err.message || String(err), "bad"); } finally { btn.disabled = false; }
-};
-
-// ---- hire with a passkey (Tempo): no extension, no seed phrase ---------------------------------------------------
-const TEMPO_JOBS = "knos-tempo-jobs";
-const tempoJobs = () => store.get(TEMPO_JOBS, []);
-async function deviceSealKey() {   // passkey signatures are not deterministic, so the delivery key lives on this device
-  const s = await sodium();
-  const k = store.get("knos-seal-key", null);
-  if (k) return { sk: unhex(k.sk), pk: unhex(k.pk) };
-  const kp = s.crypto_box_keypair();
-  store.set("knos-seal-key", { sk: hex(kp.privateKey), pk: hex(kp.publicKey) });
-  return { sk: kp.privateKey, pk: kp.publicKey };
-}
-$("post-passkey").onclick = async () => {
-  const st = $("hire-status"); const btn = $("post-passkey"); btn.disabled = true;
-  try {
-    const base = await api();
-    if (!base) throw new Error("Tempo jobs need the relay, which is offline right now. Try again later, or use a Solana wallet.");
-    const T = await import("./tempo.js");
-    say(st, "Use your passkey (Face ID, fingerprint or device PIN)…");
-    state.tempo ||= await T.passkeyAccount();
-    const addr = state.tempo.address;
-    let bal = await T.balance(addr);
-    $("passkey-info").hidden = false;
-    if (bal < Number($("price").value)) {
-      say(st, "Getting free testnet pathUSD from Tempo's faucet…");
-      await T.fund(addr);
-      for (let i = 0; i < 20 && bal < Number($("price").value); i++) { await new Promise((r) => setTimeout(r, 1000)); bal = await T.balance(addr); }
+    const [repo, k, slot] = await Promise.all([gh(`/repos/${ref.owner}/${ref.repo}`), client(), knos.rpc(RPC, "getSlot", [{ commitment: "confirmed" }])]);
+    const now = (await knos.rpc(RPC, "getBlockTime", [slot])) || Math.floor(Date.now() / 1000);
+    const key = new Uint8Array(16);
+    new DataView(key.buffer).setBigUint64(0, BigInt(repo.id), true);
+    new DataView(key.buffer).setBigUint64(8, BigInt(ref.number), true);
+    const found = await knos.programAccounts(RPC, k.ids.knos_pay, knos.JOB_LEN, 8, key);
+    if (!found.length) {
+      out.innerHTML = `<p class="status">Nothing is in escrow for ${esc(ref.owner)}/${esc(ref.repo)}#${ref.number}.</p>
+        <p class="fine">A maintainer funds it by commenting <code>/knos bounty 20</code> on the issue.</p>`;
+      return;
     }
-    $("passkey-info").textContent = `Passkey wallet ${short(addr)} · ${usdc(bal)} pathUSD (Tempo testnet)`;
-    say(st, "Approve with your passkey…");
-    const { pk } = await deviceSealKey();
-    const id = await T.postJob(state.tempo, base, { task: $("task").value.trim(), kind: $("kind").value,
-      priceUsd: Number($("price").value), sealTo: hex(pk) });
-    store.set(TEMPO_JOBS, [...tempoJobs(), id]);
-    say(st, `Posted on Tempo: ${usdc($("price").value)} pathUSD in escrow. See My jobs.`, "ok");
-  } catch (err) { say(st, err.message || String(err), "bad"); } finally { btn.disabled = false; }
+    const parts = [];
+    for (const f of found) {
+      const job = knos.parseJob(f.data);
+      let author = null;
+      if (job.state === "proven") author = await gh(`/user/${job.authorId}`).then((u) => u.login).catch(() => null);
+      parts.push(jobHtml(f.address, job, now, author));
+    }
+    out.innerHTML = parts.join("<hr>");
+  } catch (e) { say(out, esc(e.message), "bad"); }
+}
+$("status-form").onsubmit = readEscrow;
+
+// ---- a sponsor adds a bounty from a wallet -------------------------------------------------------------------------
+async function wallet() {
+  const { getWallets } = await import("https://cdn.jsdelivr.net/npm/@wallet-standard/app@1.1.0/+esm");
+  const list = getWallets().get().filter((w) => w.chains.some((c) => c.startsWith("solana:")) && w.features["standard:connect"]
+    && w.features["solana:signAndSendTransaction"]);
+  if (!list.length) throw new Error("No Solana wallet found in this browser. Install Phantom, Solflare or Backpack and set it to devnet.");
+  const w = list[0];
+  const { accounts } = await w.features["standard:connect"].connect();
+  if (!accounts.length) throw new Error("The wallet shared no account.");
+  return { w, account: accounts[0] };
+}
+
+$("sp-go").onclick = async () => {
+  const st = $("sp-status"), ref = parseIssue($("sp-issue").value), units = Math.round(Number($("sp-amount").value) * 1e6);
+  const tell = (text, kind = "") => { st.textContent = text; st.className = `status ${kind}`; };
+  if (!ref) return tell("Enter the issue as owner/repo#7.", "bad");
+  if (!(units >= knos.MIN_AMOUNT && units <= knos.MAX_AMOUNT)) return tell("A bounty is 1 to 500 USDC.", "bad");
+  try {
+    tell("Checking the repo runs Knos…");
+    const repo = await gh(`/repos/${ref.owner}/${ref.repo}`);
+    const wf = await fetch(`https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${repo.default_branch}/.github/workflows/knos.yml`)
+      .then((r) => (r.ok ? r.text() : ""));
+    const pin = /drexthealpha\/Knos\/\.github\/workflows\/prove\.yml@([0-9a-f]{40})/.exec(wf);
+    if (!pin) throw new Error("That repo does not run Knos's workflow yet, so nothing could ever pay this bounty. Ask its maintainer to protect it first.");
+    const { w, account } = await wallet();
+    const me = account.address, k = await client(), mint = knos.USDC_DEVNET;
+    const mine = await knos.ata(me, mint);
+    const bal = await knos.rpc(RPC, "getTokenAccountBalance", [mine, { commitment: "confirmed" }]).then((r) => Number(r.value.amount)).catch(() => 0);
+    if (bal < units) throw new Error(`This wallet has ${usdc(bal)} devnet USDC; the bounty needs ${usdc(units)}. Circle's faucet gives 10 at a time.`);
+    const ix = await k.fundIx({ funder: me, funderToken: mine, mint, repoId: repo.id, issue: ref.number, amount: units,
+      wfRepo: "drexthealpha/Knos", wfSha: pin[1], reviewS: 3600 });
+    const { blockhash } = (await knos.rpc(RPC, "getLatestBlockhash", [{ commitment: "confirmed" }])).value;
+    tell("Approve the transaction in your wallet…");
+    const [res] = await w.features["solana:signAndSendTransaction"].signAndSendTransaction({ account, chain: "solana:devnet",
+      transaction: knos.serializeTx([ix], me, blockhash) });
+    const sig = knos.b58(res.signature);
+    st.className = "status ok";
+    st.innerHTML = `Funded. <a href="${EXPLORER("tx", sig)}" target="_blank" rel="noopener">Transaction</a> ·
+      <a href="#bounty=${encodeURIComponent(`${ref.owner}/${ref.repo}#${ref.number}`)}">see the escrow</a>`;
+  } catch (e) { tell(e.message, "bad"); }
 };
-async function loadTempoJobs(box) {
-  const ids = tempoJobs();
-  if (!ids.length) return;
-  const T = await import("./tempo.js");
-  const rows = await Promise.all(ids.map((id) => T.job(id).catch(() => null)));
-  const html = rows.filter(Boolean).map((j) => `<tr><td class="mono">${j.id.slice(0, 12)}…<div class="fine">Tempo · passkey</div></td>
-    <td>${usdc(j.amount)} pathUSD</td><td><span class="pill">${esc(j.state)}</span></td>
-    <td>${j.state === "delivered" ? `<button class="small" data-topen="${j.result.slice(2)}">Open</button>
-      <button class="small" data-tact="accept" data-id="${j.id}">Accept</button>
-      <button class="small ghost" data-tact="reject" data-id="${j.id}">Reject</button>` : ""}</td></tr>`).join("");
-  box.insertAdjacentHTML("beforeend", `<h2>On Tempo</h2><div class="table-wrap"><table><tbody>${html}</tbody></table></div>`);
-  box.querySelectorAll("[data-topen]").forEach((b) => (b.onclick = () => openDelivery(b.dataset.topen, deviceSealKey).catch((e) => alert(e.message))));
-  box.querySelectorAll("[data-tact]").forEach((b) => (b.onclick = async () => {
-    try { state.tempo ||= await T.passkeyAccount(); await T.settle(state.tempo, b.dataset.id, b.dataset.tact); loadJobs(); }
-    catch (e) { alert(e.message); }
-  }));
+
+// ---- what is waiting for a GitHub account --------------------------------------------------------------------------
+async function readDue(ev) {
+  ev?.preventDefault();
+  const out = $("due-result"), login = $("due-login").value.trim().replace(/^@/, "");
+  if (!/^[\w-]+(\[bot\])?$/.test(login)) return say(out, "Enter a GitHub login.", "bad");
+  say(out, "Reading GitHub and Solana…");
+  try {
+    const [user, k] = await Promise.all([gh(`/users/${login}`), client()]);
+    const key = new Uint8Array(8);
+    new DataView(key.buffer).setBigUint64(0, BigInt(user.id), true);
+    const [dues, repRaw, faucet] = await Promise.all([knos.programAccounts(RPC, k.ids.knos_pay, knos.DUE_LEN, 8, key),
+      k.rep(user.id).then((a) => knos.account(RPC, a)), k.faucetMint()]);
+    const waiting = dues.map((d) => knos.parseDue(d.data)).filter((d) => d && d.amount > 0);
+    const rep = knos.parseRep(repRaw);
+    const name = (mint) => (mint === faucet ? "test USDC" : mint === knos.USDC_DEVNET ? "devnet USDC" : `of mint ${mint}`);
+    const lines = waiting.length
+      ? waiting.map((d) => `<p class="verdict ok">${usdc(d.amount)} ${esc(name(d.mint))} is waiting for ${esc(user.login)}.</p>`).join("")
+      : `<p class="status">Nothing is waiting for ${esc(user.login)} right now.</p>`;
+    out.innerHTML = `${lines}<p class="fine">GitHub account id ${user.id}. Paid for <strong>${rep.paidJobs}</strong> merged or proven
+      pull request${rep.paidJobs === 1 ? "" : "s"} in ${rep.repositories} repositor${rep.repositories === 1 ? "y" : "ies"},
+      ${usdc(rep.totalPaid)} in all. This record is on chain and nobody can buy it: only a paid proof adds to it.</p>`;
+    if (!$("claim-repo").value) $("claim-repo").placeholder = `${user.login}/any-repo-you-own`;
+  } catch (e) { say(out, esc(e.message), "bad"); }
+}
+$("due-form").onsubmit = readDue;
+
+// ---- claim: the workflow file, prefilled on GitHub -----------------------------------------------------------------
+let claimP;
+const claimWorkflow = () => (claimP ||= fetch("knos-claim.yml").then((r) => { if (!r.ok) throw new Error("claim workflow not found"); return r.text(); }));
+
+$("claim-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const out = $("claim-result"), ref = parseRepo($("claim-repo").value), branch = $("claim-branch").value.trim() || "main";
+  if (!ref) return say(out, "Enter the repository as owner/repo.", "bad");
+  try {
+    const add = `https://github.com/${ref.owner}/${ref.repo}/new/${encodeURIComponent(branch)}?filename=.github/workflows/knos-claim.yml&value=${encodeURIComponent(await claimWorkflow())}`;
+    const run = `https://github.com/${ref.owner}/${ref.repo}/actions/workflows/knos-claim.yml`;
+    out.innerHTML = `<a class="button" id="claim-add" href="${esc(add)}" target="_blank" rel="noopener">1. Commit knos-claim.yml to ${esc(ref.owner)}/${esc(ref.repo)}</a>
+      <a class="button" id="claim-run" href="${esc(run)}" target="_blank" rel="noopener">2. Run it with your address</a>
+      <p class="fine">The run posts its result on a new issue in that repository within a few minutes.</p>`;
+  } catch (e) { say(out, esc(e.message), "bad"); }
+};
+
+// ---- the public numbers --------------------------------------------------------------------------------------------
+const stat = (n, label) => `<div class="stat"><b>${esc(n)}</b><span>${esc(label)}</span></div>`;
+const took = (s) => (s == null ? "n/a" : s < 120 ? `${s} s` : s < 7200 ? `${Math.round(s / 60)} min` : `${Math.round(s / 3600)} h`);
+
+async function immutability() {
+  const all = await ids(), rows = [];
+  for (const name of ["knos_oidc", "knos_pay"]) {
+    const data = await knos.account(RPC, await knos.programData(all[name])).catch(() => null);
+    const auth = knos.upgradeAuthority(data);
+    const verdict = auth === null ? `<strong class="status ok">no upgrade authority: nobody can change it</strong>`
+      : auth === undefined ? `<span class="status">not deployed on devnet yet</span>`
+      : `<strong class="status bad">upgradeable by ${esc(auth)}</strong>`;
+    rows.push(`<dt>${name.replace("_", "-")}</dt><dd><a class="mono" href="${EXPLORER("address", all[name])}" target="_blank" rel="noopener">${esc(all[name])}</a><br>${verdict}</dd>`);
+  }
+  return `<h2>The programs, checked now</h2><dl class="facts">${rows.join("")}</dl>`;
 }
 
-// ---- my jobs: read from the chain; titles and sealed work from the relay when it answers -----------------------
-async function briefOf(job) {
-  const base = await api();
-  if (!base) return null;
-  try {
-    const r = await fetch(`${base}/briefs/${job.brief}`, { signal: AbortSignal.timeout(4000) });
-    if (!r.ok) return null;
-    const raw = new Uint8Array(await r.arrayBuffer());
-    return hex(await sha256(raw)) === job.brief ? JSON.parse(new TextDecoder().decode(raw)) : null;
-  } catch { return null; }
-}
-async function loadJobs() {
-  const box = $("jobs-list");
-  if (!state.account) {
-    box.innerHTML = ""; $("jobs-hint").hidden = tempoJobs().length > 0;
-    return loadTempoJobs(box).catch((e) => box.insertAdjacentHTML("beforeend", `<p class="status bad">${esc(e.message)}</p>`));
-  }
-  $("jobs-hint").hidden = true;
-  box.innerHTML = "<p class='fine'>Reading the escrow on devnet…</p>";
-  try {
-    const me = state.account.address;
-    const mine = (await chain.jobs()).filter((j) => j.buyer === me || j.worker === me).sort((a, b) => b.deadline - a.deadline);
-    if (!mine.length) { box.innerHTML = "<p class='lede'>No jobs yet. <a href='#hire'>Hire an agent</a>.</p>"; await loadTempoJobs(box); return; }
-    const briefs = await Promise.all(mine.map(briefOf));
-    const ids = store.get("knos-job-ids", {});
-    box.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Job</th><th>Price</th><th>State</th><th></th></tr></thead><tbody>${
-      mine.map((j, i) => { const b = briefs[i], id = (b && b.job_id) || ids[j.address] || "";
-        return `<tr><td>${esc((b && b.title) || "Job " + short(j.address))}<div class="fine">${j.buyer === me ? "you hired" : "you worked"} · ${short(j.worker)}</div></td>
-        <td>${usdc(j.amount)} USDC</td><td><span class="pill">${esc(j.state)}</span></td>
-        <td>${j.buyer === me && j.state === "delivered" ? `<button class="small" data-open="${j.result}">Open</button>
-          ${id ? `<button class="small" data-act="accept" data-i="${i}" data-id="${id}">Accept</button>
-          <button class="small ghost" data-act="reject" data-i="${i}" data-id="${id}">Reject</button>` : ""}` : ""}</td></tr>`; }).join("")
-    }</tbody></table></div>`;
-    box.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => openDelivery(b.dataset.open).catch((e) => alert(e.message))));
-    box.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => settle(mine[b.dataset.i], b.dataset.id, b.dataset.act).catch((e) => alert(e.message))));
-    await loadTempoJobs(box);
-  } catch (err) { box.innerHTML = `<p class="status bad">${esc(err.message)}</p>`; }
-}
-async function openDelivery(resultHex, keyFn = sealKey) {
-  const base = await api();
-  if (!base) throw new Error("The relay holding the sealed work is offline right now. Try again later.");
-  const r = await fetch(`${base}/deliveries/${resultHex}`);
-  if (!r.ok) throw new Error("The relay does not have this delivery.");
-  const blob = new Uint8Array(await r.arrayBuffer());
-  if (hex(await sha256(blob)) !== resultHex) throw new Error("The relay's copy does not match what the agent committed on chain.");
-  const { sk, pk } = await keyFn();
-  const s = await sodium();
-  let text;
-  let sealed = blob, digest = null;
-  if (new TextDecoder().decode(blob.slice(0, 18)) === '{"knos-envelope":1') {     // a verified job: the buyer's copy
-    const e = JSON.parse(new TextDecoder().decode(blob));
-    sealed = Uint8Array.from(atob(e.buyer), (c) => c.charCodeAt(0)); digest = e.digest;
-  }
-  try {
-    const plain = s.crypto_box_seal_open(sealed, pk, sk);
-    if (digest && hex(await sha256(plain)) !== digest) throw new Error("not the committed work");
-    text = new TextDecoder().decode(plain);
-  }
-  catch { throw new Error("Sealed to another key: this job was posted outside the web app. Open it with  knos jobs get."); }
-  $("delivery-text").textContent = text; $("delivery").hidden = false; $("delivery").scrollIntoView({ behavior: "smooth" });
-}
-async function settle(job, jobIdHex, verb) {
-  const msg = verb === "accept" ? `Pay the agent ${usdc(job.amount - Math.max(job.amount * 0.025, Math.min(job.amount, 0.05)))} USDC (Knos fee: 2.5%, at least 0.05)?` : `Refund ${usdc(job.amount)} USDC to you?`;
-  if (!confirm(msg)) return;
-  await signAndSend(await chain.settleTx(state.account.address, job, unhex(jobIdHex), verb));
-  setTimeout(loadJobs, 1500);
-}
-
-// ---- agents and network: counted from the escrow's job accounts ----------------------------------------------
-async function loadAgents() {
-  const box = $("agents-list");
-  try {
-    const rows = chain.agents(await chain.jobs());
-    box.innerHTML = rows.length ? `<table><thead><tr><th>Agent</th><th>Paid</th><th>Rejected</th><th>Expired</th><th>Acceptance</th><th>Earned</th></tr></thead><tbody>${
-      rows.map((a) => `<tr><td class="mono">${esc(a.agent)}</td><td>${a.paid}</td><td>${a.rejected}</td><td>${a.expired}</td>
-        <td>${a.acceptance == null ? "—" : Math.round(a.acceptance * 100) + "%"}</td><td>${usdc(a.earned)} USDC</td></tr>`).join("")
-    }</tbody></table>` : "<p class='lede'>No agent has finished a job yet.</p>";
-  } catch (err) { box.innerHTML = `<p class="status bad">${esc(err.message)}</p>`; }
-}
+let networkLoaded = false;
 async function loadNetwork() {
+  if (networkLoaded) return;
+  networkLoaded = true;
   const box = $("network-stats");
-  try {
-    const n = chain.network(await chain.jobs());
-    const s = (v, l) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`;
-    box.innerHTML = s(n.all.jobs, "jobs") + s(n.all.paid, "paid out") + s(n.agents, "agents") + s(n.buyers, "buyers")
-      + s(usdc(n.all.paidUsdc), "USDC paid to agents") + s(usdc(n.all.escrowUsdc), "USDC in escrow now")
-      + `<div class="split"><h2>Knos's own task feed</h2><p class="fine">Jobs posted by Knos's feed key to keep the
-        network busy: ${n.feed.jobs} jobs, ${n.feed.paid} paid, ${usdc(n.feed.paidUsdc)} USDC to agents.</p>
-        <h2>Everyone else</h2><p class="fine">Jobs from other buyers: ${n.outside.jobs} jobs from ${n.outsideBuyers}
-        buyer(s), ${n.outside.paid} paid, ${usdc(n.outside.paidUsdc)} USDC to agents.</p></div>`;
-    const base = await api();
-    $("api-status").textContent = base ? `Relay and Actions online at ${new URL(base).host}.` : "Relay offline right now: jobs, agents and payouts still read from the chain.";
-  } catch (err) { box.innerHTML = `<p class="status bad">${esc(err.message)}</p>`; }
-}
-
-flushPendingBriefs();
-// ---- bounty: the passkey wallet (web/wallet.js) -------------------------------------------------------------------
-{
-  let W;
-  const wal = async () => (W ||= await import("./wallet.js"));
-  const st = $("bw-status");
-  const ready = (pk) => { $("bw-addr").textContent = pk; $("bw-usdc").disabled = false; $("bw-fund").disabled = false;
-    $("bw-create").textContent = "Wallet ready"; };
-  $("bw-create").onclick = async () => {
-    try {
-      const w = await wal();
-      say(st, "Creating your passkey wallet…");
-      const pk = (await w.exists()) ? await w.unlock() : await w.create();
-      ready(pk);
-      const base = await api();
-      if (!base) throw new Error("the Knos API is unreachable, so no gas right now");
-      say(st, "Getting gas (devnet SOL) from Knos…");
-      await w.gas(base);
-      say(st, "Wallet ready, with gas.", "ok");
-    } catch (e) { say(st, e.message, "err"); }
-  };
-  $("bw-usdc").onclick = async () => {
-    try { const w = await wal(); await w.unlock(); say(st, "Minting test USDC…"); await w.faucet();
-      say(st, "Test USDC received.", "ok"); } catch (e) { say(st, e.message, "err"); }
-  };
-  $("bw-fund").onclick = async () => {
-    try {
-      const w = await wal(); await w.unlock();
-      const units = Math.round(Number($("bw-amount").value || 0) * 1e6);
-      say(st, "Funding the issue…");
-      const got = await w.fundIssue($("bw-repo").value.trim(), $("bw-issue").value, units);
-      st.dataset.job = got.jobId;
-      say(st, `Bounty funded: job ${got.jobId.slice(0, 12)}… (${usdc(units / 1e6)} USDC in escrow)`, "ok");
-    } catch (e) { say(st, e.message, "err"); }
-  };
+  immutability().then((h) => { $("network-programs").innerHTML = h; }).catch((e) => { $("network-programs").textContent = e.message; });
+  const s = await fetch("stats.json").then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (!s || !s.outside) {
+    box.innerHTML = `<p class="status">${esc(s?.error || "The numbers are built with the site; none here yet.")}</p>`;
+    return;
+  }
+  const o = s.outside, own = s.own, self = s.self_funded;
+  box.innerHTML = `<div class="split"><h2>Outside use</h2><p class="fine">Funded and earned by GitHub accounts that are not Knos's, two different accounts each time.</p></div>`
+    + stat(o.paid, "pull requests paid") + stat(usdc(o.amount), "USDC paid out") + stat(o.repositories, "repositories")
+    + stat(o.funders, "funders") + stat(o.authors, "authors paid") + stat(took(o.median_seconds_fund_to_paid), "median, funded to paid")
+    + `<div class="split"><h2>Everything else, kept apart</h2></div>`
+    + stat(own.paid, "paid, Knos's own accounts") + stat(self.paid, "paid, funder paid themselves")
+    + stat(s.funded, "bounties funded in all") + stat(s.refunded, "refunded unproven") + stat(s.vetoed, "vetoed")
+    + stat(`${s.live?.open ?? 0}`, `open now (${usdc(s.live?.open_amount ?? 0)} USDC)`)
+    + stat(usdc(s.live?.unclaimed_amount ?? 0), "USDC waiting to be claimed");
+  const rows = (s.recent || []).map((p) => `<tr><td>${esc(p.kind)}</td><td>${/^[1-9A-HJ-NP-Za-km-z]{60,90}$/.test(p.tx || "") ? `<a href="${EXPLORER("tx", p.tx)}">${usdc(p.amount)}</a>` : usdc(p.amount)}</td><td>repo ${esc(p.repo)} #${esc(p.issue)}</td>
+    <td>GitHub user ${esc(p.author)}</td><td>${took(p.seconds)}</td></tr>`).join("");
+  $("network-recent").innerHTML = rows ? `<table><tr><th>kind</th><th>USDC</th><th>issue</th><th>paid to</th><th>funded to paid</th></tr>${rows}</table>` : "";
+  $("network-note").textContent = `Counted ${s.updated} by scripts/network_stats.py from the program's transaction history.`
+    + (s.error ? ` ${s.error}.` : "");
 }
 
 route();

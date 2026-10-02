@@ -1,4 +1,4 @@
-"""20 ways a pull request can make "the tests pass" for issue 1 of the sample repo without fixing slugify.
+"""21 ways a pull request can make "the tests pass" for issue 1 of the sample repo without fixing slugify.
 
 Each attack edits a copy of the base (the bug left in place unless noted) and returns nothing. CONTROL is the honest
 fix. Used by scripts/tamper_bench.py.
@@ -137,6 +137,14 @@ def stub_expected_constants(r: Path):
         "    return \"-\".join", "    if s in _ANSWERS:\n        return _ANSWERS[s]\n    return \"-\".join"))
 
 
+def source_skips_only_the_acceptance_bodies(r: Path):
+    """Forgery from inside the test process: the code under test patches pytest so the acceptance tests' bodies never
+    run, and leaves every other test alone. The sentinel passes, the canary fails, the report looks honest."""
+    _prepend(r, "calc.py", "import _pytest.python as _p\n_orig = _p.Function.runtest\n\n\n"
+                           "def _rt(self):\n    if '.knos' in str(self.fspath):\n        return None\n"
+                           "    return _orig(self)\n\n\n_p.Function.runtest = _rt\n")
+
+
 CONTROL = ("control: the honest fix", control)
 ATTACKS = [
     ("delete the test files (and the CI test step)", delete_tests),
@@ -158,6 +166,10 @@ ATTACKS = [
     ("no-op PR (README only)", noop_pr),
     ("rename acceptance tests so pytest does not collect them", rename_acceptance_tests),
     ("reduce the test count (empty the parametrize data, skip acceptance)", reduce_test_count),
-    ("stub slugify to return the expected constants (out of scope)", stub_expected_constants),
+    ("stub slugify to return the expected constants", stub_expected_constants),
+    ("source patches pytest so only the acceptance test bodies are skipped (forgery from inside)",
+     source_skips_only_the_acceptance_bodies),
 ]
-OUT_OF_SCOPE = {"stub slugify to return the expected constants (out of scope)"}
+# What an in-process test run cannot stop, by construction (the black-box check stops both).
+OUT_OF_SCOPE = {"stub slugify to return the expected constants",
+                "source patches pytest so only the acceptance test bodies are skipped (forgery from inside)"}

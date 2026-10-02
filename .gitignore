@@ -7,10 +7,11 @@ dist/
 build/
 .pytest_cache/
 
-# Knos's own data lives in ~/.knos, never in a repo. `knos export` writes .knos/decisions.md for a repo that wants
-# to carry its decisions; nothing else under .knos/ is shareable.
+# Knos's own data lives in ~/.knos, never in a repo. What a repository does keep under .knos/ is its configuration:
+# .knos/proof.toml and the acceptance checks of its bounties.
 .knos/*
-!.knos/decisions.md
+!.knos/proof.toml
+!.knos/acceptance/
 
 # Secrets and keys, in case one ever lands here
 .knos-keys/
@@ -26,9 +27,6 @@ id_rsa*
 .npmrc
 .pypirc
 
-# Machine-specific agent config: `knos init` writes the right one for whoever cloned this
-.mcp.json
 node_modules/
-contracts/out/
-contracts/cache/
-programs/knos_escrow/target/
+programs/target
+examples/*/target
