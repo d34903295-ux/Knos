@@ -2,19 +2,22 @@ name: pages
 
 # GitHub Pages: the Knos web app at / (it reads the escrow on Solana devnet in the browser, so it works with no Knos
 # server), the coding-team network page at /network/, counted from the chain, and /index.json, the Agent PR Index
-# (rebuilt every 30 minutes, its Merkle root attested on Solana devnet). It never commits: all of it ships in the Pages
-# artifact.
+# (scanned every 6 hours by index.yml, its Merkle root attested on Solana devnet; this build only downloads the latest
+# `agent-pr-index` artifact). It never commits: all of it ships in the Pages artifact.
 on:
   push:
     branches: [main]
-    paths: ["web/**", "scripts/network_stats.py", "scripts/agent_pr_ci.py", "scripts/agent_pr_index.py",
-            ".github/workflows/network.yml"]
+    paths: ["web/**", "scripts/network_stats.py", ".github/workflows/network.yml"]
+  workflow_run:
+    workflows: [agent-pr-index]
+    types: [completed]
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -39,11 +42,16 @@ jobs:
           mkdir -p _site/network
           cp -r web/. _site/
           cp -r docs/network/. _site/network/
-      - name: Agent PR Index (/index.json)
-        run: python scripts/agent_pr_index.py --out _site/index.json
+      - name: Agent PR Index (/index.json) from the latest agent-pr-index artifact
+        run: |
+          url=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=agent-pr-index&per_page=1"                 --jq '[.artifacts[] | select(.expired | not)][0].archive_download_url // empty')
+          if [ -n "$url" ]; then
+            gh api "$url" > index.zip && unzip -o -q index.zip index.json -d _site/
+          else
+            echo "no agent-pr-index artifact yet; /index.json is absent and the web app says so"
+          fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          KNOS_ATTEST_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}
+          GH_TOKEN: ${{ github.token }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site/

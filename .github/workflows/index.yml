@@ -1,0 +1,47 @@
+name: agent-pr-index
+
+# The Agent PR Index: scans 2,000+ agent PRs (too slow for the Pages build), counts proven payouts by distinct funder
+# from the devnet escrow, attests the Merkle root on devnet SAS, and uploads index.json as the `agent-pr-index`
+# artifact. The Pages build (network.yml) downloads the latest one. It never commits.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-pr-index
+  cancel-in-progress: false
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: API cache (search pages and CI verdicts; reruns resume)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/knos-agent-pr-ci
+          key: agent-pr-ci-${{ github.run_id }}
+          restore-keys: agent-pr-ci-
+      - name: scan
+        # a PAT, when set, has the 5,000/h core budget the scan needs; the default token has 1,000/h per repo
+        run: python scripts/agent_pr_index.py scan --rows rows.json --max-seconds 15000
+        env:
+          GH_TOKEN: ${{ secrets.KNOS_INDEX_TOKEN || github.token }}
+      - name: build index.json
+        run: python scripts/agent_pr_index.py build --rows rows.json --out index.json
+        env:
+          KNOS_ATTEST_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-pr-index
+          path: index.json
+          retention-days: 7

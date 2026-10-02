@@ -227,10 +227,14 @@ function agentRecord(index, agent) {
   if (!index) return `<p class="fine">Agent PR Index not loaded here (it is built with the site).</p>`;
   const a = agent && index.agents?.[agent];
   if (!a) return `<p class="fine">No record for ${agent ? esc(agent) : "this author"} in the Agent PR Index (${esc(index.date || "")}).</p>`;
-  const pct = a.share == null ? "n/a" : `${Math.round(a.share * 100)}%`;
+  const pct = (x) => `${(x * 100).toFixed(1)}%`;
+  const share = a.share == null ? "n/a" : pct(a.share);
+  const ci = a.ci95 ? `, 95% interval ${pct(a.ci95[0])}–${pct(a.ci95[1])}` : "";
   return `<p><strong>${esc(agent)}</strong> in the Agent PR Index (${esc(index.date)}): claimed tests pass on
     <strong>${a.claimed_green}</strong> PRs with CI; CI actually failed on <strong>${a.actually_failed}</strong>
-    (<strong>${pct}</strong>).</p>`;
+    (<strong>${share}</strong>${ci}). Paid on a verified proof by <strong>${a.proven ?? 0}</strong> distinct
+    funder${a.proven === 1 ? "" : "s"}.${index.excluded_self_repo ? ` PRs on the author's own repos are excluded
+    (${index.excluded_self_repo}).` : ""}</p>`;
 }
 
 async function check(ev) {

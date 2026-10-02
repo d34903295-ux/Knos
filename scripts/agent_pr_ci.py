@@ -23,6 +23,18 @@ CACHE = os.path.join(os.path.expanduser("~"), ".cache", "knos-agent-pr-ci")
 DATA = os.path.join(HERE, "..", "docs", "agent_pr_ci.json")
 START = time.time()
 ARGS = None
+SEARCH_PAUSE = 6
+_SEARCH_LOCK = __import__("threading").Lock()
+_SEARCH_LAST = [0.0]
+
+
+def _search_slot():
+    """Space search calls SEARCH_PAUSE apart across threads (one shared 30/min budget)."""
+    with _SEARCH_LOCK:
+        wait = _SEARCH_LAST[0] + SEARCH_PAUSE - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _SEARCH_LAST[0] = time.time()
 
 # ---- agent definitions (search qualifiers) --------------------------------
 AGENTS = [
@@ -105,7 +117,7 @@ def gh_get(path, params=None, kind="core"):
     resp = None
     for attempt in range(6):
         if kind == "search":
-            time.sleep(6)  # 30 req/min search limit; complex OR queries trip secondary limits faster
+            _search_slot()  # 30 req/min search limit; complex OR queries trip secondary limits faster
         p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
         if p.returncode == 0:
             resp = {"ok": True, "json": json.loads(p.stdout or "null")}
@@ -194,12 +206,12 @@ OK_CONCL = {"success", "neutral", "skipped"}
 
 
 def classify(c):
-    pr = gh_get(f"repos/{c['repo']}/pulls/{c['number']}")
-    if not pr["ok"]:
-        return {"class": "error", "detail": pr["error"][:120]}
-    p = pr["json"]
-    sha = p["head"]["sha"]
-    out = {"sha": sha, "merged": bool(p.get("merged_at")), "pr_state": p["state"]}
+    # the combined status of refs/pull/N/head names the head SHA: one core call fewer than GET pulls/N
+    st = gh_get(f"repos/{c['repo']}/commits/refs/pull/{c['number']}/head/status")
+    if not st["ok"]:
+        return {"class": "error", "detail": st["error"][:120]}
+    sha = st["json"]["sha"]
+    out = {"sha": sha}
     runs, page = [], 1
     while True:
         r = gh_get(f"repos/{c['repo']}/commits/{sha}/check-runs", {"per_page": 100, "page": page})
@@ -210,10 +222,11 @@ def classify(c):
         if len(r["json"]["check_runs"]) < 100 or page >= 5:
             break
         page += 1
-    st = gh_get(f"repos/{c['repo']}/commits/{sha}/status")
-    statuses = st["json"]["statuses"] if st["ok"] else []
-    su = gh_get(f"repos/{c['repo']}/commits/{sha}/check-suites", {"per_page": 100})
-    suites = su["json"]["check_suites"] if su["ok"] else []
+    statuses = st["json"]["statuses"]
+    suites = []
+    if not runs and not statuses:  # only then can a suite awaiting approval change the verdict
+        su = gh_get(f"repos/{c['repo']}/commits/{sha}/check-suites", {"per_page": 100})
+        suites = su["json"]["check_suites"] if su["ok"] else []
 
     agent_runs = [x for x in runs if AGENT_RUN_RE.match(x["name"].strip())]
     ci_runs = [x for x in runs if not AGENT_RUN_RE.match(x["name"].strip())]
@@ -241,8 +254,8 @@ def classify(c):
     return out
 
 
-def run_checks(cands, workers=4):
-    """Classify every claimed PR; 4 concurrent gh processes (core API only)."""
+def run_checks(cands, workers=8):
+    """Classify every claimed PR; 8 concurrent gh processes (core API only)."""
     from concurrent.futures import ThreadPoolExecutor
     todo = [c for c in cands if c["phrase"]]
 
@@ -260,6 +273,85 @@ def run_checks(cands, workers=4):
         return False
     return True
 
+
+# ---- scan: the >=2,000-PR market sample (search pages x date windows x agents) ---------------
+def excluded_self(item):
+    """True when the PR sits on a repo its author owns, or one owned by the human who triggered the agent (an
+    assignee, when GitHub records one): an agent grading its owner's own repo is not a market observation."""
+    owner = item["repository_url"].split("/repos/")[1].split("/")[0].lower()
+    people = {item["user"]["login"].lower()} | {a["login"].lower() for a in item.get("assignees") or []}
+    return owner in people
+
+
+def scan_windows(end, days, width):
+    """Newest-first [a, b] date windows of `width` days covering `days` days ending at `end`."""
+    out, b = [], dt.date.fromisoformat(end)
+    stop = b - dt.timedelta(days=days - 1)
+    while b >= stop:
+        a = max(stop, b - dt.timedelta(days=width - 1))
+        out.append((a.isoformat(), b.isoformat()))
+        b = a - dt.timedelta(days=1)
+    return out
+
+
+# window width (days) per agent so one query stays under GitHub's 1,000-result cap at recent volumes
+SCAN_WIDTH = {"copilot": 5, "devin": 1, "claude-bot": 5, "claude-code": 1, "codex": 10}
+
+
+def scan_agent(agent, qual, end, days, per_agent):
+    """One agent's windows, newest first, up to 10 pages of 100 each (GitHub's 1,000-result cap is per query, so
+    narrow windows reach past it), until `per_agent` claimed, non-self-repo PRs are kept."""
+    kept, seen, n = [], set(), {"hits": 0, "excluded": 0, "no_claim": 0}
+    for a, b in scan_windows(end, days, SCAN_WIDTH.get(agent, 3)):
+        q = f"is:pr {qual} created:{a}..{b} {CLAIM_SEARCH}"
+        for page in range(1, 11):
+            if len(kept) >= per_agent:
+                return kept, n
+            r = gh_get("search/issues", {"q": q, "per_page": 100, "page": page,
+                                          "sort": "created", "order": "desc"}, kind="search")
+            if not r["ok"]:
+                print("search error:", q, r["error"], file=sys.stderr)
+                break
+            items = r["json"]["items"]
+            for it in items:
+                repo = it["repository_url"].split("/repos/")[1]
+                k = f"{repo}#{it['number']}".lower()
+                if k in seen or len(kept) >= per_agent:
+                    continue
+                seen.add(k)
+                n["hits"] += 1
+                if excluded_self(it):
+                    n["excluded"] += 1
+                    continue
+                phrase, ctx = find_claim(it.get("body"))
+                if not phrase:
+                    n["no_claim"] += 1
+                    continue
+                kept.append({"agent": agent, "repo": repo, "number": it["number"],
+                             "author": it["user"]["login"], "created_at": it["created_at"],
+                             "phrase": phrase, "claim_line": ctx})
+            if len(items) < 100:
+                break
+    return kept, n
+
+
+def scan_collect(end, days, per_agent):
+    """All agents concurrently (the search limit is shared; gh_get backs off on it). A PR found under two agents'
+    queries counts once, for the first agent listed. Returns (kept, counts)."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(AGENTS)) as ex:
+        res = list(ex.map(lambda aq: scan_agent(aq[0], aq[1], end, days, per_agent.get(aq[0], 0)
+                                                    if isinstance(per_agent, dict) else per_agent), AGENTS))
+    kept, seen, n = [], set(), {"hits": 0, "excluded": 0, "no_claim": 0}
+    for rows, cnt in res:
+        for k in n:
+            n[k] += cnt[k]
+        for r in rows:
+            key = f"{r['repo']}#{r['number']}".lower()
+            if key not in seen:
+                seen.add(key)
+                kept.append(r)
+    return kept, n
 
 CLASSES = ["failed", "passed", "other", "pending", "no-ci", "blocked-awaiting-approval", "error"]
 
