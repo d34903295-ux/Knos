@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.9 (2 Oct 2026)
+
+AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.
+
+- **FundWithToken.** A bounty can be funded straight from a token account in one instruction.
+- **Issuer registry, GitHub and GitLab.** The escrow keeps a registry of OIDC issuers and their keys; GitHub Actions
+  and GitLab CI tokens are both accepted, each checked against its own registered issuer.
+- **Program version check.** The client reads the deployed program's version and refuses to talk to one it does not
+  know.
+- **Verified build pin.** The program is built with solana-verify in docker, and `knos mainnet-check` compares that
+  hash with the on-chain program hash.
+- **Squads vault upgrade authority.** The devnet upgrade authority is the Squads v4 vault
+  `4G3cznCnwCUPBCZwzKiLupjdgB5pSoCcGWNGuFv4TYFo` (2-of-3, 300 s time lock). All 3 members are Knos keys today, so
+  `knos mainnet-check` adds two gates that fail until an outside signer joins and the time lock is at least 24 h
+  ([docs/SECURITY.md](docs/SECURITY.md)). Mainnet stays locked.
+- **IDL on chain.** The escrow's IDL is published as a Program Metadata account.
+- **Sibyl store in the judge.** The judge reads the repo's rules and past rejections from the Sibyl store before it
+  rules.
+- **Claims check.** `python scripts/claims_check.py` checks every number in the README's opening, the home page hero,
+  the submission and the pitch script against devnet, GitHub or a file in the repo, and fails on any sentence with a
+  number it does not cover. CI runs it on every push.
+
 ## 0.3.7 (1 Oct 2026)
 
 AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.

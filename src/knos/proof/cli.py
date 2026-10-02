@@ -78,7 +78,7 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
               changed: Path = typer.Option(None, "--changed", help="file listing the PR's changed paths"),
               evidence: Path = typer.Option(None, "--evidence", help="write the evidence JSON here"),
               diff: Path = typer.Option(None, "--diff", help="the PR's unified diff from the base (for repo rules)"),
-              store: Path = typer.Option(None, "--store", help="a directory the judge remembers tampering in"),
+              store: Path = typer.Option(None, "--store", help="a directory the judge remembers tampering in (Sibyl's local store: <dir>/sibyl.db)"),
               repo_name: str = typer.Option("", "--repo", help="owner/name, the key tamper rules are kept under"),
               agent: str = typer.Option("", "--agent", help="the PR author, the other tamper key")) -> None:
         """prove.yml's check job: the repo's CONTRIBUTING rules first, then overlay, protected paths, sentinel,
@@ -91,7 +91,7 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
         names = None
         if changed:
             names = [x.strip() for x in changed.read_text(encoding="utf-8").splitlines() if x.strip()]
-        st = history.JsonStore(store) if store else history.NullStore()
+        st = history.SibylStore.local(store) if store else history.NullStore()
         diff_text = diff.read_text(encoding="utf-8", errors="replace") if diff else None
         v = prove.judge_with_rules(base, pr, cfg, names, diff_text, st, repo_name or None, agent or None)
         if evidence:

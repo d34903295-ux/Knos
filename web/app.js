@@ -140,11 +140,18 @@ $("hire-form").onsubmit = async (e) => {
     const { pk } = await sealKey();
     const task = $("task").value.trim(), kind = $("kind").value, units = Math.round(Number($("price").value) * 1e6);
     if (!task || !(units > 0)) throw new Error("Describe the task and set a price.");
-    const verifier = chosenVerifier();
+    const ghRepo = ($("gh-repo")?.value || "").trim().replace(/^https:\/\/github\.com\//, "").replace(/\/$/, "");
+    const gh = ghRepo ? { repo: ghRepo, issue: String(Number($("gh-issue").value) || ""),
+      ref: `refs/heads/${($("gh-branch").value || "main").trim()}` } : null;
+    if (gh && (!/^[\w.-]+\/[\w.-]+$/.test(gh.repo) || !gh.issue)) throw new Error("Enter the repository (owner/repo) and the issue number.");
+    const verifier = gh ? null : chosenVerifier();
     const jobId = crypto.getRandomValues(new Uint8Array(32));
+    let checks = null;
+    if (gh) { say(st, "Hashing the acceptance tests on GitHub…"); checks = await chain.checksHash(gh.repo, gh.ref.slice(11), gh.issue); }
     const brief = new TextEncoder().encode(JSON.stringify({ title: task.split("\n")[0].slice(0, 80), task, kind,
       checks: null, buyer: state.account.address, price_units: units, created: Math.floor(Date.now() / 1000),
-      job_id: hex(jobId), seal_to: hex(pk) }));
+      job_id: hex(jobId), seal_to: hex(pk),
+      ...(gh ? { github: { repo: gh.repo, issue: gh.issue, ref: gh.ref, checks_hash: hex(checks) } } : {}) }));
     const briefHash = await sha256(brief);
     const base = await api();
     let held = false;
@@ -154,10 +161,13 @@ $("hire-form").onsubmit = async (e) => {
     } else held = true;
     if (held) store.set("knos-pending-briefs", [...store.get("knos-pending-briefs", []), b64.enc(brief)]);
     say(st, "Approve in your wallet…");
-    const sig = await signAndSend(await chain.postTx(state.account.address, jobId, units, briefHash, 3600, 86400, verifier));
+    const sig = await signAndSend(gh
+      ? await chain.postGithubTx(state.account.address, jobId, units, briefHash, gh.repo, gh.ref, checks)
+      : await chain.postTx(state.account.address, jobId, units, briefHash, 3600, 86400, verifier));
     const addr = await chain.jobAddress(jobId);
     store.set("knos-job-ids", { ...store.get("knos-job-ids", {}), [addr]: hex(jobId) });
     say(st, `Posted: ${usdc(units / 1e6)} USDC in escrow (${typeof sig === "string" ? sig.slice(0, 10) : "signed"}…).`
+      + (gh ? ` A pull request to ${gh.repo} that says "Fixes #${gh.issue}" and "knos-job: ${hex(jobId)}" is paid on proof.` : "")
       + (held ? " The relay is offline right now; this browser hands it the brief when it is back." : ""), "ok");
   } catch (err) { say(st, err.message || String(err), "bad"); } finally { btn.disabled = false; }
 };

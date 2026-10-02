@@ -53,3 +53,7 @@ _.learn_tamper
 # 0.3.8: the authority hand-over and workflow-pin builders are run by scripts/squads_handover.mjs's Python twin, the
 # tests and the operator; `knos mainnet-check` is registered by its typer decorator.
 _.mainnet_check_cmd, _.set_admin, _.set_fee_account, _.WF_FUND, _.set_workflow
+
+# 0.3.9: the issuer-registry, FundWithToken audience and program-version builders are used by the escrow tests
+# (tests/test_fund_issuer.py, tests/test_escrow_idl.py) and by clients registering a GitLab issuer.
+_.CLAIMS_GITLAB, _.register_issuer, _.fund_audience, _.version_ix

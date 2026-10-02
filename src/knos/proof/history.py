@@ -37,40 +37,20 @@ class NullStore:
         return []
 
 
-class JsonStore:
-    """A directory of JSON files, one per category: what prove.yml's judge keeps between runs in the caller repo's
-    Actions cache (no secret, no Sibyl service on a runner)."""
-
-    def __init__(self, root):
-        from pathlib import Path
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-
-    def _file(self, category: str):
-        return self.root / (re.sub(r"[^\w.-]", "_", category) + ".json")
-
-    def _load(self, category: str) -> dict:
-        import json
-        try:
-            return json.loads(self._file(category).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-
-    def put(self, category: str, name: str, body: dict) -> None:
-        import json
-        d = self._load(category)
-        d[name] = body
-        self._file(category).write_text(json.dumps(d, indent=1), encoding="utf-8")
-
-    def all(self, category: str) -> list[dict]:
-        return list(self._load(category).values())
-
-
 class SibylStore:
     """The repo's Sibyl store (the same one Knos's memory uses), through the public MemoryClient API."""
 
     def __init__(self, client):
         self.client = client
+
+    @classmethod
+    def local(cls, root, tenant_id: str = "knos-judge") -> "SibylStore":
+        """Sibyl's own local store at <root>/sibyl.db: what prove.yml's judge keeps between runs in the caller repo's
+        Actions cache. Offline: no secret, no network, no Sibyl service on the runner."""
+        from pathlib import Path
+        from sibyl_memory_client import MemoryClient
+        Path(root).mkdir(parents=True, exist_ok=True)
+        return cls(MemoryClient.local(str(Path(root) / "sibyl.db"), tenant_id=tenant_id))
 
     @classmethod
     def for_repo(cls, repo) -> "SibylStore":
@@ -441,12 +421,31 @@ def _commits(commits) -> list[tuple[str, str]]:
 def lint_pr(store, repo_path, diff_text: str, commits=(), only: set[str] | None = None) -> list[RuleViolation]:
     """Every place a PR (its unified diff, and its commits as messages or {"sha", "message"}) breaks one of the repo's
     rules, citing the rule's line and the PR's file:line or commit. Empty when the PR keeps them all."""
+    return _lint([r for r in repo_rules(store, repo_path) if only is None or r["id"] in only], diff_text, commits)
+
+
+# kinds a learned `tamper:rule:<kind>` can be checked by with no CONTRIBUTING line behind it (no parameter needed)
+_LEARNABLE = ("no_debug", "tests_required", "conventional_commits", "signoff")
+
+
+def lint_learned(required, diff_text: str, commits=()) -> list[RuleViolation]:
+    """Every place a PR breaks a rule this repo's or this agent's history made required (`tamper:rule:<kind>` from
+    learn_tamper), whether or not the base's CONTRIBUTING states it: an agent caught leaving a debug print in one
+    repo is held to it in every repo after."""
+    rules = []
+    for check in sorted(required):
+        kind = check[len("tamper:rule:"):] if check.startswith("tamper:rule:") else ""
+        if kind in _LEARNABLE:
+            rules.append({"id": check, "kind": kind, "param": None, "origin": "history", "source": "history",
+                          "text": f"{check} required by history"})
+    return _lint(rules, diff_text, commits) if rules else []
+
+
+def _lint(rules, diff_text: str, commits=()) -> list[RuleViolation]:
     added, files, changed = _added(diff_text)
     msgs = _commits(commits)
     out: list[RuleViolation] = []
-    for r in repo_rules(store, repo_path):
-        if only is not None and r["id"] not in only:
-            continue
+    for r in rules:
         k = r["kind"]
         if k == "no_new_deps":
             out += [RuleViolation(r, f"{f}:{n}", t, "a new dependency") for f, n, t in added

@@ -38,7 +38,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: drexthealpha/Knos/.github/workflows/fund.yml@81d40cda2d0d40636c881befbdf07008665ff288
+    uses: drexthealpha/Knos/.github/workflows/fund.yml@d8ead42dbf120024afda78bed0602077689c279d
 
   fund-relay:
     needs: fund
@@ -46,7 +46,7 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@f3414b39cfccf0931e0344ea92f6c74f322708b1
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@d8ead42dbf120024afda78bed0602077689c279d
     with:
       kind: fund
       number: ${{ fromJSON(needs.fund.outputs.issue) }}
@@ -69,8 +69,9 @@ jobs:
         run: |
           issue=$(printf '%s\n' "$BODY" | grep -oiE '\b(fixes|closes|resolves)[[:space:]]+#[0-9]+' | head -1 | grep -oE '[0-9]+$' || true)
           payout=$(printf '%s\n' "$BODY" | grep -oE '^knos-payout:[[:space:]]*[1-9A-HJ-NP-Za-km-z]{32,44}' | head -1 | grep -oE '[1-9A-HJ-NP-Za-km-z]{32,44}$' || true)
-          id=""
-          if [ -n "$issue" ] && [ -n "$payout" ]; then
+          # a job posted from the web app (PostGithub) is named in the body; the escrow binds it to this repo and ref
+          id=$(printf '%s\n' "$BODY" | grep -oiE '^knos-job:[[:space:]]*[0-9a-f]{64}' | head -1 | grep -oiE '[0-9a-f]{64}$' | tr 'A-F' 'a-f' || true)
+          if [ -z "$id" ] && [ -n "$issue" ] && [ -n "$payout" ]; then
             # the job id fund-relay posted on the issue (only this repo's own workflow comments as github-actions[bot])
             id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$issue/comments?per_page=100" \
                    --jq '.[] | select(.user.login == "github-actions[bot]") | .body' \
@@ -87,18 +88,18 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: drexthealpha/Knos/.github/workflows/prove.yml@81d40cda2d0d40636c881befbdf07008665ff288
+    uses: drexthealpha/Knos/.github/workflows/prove.yml@d8ead42dbf120024afda78bed0602077689c279d
     with:
       job: ${{ needs.job.outputs.id }}
       issue: ${{ needs.job.outputs.issue }}
-      knos-ref: 81d40cda2d0d40636c881befbdf07008665ff288
+      knos-ref: d8ead42dbf120024afda78bed0602077689c279d
 
   prove-relay:
     needs: prove
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@f3414b39cfccf0931e0344ea92f6c74f322708b1
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@d8ead42dbf120024afda78bed0602077689c279d
     with:
       kind: proof
       number: ${{ github.event.pull_request.number }}
@@ -109,7 +110,7 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@f3414b39cfccf0931e0344ea92f6c74f322708b1
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@d8ead42dbf120024afda78bed0602077689c279d
     with:
       kind: refused
       number: ${{ github.event.pull_request.number }}

@@ -137,6 +137,8 @@ def judge_with_rules(base_dir, pr_dir, cfg: dict, changed: list[str] | None, dif
     contributing = [r for r in history.repo_rules(store, base) if r.get("origin") == "contributing"]
     violations = history.lint_pr(store, base, diff_text, (), {r["id"] for r in contributing}) \
         if diff_text is not None and contributing else []
+    if not violations and diff_text is not None:   # what history made required, in CONTRIBUTING or not
+        violations = history.lint_learned(required, diff_text)
     if violations:
         try:
             h = checks_hash(base / ".knos" / "acceptance" / str(cfg.get("issue", "")))

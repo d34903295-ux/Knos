@@ -21,8 +21,8 @@ Report a vulnerability privately through GitHub's security advisories on this re
 | a buyer | to keep the work and the money | delivery is on chain before review; verifier release needs no buyer step; silence past the review window pays the worker | escrow tests |
 | a buyer | to lock the worker's money forever | after its deadline a job always settles one way or the other; no state lacks an exit | fuzz: no stuck funds |
 | the verifier | to release work that failed | the evidence root goes on chain with the release and in a SAS receipt, so anyone can re-run the checks; the escrow refuses a release whose result hash is not the one the worker committed | escrow tests |
-| Knos itself | to take more than the fee | the fee is max(5%, 0.05 USDC), set at init; the fee account is fixed; a per-job cap holds; Knos never holds job money | fuzz: conservation |
-| an upgrader | to swap the program | mainnet stays locked (`KNOS_ALLOW_MAINNET`); moving the upgrade authority to a Squads multisig and a verified build are next | not yet |
+| Knos itself | to take more than the fee | the fee is max(2.5%, 0.05 USDC), set at init; the fee account is fixed; a per-job cap holds; Knos never holds job money | fuzz: conservation |
+| an upgrader | to swap the program | the devnet upgrade authority is a Squads v4 vault (2-of-3, 300 s time lock), but all 3 members are Knos keys; mainnet stays locked until `knos mainnet-check` sees an outside signer and a 24 h time lock | `tests/test_mainnet_check.py` |
 | anyone, in an incident | to drain the escrow during an exploit | the pause switch stops new posts and claims; refunds still work while paused | escrow tests |
 | a coding agent | to say "done" when it is not | the Stop hook re-runs each claimed check itself (tests in a fresh venv, every CI job, PyPI, URLs, deletions, author) and blocks; Sibyl turns each past false "done" into a required check | `tests/test_proof.py`, release replay |
 | a coding agent | to overwrite a file it never read, or delete outside the repo | the PreToolUse safety guard refuses (exit 2) | `tests/test_proof.py` |
@@ -108,6 +108,20 @@ A GitHub-posted job (0.3.8) is paid on a proof with these parts:
   unproven claim and asks the agent to say plainly what is not done.
 - **A Knos error allows.** Any exception in the hook is logged to `~/.knos/hook.log` and the stop is allowed. A broken
   install must never trap an agent.
+
+## The upgrade multisig is not yet independent
+
+The devnet program's upgrade authority is the Squads v4 vault `4G3cznCnwCUPBCZwzKiLupjdgB5pSoCcGWNGuFv4TYFo` of
+multisig `2zpWe4223nNp6gPnHSAjdwGcu2cGPQtT5jcxf25MSYvV` (threshold 2, time lock 300 s). All 3 members are Knos keys
+today: `3AwCof…`, `EwSxyJ…` and `9TGQPf…`. So the multisig is not yet independent: Knos alone can approve and execute
+an upgrade.
+
+`knos mainnet-check` therefore has two gates that FAIL today, by design:
+
+- **an outside signer is a member**: at least one member is not in Knos's own key list;
+- **time lock >= 86,400 s**: a 24 h window between approval and execution, so users can leave before an upgrade lands.
+
+Mainnet stays locked until both pass, along with every other gate.
 
 ## Keys
 

@@ -7,6 +7,8 @@
     security.txt        the on-chain binary embeds a security.txt
     IDL                 an on-chain IDL account exists (Program Metadata canonical "idl", or Anchor's)
     cargo-audit         the last cargo-audit run (program.yml on main, via gh) passed, or a recorded result file
+    outside signer      at least one multisig member is not a known Knos key (all 3 are Knos keys today: FAILS)
+    24 h time lock      the multisig time lock is >= 86,400 s (300 s today: FAILS)
     mainnet             locked unless KNOS_ALLOW_MAINNET=1 (locked is the PASS, by design)
 
 Exit 0 only if every gate passes. All I/O goes through `Fetch`, so tests inject fakes.
@@ -33,6 +35,13 @@ METADATA = Pubkey.from_string("ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S")
 # The devnet Squads multisig (scripts/squads_devnet.json); override with KNOS_SQUADS_MULTISIG.
 DEVNET_MULTISIG = os.environ.get("KNOS_SQUADS_MULTISIG", "2zpWe4223nNp6gPnHSAjdwGcu2cGPQtT5jcxf25MSYvV")
 SECURITY_TXT = b"=======BEGIN SECURITY.TXT V1======="
+# Every key Knos itself holds; a multisig made only of these is not independent.
+KNOS_KEYS = frozenset({
+    "3AwCofxMiRBChGA4BWdEqGKxgREErrrRYf3fqjhP7HzM",
+    "EwSxyJFNQkNN9qtss4Qd7DTvrNYb62vgvhdwqgfErXDz",
+    "9TGQPftNmrt8T6ETUZJ5CeQf27z3pFR8En3FkKrA2PbT",
+})
+MIN_TIMELOCK = 86_400
 PROGRAMDATA_HEADER = 45  # u32 tag | u64 slot | u8 option | [32] authority
 
 
@@ -53,6 +62,20 @@ def vault_pda(multisig: Pubkey, index: int = 0) -> Pubkey:
 def multisig_timelock(data: bytes) -> tuple[int, int]:
     """Squads v4 Multisig: disc(8) create_key(32) config_authority(32) threshold(u16) time_lock(u32) ..."""
     return int.from_bytes(data[72:74], "little"), int.from_bytes(data[74:78], "little")
+
+
+def multisig_members(data: bytes) -> list[str]:
+    """... time_lock(u32) transaction_index(u64) stale_transaction_index(u64) rent_collector(Option<Pubkey>) bump(u8)
+    members(Vec<{key[32], permissions u8}>)."""
+    try:
+        off = 94
+        off += 33 if data[off] == 1 else 1
+        off += 1
+        n = int.from_bytes(data[off:off + 4], "little")
+        off += 4
+        return [str(Pubkey.from_bytes(data[off + 33 * i:off + 33 * i + 32])) for i in range(n)]
+    except (IndexError, ValueError):
+        return []
 
 
 def elf_hash(elf: bytes) -> str:
@@ -84,6 +107,8 @@ def run(fetch: Fetch, program: str = PROGRAM, multisig: str = DEVNET_MULTISIG,
 
     # 1. upgrade authority = Squads vault with a time lock
     vault = None
+    members: list[str] = []
+    lock = 0
     if not multisig:
         res.append(("upgrade authority is a Squads v4 vault (time lock > 0)", False,
                     f"authority {authority}; no multisig given (KNOS_SQUADS_MULTISIG)"))
@@ -94,9 +119,17 @@ def run(fetch: Fetch, program: str = PROGRAM, multisig: str = DEVNET_MULTISIG,
             res.append(("upgrade authority is a Squads v4 vault (time lock > 0)", False, f"{multisig} is not a Squads v4 account"))
         else:
             threshold, lock = multisig_timelock(ms[1])
+            members = multisig_members(ms[1])
             ok = authority == vault and lock > 0
             res.append(("upgrade authority is a Squads v4 vault (time lock > 0)", ok,
                         f"authority {authority}, vault {vault}, threshold {threshold}, time lock {lock}s"))
+
+    # 1b. independence: an outside signer, and a 24 h time lock
+    outside = [m for m in members if m not in KNOS_KEYS]
+    res.append(("an outside signer is a member", bool(outside),
+                f"outside members: {', '.join(outside)}" if outside else
+                f"all {len(members)} members are Knos keys; the multisig is not yet independent"))
+    res.append(("time lock >= 86,400 s", lock >= MIN_TIMELOCK, f"time lock {lock}s"))
 
     # 2./3. escrow admin and fee account
     cfg = fetch.account(str(Pubkey.find_program_address([b"config2"], pid)[0]))

@@ -120,12 +120,12 @@ jobs:
             *[!0-9a-f]*) echo "knos-ref must be a commit sha"; exit 1 ;;
             *) uv pip install --system "knos @ git+https://github.com/drexthealpha/Knos@$REF" pytest ;;
           esac
-      - name: the judge's memory of this repo (learned tampering), from this repo's Actions cache
+      - name: the judge's memory of this repo (learned tampering) in Sibyl's local store .knos-memory/sibyl.db, from this repo's Actions cache
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/knos-store
-          key: knos-judge-${{ github.run_id }}
-          restore-keys: knos-judge-
+          path: ${{ runner.temp }}/.knos-memory
+          key: knos-judge-sibyl-${{ github.run_id }}
+          restore-keys: knos-judge-sibyl-
       - name: the PR's dependencies
         if: inputs.setup != ''
         working-directory: pr
@@ -142,7 +142,7 @@ jobs:
           echo "head_sha=$HEAD" >> "$GITHUB_OUTPUT"
           echo "checks_hash=$(knos proof checks-hash --dir "base/.knos/acceptance/$ISSUE")" >> "$GITHUB_OUTPUT"
           if knos proof judge --base base --pr pr --issue "$ISSUE" --changed changed.txt --evidence evidence.json \
-               --diff pr.diff --store "$RUNNER_TEMP/knos-store" --repo "$GITHUB_REPOSITORY" --agent "$AUTHOR"; then
+               --diff pr.diff --store "$RUNNER_TEMP/.knos-memory" --repo "$GITHUB_REPOSITORY" --agent "$AUTHOR"; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
@@ -156,8 +156,8 @@ jobs:
         if: always() && steps.judge.outputs.learn == 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ runner.temp }}/knos-store
-          key: knos-judge-${{ github.run_id }}
+          path: ${{ runner.temp }}/.knos-memory
+          key: knos-judge-sibyl-${{ github.run_id }}
       - name: evidence
         if: always()
         uses: actions/upload-artifact@v4

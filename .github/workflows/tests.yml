@@ -65,6 +65,21 @@ jobs:
           test $(( $(date +%s) - start )) -le 30
           knos init --undo --hosts cursor
 
+  # Every number in the README opening, the home hero, the submission and the pitch script is checked against devnet,
+  # GitHub or a file in the repo (scripts/claims_check.py).
+  claims:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q solders
+      - run: python scripts/claims_check.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+
   # Nothing unused ships: every module is reached from an entry point, and vulture finds no unused code beyond the
   # framework-called names listed (with reasons) in scripts/vulture_whitelist.py.
   deadcode:

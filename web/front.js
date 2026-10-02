@@ -5,8 +5,8 @@
 const $ = (id) => document.getElementById(id);
 const API = "https://api.github.com";
 // Knos's reusable workflows, pinned by full commit sha (the escrow checks the token's job_workflow_sha).
-export const KNOS_SHA = "81d40cda2d0d40636c881befbdf07008665ff288";
-export const KNOS_RELAY_SHA = "f3414b39cfccf0931e0344ea92f6c74f322708b1";
+export const KNOS_SHA = "d8ead42dbf120024afda78bed0602077689c279d";
+export const KNOS_RELAY_SHA = "d8ead42dbf120024afda78bed0602077689c279d";
 
 // ---- claim detection (port of scripts/agent_pr_ci.py) -----------------------------------------------------------
 const PASS = String.raw`(?:pass(?:es|ed|ing)?|green)`;
@@ -165,8 +165,9 @@ jobs:
         run: |
           issue=$(printf '%s\\n' "$BODY" | grep -oiE '\\b(fixes|closes|resolves)[[:space:]]+#[0-9]+' | head -1 | grep -oE '[0-9]+$' || true)
           payout=$(printf '%s\\n' "$BODY" | grep -oE '^knos-payout:[[:space:]]*[1-9A-HJ-NP-Za-km-z]{32,44}' | head -1 | grep -oE '[1-9A-HJ-NP-Za-km-z]{32,44}$' || true)
-          id=""
-          if [ -n "$issue" ] && [ -n "$payout" ]; then
+          # a job posted from the web app (PostGithub) is named in the body; the escrow binds it to this repo and ref
+          id=$(printf '%s\\n' "$BODY" | grep -oiE '^knos-job:[[:space:]]*[0-9a-f]{64}' | head -1 | grep -oiE '[0-9a-f]{64}$' | tr 'A-F' 'a-f' || true)
+          if [ -z "$id" ] && [ -n "$issue" ] && [ -n "$payout" ]; then
             # the job id fund-relay posted on the issue (only this repo's own workflow comments as github-actions[bot])
             id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$issue/comments?per_page=100" \\
                    --jq '.[] | select(.user.login == "github-actions[bot]") | .body' \\

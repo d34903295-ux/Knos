@@ -169,10 +169,10 @@ def test_judge_learns_a_contributing_violation_and_requires_it_next(tmp_path):
     (base / "CONTRIBUTING.md").write_bytes(b"# Rules\n\n- Do not leave print() debug statements in code.\n")
     diff = ("diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,3 @@\n def add(a, b):\n"
             "+    print(a, b)\n     return a + b\n")
-    store = history.JsonStore(tmp_path / "store")
+    store = history.SibylStore.local(tmp_path / "store")
     v = prove.judge_with_rules(base, tmp_path / "pr", {"issue": "1"}, ["calc.py"], diff, store, "o/r", "bot")
     assert not v["passed"] and v["reasons"][0].startswith("repo rule: calc.py:2")
     assert v["evidence"]["required_by_history"] == [] and v["evidence"]["learned"] == ["tamper:rule:no_debug"]
-    again = history.JsonStore(tmp_path / "store")   # a later run: the memory restored from the cache
+    again = history.SibylStore.local(tmp_path / "store")   # a later run: the memory restored from the cache
     v2 = prove.judge_with_rules(base, tmp_path / "pr", {"issue": "1"}, ["calc.py"], diff, again, "o/r", "other")
     assert v2["evidence"]["required_by_history"] == ["tamper:rule:no_debug"]

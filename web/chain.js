@@ -160,6 +160,47 @@ export async function postTx(buyerB58, jobId, units, briefHash, workS = 3600, re
   return serialize([new TransactionInstruction({ programId: p.pid, keys, data })], buyer);
 }
 
+/** sha256 over a repo's acceptance bundle .knos/acceptance/<issue>/ at `ref`, read from the public GitHub API: sorted
+ * relative paths, each "path\0sha256(content)\n" (src/knos/jobs/prove.py `checks_hash`). Returns 32 bytes. */
+export async function checksHash(repo, ref, issue) {
+  const dir = `.knos/acceptance/${issue}/`;
+  const tree = await fetch(`https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`)
+    .then((r) => { if (!r.ok) throw new Error(`GitHub: ${repo}@${ref} not readable (${r.status})`); return r.json(); });
+  const files = tree.tree.filter((t) => t.type === "blob" && t.path.startsWith(dir)).map((t) => t.path).sort();
+  if (!files.length) throw new Error(`${repo} has no ${dir} on ${ref}: write the acceptance tests first.`);
+  const hexOf = (u8) => [...u8].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const dig = async (u8) => new Uint8Array(await crypto.subtle.digest("SHA-256", u8));
+  let lines = "";
+  const rel = files.map((f) => f.slice(dir.length)).sort();
+  for (const f of rel) {
+    const body = await fetch(`https://raw.githubusercontent.com/${repo}/${encodeURIComponent(ref)}/${dir}${f}`)
+      .then((r) => { if (!r.ok) throw new Error(`GitHub: cannot read ${dir}${f}`); return r.arrayBuffer(); });
+    lines += `${f}\0${hexOf(await dig(new Uint8Array(body)))}\n`;
+  }
+  return dig(new TextEncoder().encode(lines));
+}
+
+/** PostGithub (19, src/knos/jobs/sol.py `post_github`): the price into the vault in the config mint, paid when a
+ * GitHub Actions token from Knos's prove.yml for `repo` at `ref` (e.g. refs/heads/main) proves the checks passed. */
+export async function postGithubTx(buyerB58, jobId, units, briefHash, repo, ref, checks, stake = false,
+                                   workS = 7 * 86400, reviewS = 86400) {
+  const { PublicKey, TransactionInstruction } = await web3();
+  const buyer = new PublicKey(buyerB58), cfg = await config(), p = await pdas(jobId);
+  if (cfg.paused) throw new Error("The escrow is paused for new jobs right now; existing jobs still settle.");
+  if (units && units < cfg.minAmount) throw new Error(`The minimum job is ${cfg.minAmount / 1e6} USDC.`);
+  if (cfg.maxAmount && units > cfg.maxAmount) throw new Error(`Jobs are capped at ${cfg.maxAmount / 1e6} USDC for now.`);
+  const dig = async (s) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
+  const data = new Uint8Array(1 + 32 + 24 + 32 * 4 + 1), dv = new DataView(data.buffer);   // 186 bytes
+  data[0] = 19; data.set(jobId, 1);
+  dv.setBigUint64(33, BigInt(units), true); dv.setBigInt64(41, BigInt(workS), true); dv.setBigInt64(49, BigInt(reviewS), true);
+  data.set(briefHash, 57); data.set(await dig(repo), 89); data.set(await dig(ref), 121); data.set(checks, 153);
+  data[185] = stake ? 1 : 0;
+  const keys = [[buyer, true, true], [p.job, false, true], [await ata(buyer, cfg.mint), false, true],
+    [await ata(p.vaultAuth, cfg.mint), false, true], [cfg.address, false, false], [new PublicKey(TOKEN), false, false],
+    [new PublicKey(SYSTEM), false, false]].map(([pubkey, isSigner, isWritable]) => ({ pubkey, isSigner, isWritable }));
+  return serialize([new TransactionInstruction({ programId: p.pid, keys, data })], buyer);
+}
+
 /** Accept (pays the worker 95%, the fee 5%) or reject (refund) a delivered job, signed by its buyer. */
 export async function settleTx(buyerB58, job, jobId, verb) {
   const { PublicKey, TransactionInstruction } = await web3();

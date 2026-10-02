@@ -41,7 +41,7 @@
       <div id="protect-result" role="status" aria-live="polite"></div>
     </form>
     <p class="fine">Read live from the public GitHub API in your browser. Agent records come from the
-      <a href="index.json">Agent PR Index</a>, rebuilt every 30 minutes, its Merkle root attested on Solana devnet.
+      <a href="index.json">Agent PR Index</a>, rebuilt every 6 hours, its Merkle root attested on Solana devnet.
       </p>
     <ol class="steps">
       <li><strong>Paste an agent PR</strong> above: is its "tests pass" true?</li>
@@ -84,6 +84,19 @@
           <input id="verifier-key" name="verifier-key" type="text" placeholder="verifier public key (base58)" hidden>
         </div>
       </div>
+      <details id="gh-job" class="fine">
+        <summary>Pay on a GitHub proof instead (a repo running Knos's workflow)</summary>
+        <div class="row">
+          <div><label for="gh-repo">Repository</label>
+            <input id="gh-repo" name="gh-repo" type="text" autocomplete="off" placeholder="owner/repo"></div>
+          <div><label for="gh-issue">Issue</label>
+            <input id="gh-issue" name="gh-issue" type="number" min="1" step="1" placeholder="1"></div>
+          <div><label for="gh-branch">Branch</label>
+            <input id="gh-branch" name="gh-branch" type="text" autocomplete="off" value="main"></div>
+        </div>
+        <p>Paid when a pull request to that branch passes the tests in <code>.knos/acceptance/&lt;issue&gt;/</code>
+          (hashed now, fixed on chain). The PR names the job with a <code>knos-job: &lt;id&gt;</code> line.</p>
+      </details>
       <button type="submit" id="post">Post job</button>
       <button type="button" id="post-passkey" class="ghost wide">No wallet? Pay with a passkey (Tempo)</button>
       <p id="passkey-info" class="fine" hidden></p>
