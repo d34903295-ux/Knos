@@ -128,3 +128,6 @@ def pytest_collection_modifyitems(config, items):
     if drop:
         config.hook.pytest_deselected(items=drop)
         items[:] = keep
+
+# The tamper benchmark's sample repo and attacks are data for scripts/tamper_bench.py, not part of this suite.
+collect_ignore = ["bench_tamper"]

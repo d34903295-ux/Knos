@@ -49,3 +49,7 @@ _.GH_WORKFLOW_PREFIX, _.gh_audience, _.last_cu, _.last_logs
 
 # 0.3.8: a caught tamper is learned by the prove judge (knos.jobs.prove), which calls history.learn_tamper.
 _.learn_tamper
+
+# 0.3.8: the authority hand-over and workflow-pin builders are run by scripts/squads_handover.mjs's Python twin, the
+# tests and the operator; `knos mainnet-check` is registered by its typer decorator.
+_.mainnet_check_cmd, _.set_admin, _.set_fee_account, _.WF_FUND, _.set_workflow

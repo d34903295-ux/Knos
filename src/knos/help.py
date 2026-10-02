@@ -229,6 +229,11 @@ PER_COMMAND = {
     "export": "  knos export\n\n  Writes .knos/decisions.md: decisions and current claims, to commit.",
     "restore": "  knos restore\n\n  Reads .knos/decisions.md back. Claims are not restored.",
     "who": "  knos who\n\n  Which agents close what they claim, and the hold that has earned them.",
+    "mainnet-check": """\
+  knos mainnet-check   every gate before mainnet: a Squads vault holds the
+                       upgrade authority, the admin and the fees; verified build;
+                       security.txt; IDL on chain; cargo-audit clean.
+                       Mainnet stays locked.""",
     "memory": """\
   knos memory export [--out FILE]   every Sibyl record here: JSON + sha256
   knos memory import FILE           merge one back; safe to run twice
