@@ -19,6 +19,8 @@ permissions:
 env:
   SOLANA_VERSION: v2.3.13
   PROGRAM_ID: GwmbMFvyHHwHug5em9dv26oXz2zTgXKGsNdrBxPayRPq
+  # agave 2.3 platform tools (rustc 1.84) for solana-verify; its default image is rustc 1.79, too old for the lockfile
+  VERIFY_IMAGE: solanafoundation/solana-verifiable-build:2.3.11
 
 jobs:
   build-test:
@@ -107,7 +109,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: solana-verify build (docker)
         run: |
-          solana-verify build "$GITHUB_WORKSPACE/programs/knos_escrow" --library-name knos_escrow
+          solana-verify build "$GITHUB_WORKSPACE/programs/knos_escrow" --library-name knos_escrow --base-image "$VERIFY_IMAGE"
           echo "executable hash: $(solana-verify get-executable-hash programs/knos_escrow/target/deploy/knos_escrow.so)"
       - uses: actions/upload-artifact@v4
         with:
@@ -182,4 +184,4 @@ jobs:
           echo "on-chain hash: $(~/.cargo/bin/solana-verify get-program-hash -u devnet "$PROGRAM_ID")"
           ~/.cargo/bin/solana-verify verify-from-repo -u devnet --program-id "$PROGRAM_ID" \
             "https://github.com/${{ github.repository }}" --commit-hash "$GITHUB_SHA" \
-            --mount-path programs/knos_escrow --library-name knos_escrow -k "$RUNNER_TEMP/up.json" --skip-prompt
+            --mount-path programs/knos_escrow --library-name knos_escrow --base-image "$VERIFY_IMAGE" -k "$RUNNER_TEMP/up.json" --skip-prompt
