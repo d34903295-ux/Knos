@@ -24,6 +24,9 @@ def _bench():
     return mod
 
 
+@pytest.mark.skipif(__import__("sys").platform == "darwin",
+                    reason="prove.yml's judge runs on ubuntu-latest; on macOS the sample's acceptance tests are not "
+                           "collected (no acceptance test ran), a known gap of running the judge on macOS")
 def test_the_benchmark_runs_fast_and_only_the_out_of_scope_stub_fools_knos():
     t = time.monotonic()
     bench = _bench()
