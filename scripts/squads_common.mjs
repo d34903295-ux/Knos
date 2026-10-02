@@ -74,13 +74,14 @@ export const loader = {
       { pubkey: authority, isSigner: true, isWritable: false }] }),
 };
 
-// Escrow admin instructions added in 0.3.8 (programs/knos_escrow): 27 SetAdmin, 28 SetFeeAccount.
-// Layout assumed here: admin(s) config(w) new_admin | new_fee_token; data = the tag byte only.
+// Escrow admin instructions (programs/knos_escrow/src/lib.rs; src/knos/jobs/sol.py set_admin/set_fee_account):
+//   27 SetAdmin:      admin(s) config2(w)            data: 27 | new_admin[32]
+//   28 SetFeeAccount: admin(s) config2(w) fee_token  data: 28
 // squads_handover.mjs simulates first, so a layout mismatch stops before anything is sent.
 export const escrow = {
-  setAdmin: ({ admin, next, pid = KNOS_PROGRAM_ID }) => new web3.TransactionInstruction({ programId: pid, data: Buffer.from([27]),
-    keys: [{ pubkey: admin, isSigner: true, isWritable: false }, { pubkey: configPda(pid), isSigner: false, isWritable: true },
-      { pubkey: next, isSigner: false, isWritable: false }] }),
+  setAdmin: ({ admin, next, pid = KNOS_PROGRAM_ID }) => new web3.TransactionInstruction({ programId: pid,
+    data: Buffer.concat([Buffer.from([27]), next.toBuffer()]),
+    keys: [{ pubkey: admin, isSigner: true, isWritable: false }, { pubkey: configPda(pid), isSigner: false, isWritable: true }] }),
   setFeeAccount: ({ admin, feeToken, pid = KNOS_PROGRAM_ID }) => new web3.TransactionInstruction({ programId: pid, data: Buffer.from([28]),
     keys: [{ pubkey: admin, isSigner: true, isWritable: false }, { pubkey: configPda(pid), isSigner: false, isWritable: true },
       { pubkey: feeToken, isSigner: false, isWritable: false }] }),

@@ -117,7 +117,8 @@ def run(fetch: Fetch, program: str = PROGRAM, multisig: str = DEVNET_MULTISIG,
     st = fetch.verify(program) or {}
     want = st.get("executable_hash") or st.get("hash")
     ok = bool(onchain) and bool(want) and want == onchain and st.get("is_verified", True) is not False
-    res.append(("solana-verify hash == on-chain hash", ok, f"on-chain {onchain}, verified build {want or 'none'}"))
+    src = f" ({st['source']})" if st.get("source") else ""
+    res.append(("solana-verify hash == on-chain hash", ok, f"on-chain {onchain}, verified build {want or 'none'}{src}"))
 
     # 5. security.txt
     res.append(("security.txt in the on-chain binary", SECURITY_TXT in elf,
@@ -160,6 +161,32 @@ def _osec(program: str) -> dict | None:
         return None
 
 
+def _ci_verified(program: str) -> dict | None:
+    """OtterSec's status API only covers mainnet. On devnet the verified build is the `knos_escrow-verified.so`
+    artifact (solana-verify docker build) of the last successful program.yml run on main; hash it the same way."""
+    import tempfile
+    try:
+        runs = json.loads(subprocess.run(
+            ["gh", "run", "list", "--workflow", "program.yml", "--branch", "main", "--status", "success", "--limit", "1",
+             "--json", "databaseId"], capture_output=True, text=True, timeout=30, check=True).stdout)
+        rid = runs[0]["databaseId"]
+        with tempfile.TemporaryDirectory(dir=".") as d:  # relative, so a Windows gh.exe under WSL works too
+            d = os.path.relpath(d)
+            subprocess.run(["gh", "run", "download", str(rid), "-n", "knos_escrow-verified.so", "-D", d],
+                           capture_output=True, timeout=120, check=True)
+            elf = open(os.path.join(d, "knos_escrow.so"), "rb").read()
+        return {"executable_hash": elf_hash(elf), "source": f"program.yml run {rid} verified-build artifact"}
+    except Exception:
+        return None
+
+
+def _verified(program: str) -> dict | None:
+    st = _osec(program)
+    if st and (st.get("executable_hash") or st.get("hash")):
+        return st
+    return _ci_verified(program)
+
+
 def _audit(env: dict) -> tuple[bool, str]:
     rec = env.get("KNOS_CARGO_AUDIT_RESULT")
     if rec and os.path.exists(rec):
@@ -184,7 +211,7 @@ def _audit(env: dict) -> tuple[bool, str]:
 def live(env: dict | None = None) -> Fetch:
     env = os.environ if env is None else env
     url = env.get("KNOS_SOLANA_RPC", "https://api.devnet.solana.com")
-    return Fetch(account=_rpc(url), verify=_osec, audit=lambda: _audit(env))
+    return Fetch(account=_rpc(url), verify=_verified, audit=lambda: _audit(env))
 
 
 def main(say: Callable[[str], None] = print, fetch: Fetch | None = None, multisig: str | None = None) -> int:
