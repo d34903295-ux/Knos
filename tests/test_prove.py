@@ -84,9 +84,13 @@ def test_the_caller_template_uses_pull_request_and_a_release_tag():
 
 # ---- knos prove --job --------------------------------------------------------------------------------------------
 
+SHA = "12" * 20
+
+
 def _jwt(**claims) -> str:
-    body = {"aud": f"knos:{JOB}", "iss": "https://token.actions.githubusercontent.com",
-            "exp": int(time.time()) + 300, "job_workflow_ref": REF, **claims}
+    body = {"aud": f"knos:{JOB}:{SHA}:{'00' * 32}:11111111111111111111111111111111", "sha": SHA,
+            "iss": "https://token.actions.githubusercontent.com",
+            "exp": int(time.time()) + 300, "job_workflow_sha": "ab" * 20, **claims}
     enc = [base64.urlsafe_b64encode(json.dumps(x).encode()).rstrip(b"=").decode() for x in ({"alg": "RS256"}, body)]
     return ".".join(enc + ["c2ln"])
 
@@ -122,8 +126,8 @@ def test_a_good_token_is_sent_and_both_signatures_printed(chain, tmp_path, capsy
     ({"aud": "sts.amazonaws.com"}, "audience"),
     ({"iss": "https://evil.example"}, "issuer"),
     ({"exp": int(time.time()) - 5}, "expired"),
-    ({"job_workflow_ref": "attacker/repo/.github/workflows/prove.yml@refs/heads/main"}, "job_workflow_ref"),
-    ({"job_workflow_ref": "drexthealpha/Knos/.github/workflows/prove.yml@refs/heads/main"}, "job_workflow_ref"),
+    ({"job_workflow_sha": "AB" * 20}, "job_workflow_sha"),
+    ({"sha": "34" * 20}, "head sha"),
 ])
 def test_a_token_the_chain_would_refuse_is_refused_before_sending(chain, tmp_path, capsys, claims, why):
     rc, said = run(capsys, "prove", "--job", JOB, "--jwt-file", _token(tmp_path, _jwt(**claims)))
