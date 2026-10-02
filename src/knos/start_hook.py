@@ -56,12 +56,19 @@ def _lines(repo) -> list[str]:
     from . import paths
 
     notes = []
+    last = None
     if paths.has_store(repo):  # never create a store from a hook
         try:
+            from .memory_io import last_note
             with Memory(repo) as mem:
                 notes = [n for n in mem.notes() if said_in(n)]
+                last = last_note(mem.client)
         except Exception:
             notes = []
+    if last:
+        if said:
+            said.append("")
+        said.append("Continuity note (where the last session left off): " + " ".join(last["text"].split())[:400])
     if notes:
         if said:
             said.append("")

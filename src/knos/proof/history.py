@@ -11,6 +11,9 @@ that history makes required.
     repo_rules()  the repo's own rules: CONTRIBUTING.md parsed into machine-checkable rules (stored in Sibyl the first
                   time, recalled from Sibyl after) plus the rules past rejections taught it (entity `repo_rule`)
     lint_pr()     every place a PR's diff or commits break one of those rules, citing the rule's line and the PR's
+    learn_tamper()  a caught tamper (a prove.judge finding's `pattern`) becomes a `tamper` entity and two proof_rules
+                  scoped repo=... and agent=...: every later proof for that repo or by that agent must run
+                  `tamper:<pattern>` (required_for / tamper_checks_required)
 
 `NullStore` keeps nothing: the same engine with no memory, which is what a plain hook amounts to.
 """
@@ -130,7 +133,49 @@ def rules(store) -> list[dict]:
 
 
 def required(store, kinds: set[str]) -> set[str]:
-    return {r["require"] for r in rules(store) if r.get("when") in kinds or r.get("when") == "*"}
+    return {r["require"] for r in rules(store) if (r.get("when") in kinds or r.get("when") == "*")
+            and not r.get("scope")}
+
+
+# ---- tampering an agent was caught at, per repo and per agent (Sibyl) --------------------------------------------
+
+def repo_key(repo) -> str:
+    """A repo as tamper rules key it: the last path component, lowercased (a path, a name or owner/name)."""
+    return str(repo or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+
+
+def _agent_key(agent) -> str:
+    return str(agent or "").strip().lower()
+
+
+def learn_tamper(store, repo, agent, pattern: str, evidence: str = "", at: float | None = None) -> list[dict]:
+    """Remember a tamper `pattern` (e.g. "deleted-tests") caught in `agent`'s work on `repo`, and require the check
+    `tamper:<pattern>` from then on for every proof on that repo AND every proof by that agent. Idempotent."""
+    at = at or time.time()
+    repo_k, agent_k, check = repo_key(repo), _agent_key(agent), f"tamper:{pattern}"
+    store.put("tamper", _id("tamper", repo_k, agent_k, pattern, evidence),
+              {"repo": str(repo), "agent": str(agent), "pattern": pattern, "evidence": str(evidence)[:2000], "at": at})
+    because = f"{agent} was caught at {pattern} on {repo}: {str(evidence)[:160]}"
+    made = []
+    for scope, value in (("repo", repo_k), ("agent", agent_k)):
+        if value:
+            rule = {"when": "tamper", "scope": scope, scope: value, "require": check, "because": because, "at": at}
+            store.put("proof_rule", _id("tamper", scope, value, pattern), rule)
+            made.append(rule)
+    return made
+
+
+def required_for(store, repo=None, agent=None) -> list[dict]:
+    """The tamper proof_rules in force for this repo or this agent."""
+    repo_k, agent_k = repo_key(repo), _agent_key(agent)
+    return [r for r in rules(store) if r.get("when") == "tamper" and
+            ((r.get("scope") == "repo" and repo_k and r.get("repo") == repo_k) or
+             (r.get("scope") == "agent" and agent_k and r.get("agent") == agent_k))]
+
+
+def tamper_checks_required(store, repo=None, agent=None) -> set[str]:
+    """Every `tamper:<pattern>` check the next proof for this repo or by this agent must run (for prove.judge)."""
+    return {r["require"] for r in required_for(store, repo, agent)}
 
 
 # ---- a delivery against what the buyer told us before (Sibyl) ---------------------------------------------------

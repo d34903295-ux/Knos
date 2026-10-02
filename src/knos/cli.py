@@ -673,6 +673,56 @@ def export(to: str = typer.Option(None, "--to", metavar="PATH", help="write some
                   "and docs/adr/*.md.[/dim]")
 
 
+memory_app = typer.Typer(add_completion=False, help="this repo's Sibyl memory as one portable file; continuity notes")
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("export")
+def memory_export(out_file: str = typer.Option(None, "--out", metavar="FILE", help="write here (default: stdout)")) -> None:
+    """Every Knos/Sibyl record for this repo as versioned, sorted JSON with a sha256."""
+    import json as _json
+
+    from . import memory_io
+
+    repo = _repo()
+    with Memory(repo) as mem:
+        doc = memory_io.export_doc(mem.client, repo.name)
+    text = _json.dumps(doc, indent=1, sort_keys=True) + "\n"
+    if not out_file:
+        sys.stdout.write(text)
+        return
+    Path(out_file).write_text(text, encoding="utf-8")
+    out.print(f"Wrote {out_file}: {doc['count']} records, sha256 {doc['sha256'][:16]}", markup=False)
+    if doc["continuity"]:
+        out.print(f"Continuity: {doc['continuity']}", markup=False)
+
+
+@memory_app.command("import")
+def memory_import(file: str = typer.Argument(..., help="a file `knos memory export` wrote")) -> None:
+    """Merge an export into this repo's memory. Safe to run twice."""
+    import json as _json
+
+    from . import memory_io
+
+    try:
+        doc = _json.loads(Path(file).read_text(encoding="utf-8"))
+        with Memory(_repo()) as mem:
+            written, same = memory_io.import_doc(mem.client, doc)
+    except (OSError, ValueError) as problem:
+        raise Stop(f"Could not import {file}: {problem}", "Give a file `knos memory export --out` wrote.") from None
+    out.print(f"Imported {file}: {written} written, {same} already here.", markup=False)
+
+
+@memory_app.command("note")
+def memory_note(text: str = typer.Argument(..., help="what the next session here should know first")) -> None:
+    """Leave the continuity note: shown at the next session start and by `knos memory export`."""
+    from . import memory_io
+
+    with Memory(_repo()) as mem:
+        memory_io.note(mem.client, text)
+    out.print("Continuity note kept; the next session here starts with it.")
+
+
 @app.command()
 def restore() -> None:
     """Rebuild this repo's decisions from the record committed to it."""

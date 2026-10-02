@@ -20,7 +20,7 @@ MAIN = """  knos - AI agent work gets paid only when GitHub's own signature, che
       knos done, status, board   give claims back; who is working where
 
   More
-      knos remember, notes, forget, private, point, compact, reset
+      knos remember, notes, forget, private, point, compact, reset, memory
       knos worth, stats, who, bench, doctor, learn, lint, demo, export, restore
       knos budget, spend, report, pay, pro   Pro: caps, wallets, Sibyl Pro
       knos agent record <agent>       what an agent did, verified on chain
@@ -231,6 +231,10 @@ PER_COMMAND = {
     "export": "  knos export\n\n  Writes .knos/decisions.md: decisions and current claims, to commit.",
     "restore": "  knos restore\n\n  Reads .knos/decisions.md back. Claims are not restored.",
     "who": "  knos who\n\n  Which agents close what they claim, and the hold that has earned them.",
+    "memory": """\
+  knos memory export [--out FILE]   every Sibyl record here, versioned JSON + sha256
+  knos memory import FILE           merge one back; safe to run twice
+  knos memory note "..."            the continuity note the next session starts with""",
 }
 PER_COMMAND["connect"] = PER_COMMAND["init"]
 PER_COMMAND["guard"] = PER_COMMAND["init"]

@@ -14,6 +14,7 @@ _ = object()
 
 # Typer registers these with decorators and calls them when a person types the command.
 cli._no_command, cli.guard_cmd, cli.private_cmd, cli.mcp_cmd, cli.help_cmd
+cli.memory_export, cli.memory_import, cli.memory_note
 jobs_cli.list_, jobs_cli.sibyl_cmd, jobs_cli.relay_cmd, jobs_cli.serve_cmd, jobs_cli.stats_cmd
 pro_cli.spend, pro_cli.budget_show, pro_cli.budget_set, pro_cli.report_cmd, pro_cli.budget_chain_show
 pro_cli.budget_revoke, pro_cli.budget_raise, pro_cli.budget_clear, pro_cli.budget_fund, pro_cli.budget_agents
@@ -45,3 +46,6 @@ _.stake_for, _.is_closed, _._tok
 # the tests that print them.
 _.bounty_brief, _.post_bounty, _.faucet, _.init_faucet_mint, _.add_mint, _.GH_BUF_LEN, _.GH_ISSUER
 _.GH_WORKFLOW_PREFIX, _.gh_audience, _.last_cu, _.last_logs
+
+# 0.3.8: a caught tamper is learned by the prove judge (knos.jobs.prove), which calls history.learn_tamper.
+_.learn_tamper
