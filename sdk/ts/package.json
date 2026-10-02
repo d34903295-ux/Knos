@@ -1,6 +1,6 @@
 {
   "name": "knos-sdk",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed. Hire and be hired, paid on proof.",
   "type": "module",
   "main": "index.js",

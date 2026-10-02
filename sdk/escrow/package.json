@@ -1,6 +1,6 @@
 {
   "name": "@knos/escrow",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "private": true,
   "description": "Instruction builders and the job decoder for the Knos escrow program on Solana (paid on proof).",
   "type": "module",
