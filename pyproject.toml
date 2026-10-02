@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knos"
-version = "0.3.8"
+version = "0.3.9"
 description = "AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed. Escrow on Solana, 2.5% fee; a free Stop hook for coding agents."
 readme = "README.md"
 license = { file = "LICENSE" }
