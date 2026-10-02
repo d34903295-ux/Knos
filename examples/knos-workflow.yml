@@ -1,25 +1,29 @@
-# .github/workflows/knos.yml - pay a Knos job when the pull request that delivers it passes this repo's checks.
+# .github/workflows/knos.yml - pay a Knos job when the pull request that delivers it passes the funder's held-out
+# acceptance tests.
 #
-# "Protect this repo" prefills this file. The job was posted with `market.post_github` naming this repo and the ref
-# the work must land on; the worker opens a pull request whose body contains a line
+# The funder committed the acceptance tests to .knos/acceptance/<issue>/ on the base branch and funded the job with
+# their checks hash (`knos proof checks-hash --dir .knos/acceptance/<issue>`), fixed on chain. The worker opens a pull
+# request whose body contains the lines
 #
 #     knos-job: <64 hex characters>
+#     knos-issue: <issue id>
+#     knos-payout: <base58 Solana address>
 #
 # Security model:
-#   - The trigger is `pull_request`, never `pull_request_target`: nothing here runs with this repo's write token
-#     against pull request code.
-#   - `job` reads the id from the pull request body through an environment variable (never inlined into the script)
-#     and checks out nothing.
-#   - Knos's prove.yml then runs the pull request's code in a job with no id-token permission and no secret, against
-#     the checks in the BASE branch's .knos/proof.toml; only if they pass does a second job, which runs no pull request
-#     code, mint the GitHub OIDC token (audience knos:<job>) and send it to the escrow. The escrow verifies the token
-#     on chain, including that it came from prove.yml at a Knos release tag, and pays the worker.
-#   - GitHub gives pull requests from forks neither secrets nor id-token: write, so the worker pushes a branch to
-#     this repo (or a maintainer re-opens the pull request from one) for the payment step to run.
+#   - The trigger is `pull_request_target`, so pull requests from forks get the id-token the payment needs. That
+#     trigger runs with the BASE repo's context, so nothing here checks out or runs pull request code: this file only
+#     reads the ids from the body (through an environment variable, never inlined into a script).
+#   - Knos's prove.yml then judges the pull request in a job with contents: read, no id-token and no secret: it
+#     overlays the base's tests, CI config and .knos/ onto the PR source, refuses edits to them, plants a random
+#     sentinel test, and requires the acceptance tests to fail on the base and pass on the PR head. Only then does a
+#     second job, which runs no pull request code, mint the OIDC token for
+#     knos:<job>:<head sha>:<checks hash>:<payout> and publish it as the `knos-proof` artifact, which Knos's
+#     always-on worker relays to the escrow. Passing KNOS_PROVER_KEY is optional (the job then sends it itself).
+#   - Keep this file's `on:` and the pinned tag: they are what the escrow trusts, through job_workflow_ref.
 name: knos
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, edited]
 
 permissions: {}
@@ -29,22 +33,25 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       id: ${{ steps.id.outputs.id }}
+      issue: ${{ steps.id.outputs.issue }}
     steps:
       - id: id
         env:
           BODY: ${{ github.event.pull_request.body }}
         run: |
-          id=$(printf '%s\n' "$BODY" | grep -oiE '^knos-job:[[:space:]]*[0-9a-f]{64}' | head -1 | grep -oiE '[0-9a-f]{64}$' | tr 'A-F' 'a-f')
+          body=$(printf '%s\n' "$BODY" | tr -d '\r')
+          id=$(printf '%s\n' "$body" | grep -oiE '^knos-job:[[:space:]]*[0-9a-f]{64}' | head -1 | grep -oiE '[0-9a-f]{64}$' | tr 'A-F' 'a-f')
+          issue=$(printf '%s\n' "$body" | grep -oE '^knos-issue:[[:space:]]*[A-Za-z0-9._-]+' | head -1 | sed -E 's/^knos-issue:[[:space:]]*//')
           echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "issue=$issue" >> "$GITHUB_OUTPUT"
 
   prove:
     needs: job
-    if: needs.job.outputs.id != ''
+    if: needs.job.outputs.id != '' && needs.job.outputs.issue != ''
     permissions:
       contents: read
       id-token: write
-    uses: drexthealpha/Knos/.github/workflows/prove.yml@v0.3.7
+    uses: drexthealpha/Knos/.github/workflows/prove.yml@v0.3.8
     with:
       job: ${{ needs.job.outputs.id }}
-    secrets:
-      KNOS_PROVER_KEY: ${{ secrets.KNOS_PROVER_KEY }}
+      issue: ${{ needs.job.outputs.issue }}

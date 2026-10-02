@@ -15,6 +15,7 @@ from knos.cli import main
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB = "ab" * 32
+AUD = f"knos:{JOB}:{'c' * 40}:{'d' * 64}:CVhqj6hcR1Vd6r1c7m1V1rQ2T5p3h7sQyYxWbF2kFqL"
 REF = "drexthealpha/Knos/.github/workflows/prove.yml@refs/tags/v0.3.7"
 
 
@@ -33,50 +34,59 @@ def _yaml(path: Path) -> dict:
 
 # ---- prove.yml ---------------------------------------------------------------------------------------------------
 
-def test_prove_yml_is_a_reusable_workflow_taking_the_job():
+def test_prove_yml_is_a_reusable_workflow_taking_the_job_and_issue():
     doc = _yaml(ROOT / ".github" / "workflows" / "prove.yml")
     call = doc["on"]["workflow_call"]
     assert set(doc["on"]) == {"workflow_call"}
-    assert call["inputs"]["job"]["required"] is True
-    assert call["secrets"]["KNOS_PROVER_KEY"]["required"] is True
+    assert call["inputs"]["job"]["required"] is True and call["inputs"]["issue"]["required"] is True
+    assert call["secrets"]["KNOS_PROVER_KEY"]["required"] is False     # permissionless: the relay sends the token
     assert doc["permissions"] == {}
 
 
-def test_check_runs_pr_code_without_any_token_it_could_misuse():
+def test_check_judges_pr_code_without_any_token_it_could_misuse():
     check = _yaml(ROOT / ".github" / "workflows" / "prove.yml")["jobs"]["check"]
     assert check["permissions"] == {"contents": "read"}
-    assert "id-token" not in check["permissions"]
     text = json.dumps(check)
-    assert "secrets." not in text
+    assert "secrets." not in text and "id-token" not in text
     co = next(s for s in check["steps"] if str(s.get("uses", "")).startswith("actions/checkout"))
-    assert co["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    assert co["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"      # the base, not the PR
     assert co["with"]["persist-credentials"] is False
-    assert any("knos proof run" in str(s.get("run", "")) for s in check["steps"])
-    assert check["outputs"]["passed"]
+    runs = "\n".join(str(s.get("run", "")) for s in check["steps"])
+    assert 'archive "$HEAD" | tar -x -C pr' in runs                               # PR source in its own dir
+    assert "knos proof judge --base base --pr pr" in runs
+    assert set(check["outputs"]) == {"passed", "head_sha", "checks_hash"}
 
 
-def test_attest_runs_no_pr_code_and_mints_the_token_for_this_job():
+def test_attest_runs_no_pr_code_and_mints_the_five_part_audience():
     jobs = _yaml(ROOT / ".github" / "workflows" / "prove.yml")["jobs"]
     attest = jobs["attest"]
     assert attest["needs"] == "check"
     assert attest["if"] == "needs.check.outputs.passed == 'true'"
-    assert attest["permissions"] == {"id-token": "write", "contents": "none"}
-    assert not any(str(s.get("uses", "")).startswith("actions/checkout") for s in attest["steps"])
+    assert attest["permissions"] == {"id-token": "write"}
+    co = [s for s in attest["steps"] if str(s.get("uses", "")).startswith("actions/checkout")]
+    assert len(co) == 1 and co[0]["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert co[0]["with"]["sparse-checkout"] == ".knos/acceptance/${{ inputs.issue }}"
     runs = "\n".join(str(s.get("run", "")) for s in attest["steps"])
-    assert "audience=knos:$JOB" in runs and "ACTIONS_ID_TOKEN_REQUEST_URL" in runs
+    assert 'test "$got" = "$CHECKS"' in runs                                     # recomputed from the base
+    assert "knos-payout:" in runs and 'knos proof aud --job "$JOB" --head "$HEAD"' in runs
+    assert "audience=$aud" in runs and "ACTIONS_ID_TOKEN_REQUEST_URL" in runs
+    up = next(s for s in attest["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact"))
+    assert up["with"]["name"] == "knos-proof"
     envs = {k: v for s in attest["steps"] for k, v in (s.get("env") or {}).items()}
-    assert envs["JOB"] == "${{ inputs.job }}"                       # the audience is knos:${{ inputs.job }}
+    assert envs["JOB"] == "${{ inputs.job }}" and envs["CHECKS"] == "${{ needs.check.outputs.checks_hash }}"
     assert envs["KNOS_MEMBER_KEY"] == "${{ secrets.KNOS_PROVER_KEY }}"
     assert 'knos prove --job "$JOB" --jwt-file' in runs
     assert "pip install --system \"knos==" in runs                  # knos from PyPI, never from the PR
 
 
-def test_the_caller_template_uses_pull_request_and_a_release_tag():
+def test_the_caller_template_uses_pull_request_target_and_a_release_tag():
     doc = _yaml(ROOT / "examples" / "knos-workflow.yml")
-    assert set(doc["on"]) == {"pull_request"}
+    assert set(doc["on"]) == {"pull_request_target"}
     prove = doc["jobs"]["prove"]
     assert prove["uses"].startswith("drexthealpha/Knos/.github/workflows/prove.yml@v")
     assert prove["with"]["job"] == "${{ needs.job.outputs.id }}"
+    assert prove["with"]["issue"] == "${{ needs.job.outputs.issue }}"
+    assert prove["permissions"] == {"contents": "read", "id-token": "write"}
     finder = doc["jobs"]["job"]
     assert "pull_request.body" not in json.dumps(finder["steps"][0]["run"])   # via env, never inlined into a script
     assert not any(str(s.get("uses", "")).startswith("actions/checkout") for s in finder["steps"])
@@ -85,7 +95,7 @@ def test_the_caller_template_uses_pull_request_and_a_release_tag():
 # ---- knos prove --job --------------------------------------------------------------------------------------------
 
 def _jwt(**claims) -> str:
-    body = {"aud": f"knos:{JOB}", "iss": "https://token.actions.githubusercontent.com",
+    body = {"aud": AUD, "iss": "https://token.actions.githubusercontent.com",
             "exp": int(time.time()) + 300, "job_workflow_ref": REF, **claims}
     enc = [base64.urlsafe_b64encode(json.dumps(x).encode()).rstrip(b"=").decode() for x in ({"alg": "RS256"}, body)]
     return ".".join(enc + ["c2ln"])
@@ -118,7 +128,9 @@ def test_a_good_token_is_sent_and_both_signatures_printed(chain, tmp_path, capsy
 
 
 @pytest.mark.parametrize("claims,why", [
-    ({"aud": "knos:" + "cd" * 32}, "audience"),
+    ({"aud": AUD.replace(JOB, "cd" * 32)}, "audience"),
+    ({"aud": f"knos:{JOB}"}, "audience"),                      # the old 2-part audience
+    ({"aud": AUD[:-1] + "0"}, "payout"),
     ({"aud": "sts.amazonaws.com"}, "audience"),
     ({"iss": "https://evil.example"}, "issuer"),
     ({"exp": int(time.time()) - 5}, "expired"),
