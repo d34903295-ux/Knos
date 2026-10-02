@@ -90,6 +90,10 @@ def stop(payload: dict, store=None, runners=None) -> tuple[str, str]:
     if v.ok:
         if v.results:
             _state_path(payload.get("session_id", "")).unlink(missing_ok=True)
+            try:
+                pr_receipt(repo, v, text)
+            except Exception as why:  # noqa: BLE001 - the receipt link is a convenience; never block a true done
+                _log(f"pr receipt: {type(why).__name__}: {why}")
         return "allow", ""
     sp = _state_path(payload.get("session_id", ""))
     try:
@@ -105,6 +109,52 @@ def stop(payload: dict, store=None, runners=None) -> tuple[str, str]:
     sp.write_text(json.dumps({"digest": v.digest, "count": n}), encoding="utf-8")
     return "block", msg + "\nFix it, or say plainly what is not done. Knos runs these checks itself; your word is not " \
                           "evidence."
+
+
+RECEIPT_MARK = "knos-receipt:"
+
+
+def _gh(repo: Path, *args: str, inp: str | None = None) -> str | None:
+    import subprocess
+    try:
+        r = subprocess.run(["gh", *args], cwd=repo, capture_output=True, text=True, input=inp, timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def pr_receipt(repo: Path, v, claim: str, gh=_gh, publish=None) -> str | None:
+    """On a proven "done": if the current branch has an open pull request, add the receipt link to its body with
+    `gh pr edit`, from the author's side (works from a fork; the maintainer installs nothing). The receipt is
+    attested on devnet with the agent's own key (KNOS_MEMBER_KEY); when that cannot pay, the line carries the evidence
+    root instead. Idempotent per evidence root. Off with KNOS_PR_RECEIPT=0. Returns the line added, or None."""
+    if os.environ.get("KNOS_PR_RECEIPT", "1") == "0":
+        return None
+    out = gh(repo, "pr", "view", "--json", "number,body,state")
+    if not out:
+        return None
+    pr = json.loads(out)
+    if pr.get("state") != "OPEN":
+        return None
+    from . import checks
+    from . import receipt as rc
+    root = rc.merkle_root(rc.leaves(rc.evidence(v.results)))
+    body = pr.get("body") or ""
+    if root.hex() in body:
+        return None
+    if publish is None:
+        def publish():
+            from ..jobs import net
+            from ..team import rpc
+            return rc.publish(rpc.CLUSTERS["devnet"], net.key(), root, checks.head(repo), claim)[1]
+    try:
+        line = f"{RECEIPT_MARK} {rc.page_url(publish())} (evidence root {root.hex()})"
+    except Exception:  # noqa: BLE001 - no devnet SOL: still record what was proven
+        line = f"{RECEIPT_MARK} evidence root {root.hex()} at {checks.head(repo)[:12]}"
+    new = body.rstrip() + "\n\n" + line + "\n"
+    if gh(repo, "pr", "edit", str(pr["number"]), "--body-file", "-", inp=new) is None:
+        return None
+    return line
 
 
 def main_proof(args: list[str]) -> int:
@@ -124,7 +174,7 @@ def main_proof(args: list[str]) -> int:
 # ---- safety: unread overwrites and deletes outside the repo -------------------------------------------------------
 
 _DELETE = re.compile(r"(?:^|[;&|]\s*|\bsudo\s+)(rm|rmdir|del|rd|erase|remove-item|ri|unlink|shred)\b(.*?)(?=$|[;&|])",
-                     re.I | re.S)
+                     re.IGNORECASE | re.DOTALL)
 
 
 def _read_in_session(transcript: str | None, target: Path) -> bool:
@@ -153,7 +203,7 @@ def _outside(repo: Path, cwd: Path, arg: str) -> bool:
     p = Path(os.path.expandvars(os.path.expanduser(arg.strip("'\""))))
     p = (p if p.is_absolute() else cwd / p).resolve()
     tmp = Path(tempfile.gettempdir()).resolve()
-    inside = lambda base: p == base or base in p.parents  # noqa: E731
+    inside = lambda base: p == base or base in p.parents
     return not inside(repo) and not inside(tmp)
 
 

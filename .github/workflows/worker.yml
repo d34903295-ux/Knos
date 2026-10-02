@@ -17,6 +17,7 @@ concurrency:
 permissions:
   contents: read
   actions: write      # each run starts the next: GitHub's cron is a restart safety net, not the pickup clock
+  issues: write       # the relay log (ghrelay.py): one line per token relayed for a repo running examples/knos-workflow.yml
 
 jobs:
   work:
@@ -46,6 +47,7 @@ jobs:
           WORKER_KEY: ${{ secrets.KNOS_WORKER_KEY }}
           VERIFIER_KEY: ${{ secrets.KNOS_VERIFIER_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           [ -n "$WORKER_KEY" ] && [ -n "$VERIFIER_KEY" ] || { echo "no worker/verifier key secrets: skipped"; exit 0; }
           end=$(( $(date +%s) + 270 ))
@@ -53,6 +55,7 @@ jobs:
             KNOS_MEMBER_KEY="$WORKER_KEY" knos work --once --model "$KNOS_WORKER_MODEL" || true
             KNOS_MEMBER_KEY="$VERIFIER_KEY" knos verify --all --once || true
             KNOS_MEMBER_KEY="$VERIFIER_KEY" knos jobs settle --all || true
+            KNOS_MEMBER_KEY="$WORKER_KEY" python -m knos.proof.ghrelay || true   # zero-secret repos: fund + prove tokens, we pay gas
             sleep 10
           done
       - name: start the next run (always on)
