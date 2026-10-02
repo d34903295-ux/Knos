@@ -46,7 +46,7 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@81d40cda2d0d40636c881befbdf07008665ff288
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@f3414b39cfccf0931e0344ea92f6c74f322708b1
     with:
       kind: fund
       number: ${{ fromJSON(needs.fund.outputs.issue) }}
@@ -91,13 +91,14 @@ jobs:
     with:
       job: ${{ needs.job.outputs.id }}
       issue: ${{ needs.job.outputs.issue }}
+      knos-ref: 81d40cda2d0d40636c881befbdf07008665ff288
 
   prove-relay:
     needs: prove
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@81d40cda2d0d40636c881befbdf07008665ff288
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@f3414b39cfccf0931e0344ea92f6c74f322708b1
     with:
       kind: proof
       number: ${{ github.event.pull_request.number }}
@@ -108,7 +109,7 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@81d40cda2d0d40636c881befbdf07008665ff288
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@f3414b39cfccf0931e0344ea92f6c74f322708b1
     with:
       kind: refused
       number: ${{ github.event.pull_request.number }}

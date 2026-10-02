@@ -141,3 +141,21 @@ def test_hook_adds_receipt_line_to_open_pr(tmp_path, monkeypatch):
     inp_body = inp
     assert hook.pr_receipt(tmp_path, v, "all tests pass", gh=gh2, publish=lambda: "ATT") is None
     assert hook.pr_receipt(tmp_path, v, "x", gh=lambda *a, **k: None) is None
+
+
+def test_judge_learns_a_contributing_violation_and_requires_it_next(tmp_path):
+    from knos.jobs import prove
+    from knos.proof import history
+    base = tmp_path / "base"
+    (base / ".knos" / "acceptance" / "1").mkdir(parents=True)
+    (base / ".knos" / "acceptance" / "1" / "test_accept.py").write_bytes(b"def test_a():\n    assert 1\n")
+    (base / "CONTRIBUTING.md").write_bytes(b"# Rules\n\n- Do not leave print() debug statements in code.\n")
+    diff = ("diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,3 @@\n def add(a, b):\n"
+            "+    print(a, b)\n     return a + b\n")
+    store = history.JsonStore(tmp_path / "store")
+    v = prove.judge_with_rules(base, tmp_path / "pr", {"issue": "1"}, ["calc.py"], diff, store, "o/r", "bot")
+    assert not v["passed"] and v["reasons"][0].startswith("repo rule: calc.py:2")
+    assert v["evidence"]["required_by_history"] == [] and v["evidence"]["learned"] == ["tamper:rule:no_debug"]
+    again = history.JsonStore(tmp_path / "store")   # a later run: the memory restored from the cache
+    v2 = prove.judge_with_rules(base, tmp_path / "pr", {"issue": "1"}, ["calc.py"], diff, again, "o/r", "other")
+    assert v2["evidence"]["required_by_history"] == ["tamper:rule:no_debug"]

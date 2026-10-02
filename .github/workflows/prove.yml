@@ -47,6 +47,13 @@ on:
         required: false
         type: string
         default: "0.3.8"
+      knos-ref:
+        description: >-
+          a Knos commit sha (40 hex) to install knos from instead of PyPI: the same sha the caller pins this file at,
+          so the judge is the code the escrow registered
+        required: false
+        type: string
+        default: ""
       setup:
         description: shell command run in the PR tree before judging (install its dependencies); runs in check only
         required: false
@@ -98,12 +105,27 @@ jobs:
           mkdir pr
           git -C base archive "$HEAD" | tar -x -C pr
           git -C base diff --name-only "$BASE...$HEAD" > changed.txt
+          git -C base diff "$BASE...$HEAD" > pr.diff
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
-      - name: install knos from PyPI, and pytest
-        run: uv pip install --system "knos==${{ inputs.knos-version }}" pytest
+      - name: install knos (PyPI, or the pinned Knos commit), and pytest
+        env:
+          REF: ${{ inputs.knos-ref }}
+          VER: ${{ inputs.knos-version }}
+        run: |
+          case "$REF" in
+            "") uv pip install --system "knos==$VER" pytest ;;
+            *[!0-9a-f]*) echo "knos-ref must be a commit sha"; exit 1 ;;
+            *) uv pip install --system "knos @ git+https://github.com/drexthealpha/Knos@$REF" pytest ;;
+          esac
+      - name: the judge's memory of this repo (learned tampering), from this repo's Actions cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/knos-store
+          key: knos-judge-${{ github.run_id }}
+          restore-keys: knos-judge-
       - name: the PR's dependencies
         if: inputs.setup != ''
         working-directory: pr
@@ -115,15 +137,27 @@ jobs:
         env:
           ISSUE: ${{ inputs.issue }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           echo "head_sha=$HEAD" >> "$GITHUB_OUTPUT"
           echo "checks_hash=$(knos proof checks-hash --dir "base/.knos/acceptance/$ISSUE")" >> "$GITHUB_OUTPUT"
-          if knos proof judge --base base --pr pr --issue "$ISSUE" --changed changed.txt --evidence evidence.json; then
+          if knos proof judge --base base --pr pr --issue "$ISSUE" --changed changed.txt --evidence evidence.json \
+               --diff pr.diff --store "$RUNNER_TEMP/knos-store" --repo "$GITHUB_REPOSITORY" --agent "$AUTHOR"; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
+            # learned only from a refusal that ran no pull request code (a repo rule or a protected path), so the
+            # PR cannot have written the memory that is saved
+            if jq -e '[.reasons[] | select(startswith("repo rule:") or startswith("touches protected path"))] | length > 0' \
+                 evidence.json > /dev/null; then echo "learn=true" >> "$GITHUB_OUTPUT"; fi
             exit 1
           fi
+      - name: remember what was learned
+        if: always() && steps.judge.outputs.learn == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/knos-store
+          key: knos-judge-${{ github.run_id }}
       - name: evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,8 +186,16 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
-      - name: install knos from PyPI
-        run: uv pip install --system "knos==${{ inputs.knos-version }}"
+      - name: install knos (PyPI, or the pinned Knos commit; no pull request code in this job)
+        env:
+          REF: ${{ inputs.knos-ref }}
+          VER: ${{ inputs.knos-version }}
+        run: |
+          case "$REF" in
+            "") uv pip install --system "knos==$VER" ;;
+            *[!0-9a-f]*) echo "knos-ref must be a commit sha"; exit 1 ;;
+            *) uv pip install --system "knos @ git+https://github.com/drexthealpha/Knos@$REF" ;;
+          esac
       - name: mint the OIDC token for job, head, checks and payout
         env:
           JOB: ${{ inputs.job }}
