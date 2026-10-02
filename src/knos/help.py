@@ -231,8 +231,8 @@ PER_COMMAND = {
     "who": "  knos who\n\n  Which agents close what they claim, and the hold that has earned them.",
     "mainnet-check": """\
   knos mainnet-check   every gate before mainnet: a Squads vault holds the
-                       upgrade authority, the admin and the fees; verified build;
-                       security.txt; IDL on chain; cargo-audit clean.
+                       upgrade authority, the admin and the fees; a verified
+                       build; security.txt; IDL on chain; cargo-audit clean.
                        Mainnet stays locked.""",
     "memory": """\
   knos memory export [--out FILE]   every Sibyl record here: JSON + sha256
