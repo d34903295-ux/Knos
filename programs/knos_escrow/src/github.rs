@@ -118,6 +118,54 @@ pub fn mont_mul(a: &Big, b: &Big, n: &Big, n0inv: u32) -> Big {
     r
 }
 
+/// a^2 * R^-1 mod n for a < n: the square by symmetry (each cross product once, doubled), then a separate
+/// Montgomery reduction. About 1.5 L^2 limb products instead of mont_mul's 2 L^2.
+pub fn mont_sqr(a: &Big, n: &Big, n0inv: u32) -> Big {
+    let mut t = [0u32; 2 * L + 1];
+    for i in 0..L {
+        let ai = a[i] as u64;
+        let mut c = 0u64;
+        for j in i + 1..L {
+            let s = t[i + j] as u64 + ai * a[j] as u64 + c;
+            t[i + j] = s as u32;
+            c = s >> 32;
+        }
+        t[i + L] = c as u32;
+    }
+    let mut top = 0u32;
+    for v in t.iter_mut().take(2 * L) {
+        let w = *v;
+        *v = (w << 1) | top;
+        top = w >> 31;
+    }
+    let mut c = 0u64;
+    for i in 0..L {
+        let d = a[i] as u64 * a[i] as u64;
+        let s = t[2 * i] as u64 + (d & 0xffff_ffff) + c;
+        t[2 * i] = s as u32;
+        let s = t[2 * i + 1] as u64 + (d >> 32) + (s >> 32);
+        t[2 * i + 1] = s as u32;
+        c = s >> 32;
+    }
+    let mut hi = 0u64;
+    for i in 0..L {
+        let m = t[i].wrapping_mul(n0inv) as u64;
+        let mut c = 0u64;
+        for j in 0..L {
+            let s = t[i + j] as u64 + m * n[j] as u64 + c;
+            t[i + j] = s as u32;
+            c = s >> 32;
+        }
+        let s = t[i + L] as u64 + c + hi;
+        t[i + L] = s as u32;
+        hi = s >> 32;
+    }
+    let mut r = [0u32; L];
+    r.copy_from_slice(&t[L..2 * L]);
+    if hi != 0 || geq(&r, n) { sub_in(&mut r, n); }
+    r
+}
+
 // -- base64url and a flat JSON object --------------------------------------------------------------------------------
 fn b64v(c: u8) -> Option<u32> {
     Some(match c {
@@ -312,7 +360,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
                 let s = signature(sig, &n)?;
                 let r2 = load(&key.try_borrow_data()?, 260);
                 let mut x = mont_mul(&s, &r2, &n, n0inv); // s in Montgomery form
-                for _ in 0..8 { x = mont_mul(&x, &x, &n, n0inv); }
+                for _ in 0..8 { x = mont_sqr(&x, &n, n0inv); }
                 store(&mut d, B_X, &x);
                 d[B_KEY..B_KEY + 32].copy_from_slice(key.key.as_ref());
                 d[B_STAGE] = 1;
@@ -342,7 +390,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], tag: u8, rest: &[u
                 if *key.key != kk { return Err(err(68, "the token's key is not this key")); }
                 // s^65537 mod n: x = (s^256)_M from step 1; 8 more squarings -> (s^65536)_M; * s (plain) -> s^65537
                 let mut x = load(&d, B_X);
-                for _ in 0..8 { x = mont_mul(&x, &x, &n, n0inv); }
+                for _ in 0..8 { x = mont_sqr(&x, &n, n0inv); }
                 let em = limbs_to_be(&mont_mul(&x, &s, &n, n0inv));
                 let digest = hashv(&[&t[..h64.len() + 1 + p64.len()]]).to_bytes();
                 let ps = 256 - 3 - DIGEST_INFO.len() - 32;

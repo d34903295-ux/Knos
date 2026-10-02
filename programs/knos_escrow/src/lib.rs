@@ -31,6 +31,15 @@ pub mod github;
 #[cfg(not(feature = "no-entrypoint"))]
 solana_program::entrypoint!(process);
 
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "Knos",
+    project_url: "https://github.com/drexthealpha/Knos",
+    contacts: "link:https://github.com/drexthealpha/Knos/security/advisories/new",
+    policy: "https://github.com/drexthealpha/Knos/blob/main/SECURITY.md",
+    source_code: "https://github.com/drexthealpha/Knos"
+}
+
 mod bounty;
 
 pub const TOKEN_PROGRAM: Pubkey = solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -412,6 +421,26 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         20 => bounty::faucet(program_id, accounts, rest),
         21 => bounty::init_faucet_mint(program_id, accounts, rest, &config_key),
         22 => bounty::add_mint(program_id, accounts, &config_key),
+        // 27 SetAdmin: admin(s), config2(w). data: new_admin[32] (non-zero; e.g. a Squads vault PDA). The current
+        //   admin signs; from then on only the new admin passes any admin check.
+        // 28 SetFeeAccount: admin(s), config2(w), fee_token. The new fee account must be a token account of the
+        //   config mint.
+        27 | 28 => {
+            let admin = next_account_info(it)?; let config = next_account_info(it)?;
+            let cfg = Config::load(config, program_id, &config_key)?;
+            if !admin.is_signer || *admin.key != cfg.admin { return Err(err(15, "admin only")); }
+            if tag == 27 {
+                let new_admin = arr32(rest, 0)?;
+                if new_admin == [0u8; 32] { return Err(err(2, "admin cannot be zero")); }
+                config.try_borrow_mut_data()?[0..32].copy_from_slice(&new_admin);
+            } else {
+                let fee_token = next_account_info(it)?;
+                let (_, fm) = token_owner_mint(fee_token)?;
+                if fm != cfg.mint { return Err(err(7, "fee account mint")); }
+                config.try_borrow_mut_data()?[64..96].copy_from_slice(fee_token.key.as_ref());
+            }
+            Ok(())
+        }
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

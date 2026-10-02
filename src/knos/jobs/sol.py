@@ -166,6 +166,17 @@ def lower_fee(pid: Pubkey, admin: Pubkey, fee_bps: int) -> Instruction:
                        [_m(admin, True, False), _m(config_pda(pid), False, True)])
 
 
+def set_admin(pid: Pubkey, admin: Pubkey, new_admin: Pubkey) -> Instruction:
+    """SetAdmin (27): the current admin hands the config to a new admin (e.g. a Squads v4 vault PDA)."""
+    return Instruction(pid, bytes([27]) + bytes(new_admin), [_m(admin, True, False), _m(config_pda(pid), False, True)])
+
+
+def set_fee_account(pid: Pubkey, admin: Pubkey, fee_token: Pubkey) -> Instruction:
+    """SetFeeAccount (28): the admin points the fee at another token account of the config mint."""
+    return Instruction(pid, bytes([28]), [_m(admin, True, False), _m(config_pda(pid), False, True),
+                                          _m(fee_token, False, False)])
+
+
 def post(pid: Pubkey, buyer: Pubkey, job_id: bytes, amount: int, work_s: int, review_s: int, brief_hash: bytes,
          buyer_token: Pubkey, vault_token: Pubkey, verifier: Pubkey | None = None, mint: Pubkey | None = None,
          _tag: int = 1) -> Instruction:

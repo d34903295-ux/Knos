@@ -974,6 +974,86 @@
    ]
   },
   {
+   "name": "set_admin",
+   "docs": [
+    "Admin: hand the config to a new admin (non-zero; e.g. a Squads v4 vault PDA). The old admin is refused afterwards."
+   ],
+   "discriminator": [
+    27
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "signer": true
+    },
+    {
+     "name": "config",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "args": [
+    {
+     "name": "new_admin",
+     "type": "pubkey"
+    }
+   ]
+  },
+  {
+   "name": "set_fee_account",
+   "docs": [
+    "Admin: point the fee at another token account of the config mint."
+   ],
+   "discriminator": [
+    28
+   ],
+   "accounts": [
+    {
+     "name": "admin",
+     "signer": true
+    },
+    {
+     "name": "config",
+     "writable": true,
+     "pda": {
+      "seeds": [
+       {
+        "kind": "const",
+        "value": [
+         99,
+         111,
+         110,
+         102,
+         105,
+         103,
+         50
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "name": "fee_token"
+    }
+   ],
+   "args": []
+  },
+  {
    "name": "register_key",
    "docs": [
     "Admin only: an RSA-2048 key GitHub signs Actions OIDC tokens with, at PDA [\"ghkey\", sha256(kid)]. r2 = R^2 mod n and n0inv = -n^-1 mod 2^32 are checked once here."
