@@ -59,6 +59,7 @@ def test_classification_and_deterministic_root(monkeypatch):
                                     "proven": 0}  # no CI is not green
     assert a["overall"]["claimed_green"] == 2 and a["overall"]["actually_failed"] == 1
     assert set(a["prs"][0]) == set(agent_pr_index.PR_KEYS)
+    assert a["n_prs"] == 2  # the no-CI PR is not listed: only finished CI at the head SHA counts
 
     claimed[1]["class"] = "failed"  # any change to a counted record changes the root
     assert agent_pr_index.build(claimed, "2026-10-01", WINDOW)["root"] != a["root"]
@@ -117,3 +118,21 @@ def test_payments_from_devnet_tx():
     idx = agent_pr_index.build([], "2026-10-02", ("a", "b"), excluded=7,
                                payments=[{"worker": "W", "funder": "F", "verified": True}])
     assert idx["proven"] == {"W": 1} and idx["excluded_self_repo"] == 7 and idx["n_prs"] == 0
+
+
+def test_attest_refuses_a_tampered_list(tmp_path, monkeypatch):
+    import json
+
+    import pytest
+    idx = agent_pr_index.build([{"agent": "codex", "repo": "o/r", "number": 1, "sha": "a", "class": "failed"}],
+                               "2026-10-02", ("a", "b"))
+    calls = []
+    monkeypatch.setattr(agent_pr_index, "attest", lambda index, key: calls.append(index["root"]))
+    p = tmp_path / "index.json"
+    p.write_text(json.dumps(idx), encoding="utf-8")
+    assert agent_pr_index.attest_file(str(p), "[]")["root"] == idx["root"] and calls == [idx["root"]]
+    idx["prs"][0]["class"] = "passed"  # edited after the count: the root no longer matches, nothing is attested
+    p.write_text(json.dumps(idx), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        agent_pr_index.attest_file(str(p), "[]")
+    assert len(calls) == 1
