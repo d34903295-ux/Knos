@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """`knos budget set <agent> 5/day --chain tempo` and `knos budget set <agent> 20 --chain solana`: budgets the chain
 enforces, even if the agent or Knos is compromised.
 

@@ -845,6 +845,31 @@ def _register_proof() -> None:
 
 _register_proof()
 
+# One product up front: paste an agent PR, protect a repo, fund an issue, paid on GitHub's proof. Everything else
+# (claims, budgets, Pro, Tempo, ERC-8183, text jobs, the relay) is `knos labs <cmd>`; the old top-level names stay
+# as hidden aliases so nothing that calls them breaks.
+LABS = ("agent", "board", "budget", "claim", "done", "jobs", "pay", "pro", "report", "spend", "stats", "team",
+        "verify", "who", "work", "worth")
+labs = typer.Typer(add_completion=False, help="claims, budgets, Pro, Tempo, text jobs and the relay")
+
+
+def _move_to_labs() -> None:
+    import copy
+
+    for info in app.registered_commands:
+        name = info.name or info.callback.__name__.replace("_", "-")
+        if name in LABS:
+            labs.registered_commands.append(copy.copy(info))
+            setattr(info, "hidden", True)
+    for info in app.registered_groups:
+        if info.name in LABS:
+            labs.registered_groups.append(copy.copy(info))
+            setattr(info, "hidden", True)
+    app.add_typer(labs, name="labs")
+
+
+_move_to_labs()
+
 
 def main(argv: list[str] | None = None) -> int:
     """The console script. Errors are one line, never a traceback."""

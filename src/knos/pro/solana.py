@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """Paying for Knos with Solana Pay: a transfer-request link, then a public RPC to see it land. No account, no server.
 
     solana:<wallet>?amount=10&spl-token=<USDC mint>&reference=<one-off key>&label=Knos&message=Knos%20Pro

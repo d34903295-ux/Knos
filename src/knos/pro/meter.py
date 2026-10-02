@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """What your agents spent, read from the logs they already write. Local only; nothing leaves the machine.
 
 Claude Code: ~/.claude/projects/*/*.jsonl, one line per message part. The same assistant message is logged once per

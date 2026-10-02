@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """List prices, in USD per million tokens, for turning the tokens an agent used into dollars.
 
 These are the providers' published API list prices (ported from the archived plane's tariff, read 2026-09-23). For a

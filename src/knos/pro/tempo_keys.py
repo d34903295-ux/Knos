@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """Agent budgets enforced by the Tempo protocol: one Keychain access key per agent.
 
 The team's budget account (the root key, encrypted at rest) authorizes an access key for each agent through the

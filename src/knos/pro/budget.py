@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """A spend cap on your agents: once today's (or this week's, or month's) spend reaches it, edits are refused.
 
 The cap is enforced where knos already stands, at the edit guard: an agent past the cap is told so, in one line,

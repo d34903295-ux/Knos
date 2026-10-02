@@ -3,28 +3,26 @@
 from __future__ import annotations
 
 MAIN = """  knos - AI agent work gets paid only when GitHub's own signature, checked
-         by Solana, proves it passed. Free: the Stop hook for coding agents
+         by Solana, proves it passed.
 
-  Proof:  knos init adds the Stop hook;  knos proof check / learn / lint
+  One product, at drexthealpha.github.io/Knos (Solana devnet):
+      1. paste an agent PR       see whether its "tests pass" is true
+      2. protect a repo          two clicks: the proof workflow runs its checks
+      3. fund an issue           your price waits in escrow on Solana
+      4. paid on GitHub's proof  GitHub signs the run, the escrow checks it,
+                                 the agent is paid; no proof, you get it back
 
-  Jobs: hire any AI agent and pay only for work you accept (or on proof)
-      knos jobs post "TITLE" --task "..." --price 2   price waits in escrow
-      knos jobs get ID / accept ID / reject ID        pay only for accepted
-      knos work                  be hired: take jobs with your own model key
-
-  Coding agents: who works on what, what is known, what each may spend
+  Free: the Stop hook. Your coding agent cannot say done until it is proved.
       knos init                  wire Claude Code, Codex, Cursor, OpenCode
-      knos team create           share claims across machines, on Solana
-      knos ask "why did we drop redis?"
-      knos claim "the parser" -p src/parser/**    other agents' edits refused
-      knos done, status, board   give claims back; who is working where
+      knos proof check "..."     run every check a claim needs, now
+      knos proof learn / lint    past false "done"s become required checks
+      knos prove --job ID --jwt-file token.txt   pay a job on its proof
 
   More
-      knos remember, notes, forget, private, point, compact, reset
-      knos worth, stats, who, bench, doctor, learn, lint, demo, export, restore
-      knos budget, spend, report, pay, pro   Pro: caps, wallets, Sibyl Pro
-      knos agent record <agent>       what an agent did, verified on chain
-      knos help <cmd>                 more about one command"""
+      knos ask, remember, notes, forget, private, point, compact, reset
+      knos status, doctor, bench, demo, learn, lint, export, restore
+      knos labs                  claims, budgets, Pro, Tempo, text jobs, relay
+      knos help <cmd>            more about one command"""
 
 
 PER_COMMAND = {
@@ -231,6 +229,14 @@ PER_COMMAND = {
     "export": "  knos export\n\n  Writes .knos/decisions.md: decisions and current claims, to commit.",
     "restore": "  knos restore\n\n  Reads .knos/decisions.md back. Claims are not restored.",
     "who": "  knos who\n\n  Which agents close what they claim, and the hold that has earned them.",
+    "labs": """\
+  knos labs claim "the parser" -p src/parser/**   claims between agents
+  knos labs team create / budget / spend / report / pay / pro
+  knos labs jobs post "TITLE"     text jobs: the price waits in escrow
+  knos labs work / verify / jobs relay            be hired; Tempo, ERC-8183
+
+  Experiments outside the one product. The old names (knos claim, knos
+  budget, knos jobs, ...) still work.""",
 }
 PER_COMMAND["connect"] = PER_COMMAND["init"]
 PER_COMMAND["guard"] = PER_COMMAND["init"]

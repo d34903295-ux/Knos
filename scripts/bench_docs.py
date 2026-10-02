@@ -15,18 +15,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ["README.md", "docs/BENCH.md", "docs/WHY.md"]
+RETIRED = ["acceptance-headline", "models"]  # modelled or headline numbers, removed from every doc
 
 
 def blocks(src: dict) -> dict[str, str]:
     a = src["acceptance"]
     runs = a["runs"]
-    sonnet = {r["memory"].split(" (")[0]: r for r in runs if r["worker"] == "Claude Sonnet"}
-    gem = [r for r in runs if r["worker"].startswith("Gemini")]
-    head = (f"On a {a['jobs']}-job benchmark (measured {a['date']}), buyers accepted "
-            f"{sonnet['preferences captured when said']['accepted']} of {a['jobs']} jobs with Knos's buyer memory and "
-            f"{sonnet['none']['accepted']} without it (Claude Sonnet); with a live Gemini worker "
-            f"({gem[0]['worker'].split(' (')[0].replace('Gemini ', '')}), "
-            f"{gem[0]['accepted']} and {gem[1]['accepted']}.")
     table = ["| worker | buyer memory | preferences recalled | task correct | accepted |", "|---|---|---|---|---|"]
     table += [f"| {r['worker']} | {r['memory']} | {r['prefs']} | {r['correct']} | **{r['accepted']}/{a['jobs']}** |"
               for r in runs]
@@ -34,8 +28,7 @@ def blocks(src: dict) -> dict[str, str]:
     recall = [f"{rc['benchmark']}, measured {rc['date']}.", "",
               "| | baseline (0.3.1) | dev | **held-out** |", "|---|---|---|---|"]
     recall += [f"| {r['what']} | {r['baseline']} | {r['dev']} | **{r['heldout']}** |" for r in rc["rows"]]
-    out = {"acceptance-headline": head, "acceptance-table": "\n".join(table), "recall-table": "\n".join(recall),
-           "models": "Modelled, not measured: " + src["models"]["advisory_arm"]}
+    out = {"acceptance-table": "\n".join(table), "recall-table": "\n".join(recall)}
     if src.get("market"):
         m = src["market"]
         out["market"] = m["sentence"]
@@ -46,7 +39,11 @@ def apply(text: str, gen: dict[str, str]) -> str:
     def repl(m):
         name = m.group(1)
         return f"<!-- bench:{name} -->\n{gen[name]}\n<!-- /bench:{name} -->" if name in gen else m.group(0)
-    return re.sub(r"<!-- bench:([\w-]+) -->.*?<!-- /bench:\1 -->", repl, text, flags=re.S)
+    text = re.sub(r"<!-- bench:([\w-]+) -->.*?<!-- /bench:\1 -->", repl, text, flags=re.S)
+    # Retired blocks are removed outright and never regenerated.
+    for name in RETIRED:
+        text = re.sub(rf"(?:- )?<!-- bench:{name} -->.*?<!-- /bench:{name} -->\n\n?", "", text, flags=re.S)
+    return text
 
 
 def main(check: bool = False) -> int:

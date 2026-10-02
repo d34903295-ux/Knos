@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """An agent pays for an API over HTTP 402, from its own budget wallet, inside its Knos cap.
 
 Two protocols: MPP through its reference SDK (the optional `knos[agentpay]` extra), x402 built here with solders:
