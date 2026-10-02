@@ -27,8 +27,8 @@ start`). Method: `src/knos/bench_chain.py`.
 
 | vector | knos | without knos | ratio / target |
 |---|---|---|---|
-| **Security**, metric 1: conflicting writes to working trees (3 machines × 3 vendor hooks × 200 rounds, 4 files) | **0** (of 738 writes the guard allowed) | advisory at 0.9 compliance: 149; none: 1,062 (of 1,800) | (149+1)/(0+1) = **150×** |
-| **Security**, metric 2: conflicting commits | **0** | advisory with its commit guard modelled: 3 | (3+1)/(0+1) = 4×; a model of Agent Mail's guard comes close here, as expected |
+| **Security**, metric 1: conflicting writes to working trees (3 machines × 3 vendor hooks × 200 rounds, 4 files) | **0** (of 738 writes the guard allowed) | none: 1,062 (of 1,800) | 0 |
+| **Security**, metric 2: conflicting commits | **0** | | 0 |
 | **Budget**, Solana: overspends signed directly with the agent's delegate key (200) | 0 moved; 200/200 rejected | | all rejected |
 | **Budget**, Tempo Moderato: over-limit payments signed directly with the agent's access key, with no client-side checks (200) | 0 received; 200/200 reverted on chain; fees 44 units (0.000044 USD) each, from the allowance | | all rejected |
 | **Speed**: guard decision when the agent holds the claim (reads the mirror) | p50 2.7 ms / p95 25.6 ms | | p95 ≤ 100 ms |
@@ -60,9 +60,6 @@ budget = 32 cells):
 limit (measured on the local validator; `knos team status` prints it).
 
 **Limits, said plainly:**
-- <!-- bench:models -->
-Modelled, not measured: The 'advisory' arm of `knos bench --chain` is a model: each agent reserves before writing with probability 0.9 (compliance), the commit guard then refuses others' commits. It is not a measurement of any shipping tool.
-<!-- /bench:models -->
 - The chain numbers come from a local validator on a busy laptop; devnet adds network latency to the first claim of
   each file (the recorded devnet run is in [network/demo.md](network/demo.md)).
 - When the guard cannot get the chain's word within its 1-second budget, it lets the edit go ahead with a warning
@@ -79,7 +76,7 @@ Measured by `knos bench` on 2026-09-29 with 0.2.0. In 0.3 the single-machine pat
 
 | vector | knos | without knos | ratio / target |
 |---|---|---|---|
-| **Security**: rounds where a conflicting edit reached the file (3 agents x 200 rounds) | 0 | advisory (simulation) 191; none 200 | (advisory+1)/(knos+1) = 192.0x |
+| **Security**: rounds where a conflicting edit reached the file (3 agents x 200 rounds) | 0 | none 200 | 0 |
 | **Capability**: questions answered from past sessions and commits, cited (20) | 18 | 0 (CLAUDE.md only) | (knos+1)/(base+1) = 19.0x |
 | **Friction**: steps to three hosts sharing memory and claims | 1 | 8 (Sibyl Memory + MCP Agent Mail, from their READMEs) | 8.0x |
 | **Budget**: spend past the cap (200 attempted payments, cap 5) | 0 | | 0 by construction |
@@ -96,7 +93,7 @@ Measured by `knos bench` on 2026-09-29 with 0.2.0. In 0.3 the single-machine pat
 | Sibyl Memory | 3 | `pip install sibyl-memory-cli[mcp]`, `sibyl init` (browser sign-in), `sibyl setup`; memory only, no claims | https://docs.sibyllabs.org/memory/install | 2026-09-29 |
 | Sibyl Memory + MCP Agent Mail | 8 | both of the above, to get memory and claims | as above | 2026-09-29 |
 
-Limits, said plainly: the advisory arm simulates a check-then-write lease; the history set is 20 synthetic decisions asked in other words, not a public benchmark; the budget row measures Knos's cap, and the agent wallet's balance is a second, on-chain ceiling this bench does not spend real money to show.
+Limits, said plainly: the history set is 20 synthetic decisions asked in other words, not a public benchmark; the budget row measures Knos's cap, and the agent wallet's balance is a second, on-chain ceiling this bench does not spend real money to show.
 
 ## Jobs (0.3.1)
 
@@ -113,22 +110,6 @@ Limits, said plainly: the advisory arm simulates a check-then-write lease; the h
 
 Measured 1 Oct 2026. The live rows include every RPC round trip the client makes, from a home connection in Lagos.
 
-Acceptance with buyer memory: 24 real jobs, 4 buyers with standing preferences said once among 27 unrelated
-requests. Every number below comes from `docs/bench.json` (`python scripts/bench_docs.py`).
-
-<!-- bench:acceptance-headline -->
-On a 24-job benchmark (measured 2026-10-01), buyers accepted 22 of 24 jobs with Knos's buyer memory and 0 without it (Claude Sonnet); with a live Gemini worker (gemini-3.5-flash-lite), 19 and 1.
-<!-- /bench:acceptance-headline -->
-
-<!-- bench:acceptance-table -->
-| worker | buyer memory | preferences recalled | task correct | accepted |
-|---|---|---|---|---|
-| Claude Sonnet | Sibyl search on the brief (0.3.0 method) | 54/72 | 23/24 | **14/24** |
-| Claude Sonnet | preferences captured when said (0.3.1+) | 72/72 | 22/24 | **22/24** |
-| Claude Sonnet | none | 0/72 | 23/24 | **0/24** |
-| Gemini gemini-3.5-flash-lite (live) | preferences captured when said (0.3.1+) | 72/72 | 19/24 | **19/24** |
-| Gemini gemini-3.5-flash-lite (live) | none | 0/72 | 16/24 | **1/24** |
-<!-- /bench:acceptance-table -->
 
 The 0.3.0 method (a Sibyl search on the brief) found 54 of 72 preferences; capturing them when said (0.3.1) finds 72
 of 72. Capture on a held-out set written before it was run: 21/24 preferences, 0 of 30 ordinary requests mistaken for

@@ -1,47 +1,5 @@
 {
  "_about": "The one source for every benchmark number in the docs. `python scripts/bench_docs.py` writes the marked blocks in README.md, docs/BENCH.md and docs/WHY.md from it; tests/test_bench_docs.py fails if they drift.",
- "acceptance": {
-  "date": "2026-10-01",
-  "jobs": 24,
-  "buyers": 4,
-  "runs": [
-   {
-    "worker": "Claude Sonnet",
-    "memory": "Sibyl search on the brief (0.3.0 method)",
-    "prefs": "54/72",
-    "correct": "23/24",
-    "accepted": 14
-   },
-   {
-    "worker": "Claude Sonnet",
-    "memory": "preferences captured when said (0.3.1+)",
-    "prefs": "72/72",
-    "correct": "22/24",
-    "accepted": 22
-   },
-   {
-    "worker": "Claude Sonnet",
-    "memory": "none",
-    "prefs": "0/72",
-    "correct": "23/24",
-    "accepted": 0
-   },
-   {
-    "worker": "Gemini gemini-3.5-flash-lite (live)",
-    "memory": "preferences captured when said (0.3.1+)",
-    "prefs": "72/72",
-    "correct": "19/24",
-    "accepted": 19
-   },
-   {
-    "worker": "Gemini gemini-3.5-flash-lite (live)",
-    "memory": "none",
-    "prefs": "0/72",
-    "correct": "16/24",
-    "accepted": 1
-   }
-  ]
- },
  "recall": {
   "date": "2026-10-01",
   "benchmark": "LongMemEval_s (cleaned), 470 questions with evidence; tuned on 100, held out 370",
@@ -71,10 +29,6 @@
     "heldout": "5,656"
    }
   ]
- },
- "models": {
-  "_about": "Baselines that are models, not measurements of another product.",
-  "advisory_arm": "The 'advisory' arm of `knos bench --chain` is a model: each agent reserves before writing with probability 0.9 (compliance), the commit guard then refuses others' commits. It is not a measurement of any shipping tool."
  },
  "market": {
   "date": "2026-10-01",

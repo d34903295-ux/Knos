@@ -77,6 +77,4 @@ Within 30 days, send the transaction and the address to refund to (zulibro1999@g
 
 ## Source
 
-Everything outside `src/knos/pro/` is MIT. `src/knos/pro/` is source-available under
-[FSL-1.1-MIT](src/knos/pro/LICENSE): read it, run it, change it, just don't sell a competing product with it. Each
-release becomes MIT two years after it ships.
+All of Knos is MIT, `src/knos/pro/` included: see [LICENSE](LICENSE).

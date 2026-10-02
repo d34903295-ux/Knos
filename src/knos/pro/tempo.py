@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """Paying for Knos on Tempo: a TIP-20 `transferWithMemo` to the Knos address, found and checked over Tempo's public
 RPC. No account, no server.
 

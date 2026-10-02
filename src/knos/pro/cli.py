@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """`knos spend`, `knos budget ...`, `knos pro ...`, added to the main command line by `register`."""
 
 from __future__ import annotations

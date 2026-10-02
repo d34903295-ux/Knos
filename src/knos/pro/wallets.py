@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """An agent's own budget wallet, on Solana (USDC) or Tempo (pathUSD).
 
 An agent that pays for APIs (x402 on Solana, MPP on Tempo) signs only from its own wallet. The wallet holds what you

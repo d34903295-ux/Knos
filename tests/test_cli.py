@@ -130,12 +130,33 @@ def test_no_jargon_anywhere(name, screen):
         assert word not in low, f"{name} says {word!r}"
 
 
-def test_the_one_screen_states_both_halves_of_the_product():
-    """The claim has to be in the product, not only in the README: hire any agent and pay only for accepted work; and
-    for coding agents, who works on what, what is known (shared memory), and what each may spend."""
+def test_the_one_screen_states_the_one_product():
+    """One product up front: paste an agent PR, protect a repo, fund an issue, paid on GitHub's proof; the free Stop
+    hook. Claims, budgets, Pro, Tempo and text jobs are one `knos labs` line, not the pitch."""
     screen = help_text.main()
-    assert "hire any AI agent and pay only for work you accept" in screen
-    assert "who works on" in screen and "what each may spend" in screen
+    assert "AI agent work gets paid only when GitHub's own signature, checked" in screen
+    for step in ("paste an agent PR", "protect a repo", "fund an issue", "paid on GitHub's proof", "Stop hook"):
+        assert step in screen
+    assert "knos labs" in screen
+    for gone in ("knos jobs post", "knos claim", "knos budget", "knos pro buy", "who works on"):
+        assert gone not in screen
+
+
+@pytest.mark.parametrize("old", [["claim", "--help"], ["budget", "--help"], ["jobs", "--help"], ["pro", "--help"],
+                                 ["work", "--help"], ["team", "--help"]])
+def test_labs_commands_keep_their_old_names(old, capsys):
+    """Everything under `knos labs` still answers to its old top-level name, hidden from the screens."""
+    import typer
+
+    from knos.cli import app
+
+    group = typer.main.get_command(app)
+    assert group.commands[old[0]].hidden
+    assert old[0] in group.commands["labs"].commands
+    rc_old, said_old = run(capsys, *old)
+    rc_new, said_new = run(capsys, "labs", *old)
+    assert rc_old == rc_new == 0
+    assert said_old.split("Usage:")[1].split("\n", 1)[1] == said_new.split("Usage:")[1].split("\n", 1)[1]
 
 
 def _commands() -> list[str]:
@@ -205,7 +226,7 @@ def test_every_flag_a_help_page_shows_exists(page, command, flag, known):
 def test_help_runs(capsys):
     rc, said = run(capsys, "help")
     assert rc == 0
-    assert "who works on" in said and "what each may spend" in said
+    assert "paste an agent PR" in said and "knos labs" in said
 
 
 def test_help_for_one_command(capsys):
@@ -968,7 +989,7 @@ def test_every_check_command_in_the_readme_selects_a_real_test():
     quietly selects nothing. Collection happens once, not once per command."""
     import shlex
 
-    commands = re.findall(r"`(pytest [^`]+)`", (ROOT / "README.md").read_text(encoding="utf-8"))
+    commands = re.findall(r"`(pytest [^`]+)`", "".join((ROOT / f).read_text(encoding="utf-8") for f in ("README.md", "docs/LABS.md")))
     assert commands, "the README stopped offering any way to check it"
 
     done = subprocess.run(

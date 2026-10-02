@@ -1,4 +1,3 @@
-# Knos Pro. Licensed under the Functional Source License 1.1 (MIT future licence): see src/knos/pro/LICENSE.
 """Agent budgets enforced by Solana's Token program: an SPL delegate on one vault per agent.
 
 Each agent gets its own vault: a plain (non-associated) token account owned by the team's vault key, which is
