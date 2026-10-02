@@ -31,7 +31,7 @@ LOADER = Pubkey.from_string("BPFLoaderUpgradeab1e11111111111111111111111")
 TOKEN = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
 METADATA = Pubkey.from_string("ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S")
 # The devnet Squads multisig (scripts/squads_devnet.json); override with KNOS_SQUADS_MULTISIG.
-DEVNET_MULTISIG = os.environ.get("KNOS_SQUADS_MULTISIG", "")
+DEVNET_MULTISIG = os.environ.get("KNOS_SQUADS_MULTISIG", "2zpWe4223nNp6gPnHSAjdwGcu2cGPQtT5jcxf25MSYvV")
 SECURITY_TXT = b"=======BEGIN SECURITY.TXT V1======="
 PROGRAMDATA_HEADER = 45  # u32 tag | u64 slot | u8 option | [32] authority
 
