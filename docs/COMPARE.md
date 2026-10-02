@@ -17,6 +17,8 @@ on 1 Oct 2026.
 | Vouch (mitchellh/vouch) | 3–4 steps | minutes | maintainers vouch for people, not code | none, once vouched | free | no payouts |
 | Virtuals ACP | 5 doc steps | not documented | optional evaluator, else the client approves | on-chain gas | 5% (+5% with a judge) | at approval |
 | Upwork | not countable (pages blocked) | days | the client | Connects, about $0.15 each (secondary source) | 0–15% to the freelancer | 5 days after approval |
+| GH Bounty (read 2 Oct 2026) | site: post issue, deposit SOL, set thresholds; developer submits a PR and stakes | site 0.91 s median (www.ghbounty.com, 5 curl runs, 0.80–3.78 s); its MCP API health 1.29 s median (0.89–3.81 s) | **AI validators score it** (Claude Opus report, GenLayer's 5 validators score 1–10), but in its program the **bounty creator signs** `resolve_bounty`; the site's "auto-release" is not in the code | a 0.035 SOL developer stake, locked 14 days (`constants.rs`) | site says 2.5% per settled bounty, but `resolve_bounty` pays the full amount (no fee in code); a review fee of $0.20 per review slot, paid in SOL at creation (`review-fee.ts`) | when the creator signs; **SOL only** (`transfer_lamports`; USDC "deferred") |
+| Octasol (read 2 Oct 2026) | README: install the GitHub App, negotiate with a contributor, set up escrow | not measurable: octasol.io fails TLS and serves "Your domain is expired" over HTTP (5 curl runs, no response) | **the maintainer**: `complete_bounty` requires the maintainer's signature; the README's "pays on merge" has no merge webhook in the public code | none found | none in the contract (`complete_bounty` sends the full amount); docs site down | when the maintainer signs; any SPL token |
 
 Where Knos wins, row by row:
 
@@ -28,6 +30,27 @@ Where Knos wins, row by row:
   spam is free or costs cents.
 - **Fee:** 2.5%, below Algora (9%), ACP (5–10%) and Upwork (up to 15%), and only when paid.
 - **Payout time:** in the same transaction that verifies the proof, with no clearance period.
+- **Against GH Bounty:** Knos pays on GitHub's signature verified on chain; GH Bounty's AI scores, then the creator
+  still has to sign the payout, in SOL only.
+- **Against Octasol:** Knos pays on proof with no one's signature; Octasol's "pays on merge" is a maintainer-signed
+  transfer, and its site is down.
+
+GH Bounty and Octasol sources, read 2 Oct 2026 (latency from `curl -w %{time_total}`, 5 runs each, from Windows 10
+on 2 Oct 2026; site response time only, not payout time):
+
+- GH Bounty site: https://www.ghbounty.com (claims AI validators auto-release, a 2.5% protocol fee, mainnet)
+- GH Bounty code: https://github.com/Ghbounty/GhBounty (last push 21 May 2026):
+  `contracts/solana/programs/ghbounty_escrow/src/lib.rs` (program `CPZx26QX…EwbBg`; `ResolveBounty` needs
+  `creator: Signer`; payout by `transfer_lamports` of the full `bounty.amount`), `.../src/constants.rs`
+  (`MIN_STAKE_LAMPORTS = 35_000_000`, 14-day lock), `frontend/lib/review-fee.ts` ($0.10 per review × markup 2),
+  `docs/superpowers/specs/2026-05-05-ghbounty-mcp-server-design.md` (native SOL, USDC deferred). `DEPLOYMENT.md`
+  describes devnet only; mainnet is unconfirmed.
+- GH Bounty API: https://mcp.ghbounty.com/api/health (200)
+- Octasol app: https://github.com/Octasol/octasol (README "funds instantly transferred" on merge; `src/utils/dbUtils.ts`
+  uses merged PRs only for leaderboard points; no merge webhook calls `complete_bounty`)
+- Octasol program: https://github.com/Octasol/octasol_contract (`programs/octasol_contract/src/lib.rs`: program
+  `tMf5EmV2…NFus`, `CompleteBounty` with `has_one = maintainer`, `token::transfer` of the full amount, any mint)
+- Octasol site: https://octasol.io (TLS handshake fails; plain HTTP says the domain has expired)
 
 ## Paid work: Knos against marketplaces, agent protocols and coding agents (read 1 Oct 2026)
 
