@@ -33,6 +33,13 @@
       <button type="submit" id="pr-check">Check it</button>
       <div id="pr-result" role="status" aria-live="polite"></div>
     </form>
+    <form id="protect-form" class="card">
+      <label for="protect-repo">Protect this repo: bounties paid only on proof, no secret or wallet in the repo</label>
+      <input id="protect-repo" name="protect-repo" type="text" autocomplete="off" required placeholder="owner/repo">
+      <input id="protect-branch" name="protect-branch" type="text" autocomplete="off" value="main" aria-label="default branch">
+      <button type="submit" id="protect-go">Protect this repo</button>
+      <div id="protect-result" role="status" aria-live="polite"></div>
+    </form>
     <p class="fine">Read live from the public GitHub API in your browser. Agent records come from the
       <a href="index.json">Agent PR Index</a>, rebuilt every 30 minutes, its Merkle root attested on Solana devnet.
       </p>

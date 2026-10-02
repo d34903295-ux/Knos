@@ -4,7 +4,8 @@
 
 const $ = (id) => document.getElementById(id);
 const API = "https://api.github.com";
-const KNOS_REF = "drexthealpha/Knos/.github/workflows/prove.yml@v0.3.7";
+// Knos's reusable workflows, pinned by full commit sha (the escrow checks the token's job_workflow_sha).
+export const KNOS_SHA = "81d40cda2d0d40636c881befbdf07008665ff288";
 
 // ---- claim detection (port of scripts/agent_pr_ci.py) -----------------------------------------------------------
 const PASS = String.raw`(?:pass(?:es|ed|ing)?|green)`;
@@ -91,21 +92,132 @@ export function parsePr(s) {
   return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : null;
 }
 
-export function protectUrl(owner, repo, branch) {
-  const wf = `name: knos
-# Knos: an agent's "tests pass" only counts when GitHub's own signature, checked by Solana, proves it.
+// The caller workflow: exactly examples/knos-workflow.yml (tests/test_ghrelay.py checks they match).
+export const WORKFLOW = `# .github/workflows/knos.yml - Knos on GitHub, with no secret, wallet or faucet in this repo.
+#
+# "Protect this repo" (https://drexthealpha.github.io/Knos/) prefills this file. Then:
+#   1. A maintainer writes the acceptance tests for issue N in .knos/acceptance/N/ on the default branch and comments
+#          /knos bounty <amount> [stake]
+#      on the issue. fund.yml mints a GitHub OIDC token bound to (issue, amount, hash of those tests, stake); relay.yml
+#      posts it; Knos's always-on worker funds the escrow with it (Knos pays the gas) and the issue gets
+#      "knos-job: <id>".
+#   2. An agent opens a pull request whose body says "Fixes #N" and "knos-payout: <Solana address>". prove.yml runs
+#      the pull request's code against the base branch's checks in a job with no token and no secret; only if they
+#      pass does a second job, which runs no pull request code, mint a token bound to (job, head commit, checks,
+#      payout). relay.yml posts it, the worker proves it on chain, the payout address is paid, and the pull request
+#      gets the verdict and the receipt link.
+#
+# Security model:
+#   - pull_request_target runs THIS file from the base branch, so a pull request cannot edit what runs here. This file
+#     checks out nothing and reads the pull request body only through environment variables.
+#   - Knos's workflows are referenced by full commit sha; the escrow checks job_workflow_sha, so a token minted by any
+#     other workflow (or another commit of these) is refused.
+#   - /knos bounty counts only from OWNER, MEMBER or COLLABORATOR (fund.yml).
+#   - Tokens posted as comments are single-use, audience-bound and expire in about 5 minutes (relay.yml).
+#   - To make the Knos check required before merge: Settings > Rules > New branch ruleset > Require status checks >
+#     add "prove / check" (the Protect page links there).
+name: knos
+
 on:
-  pull_request:
-permissions:
-  contents: read
-  id-token: write
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
 jobs:
-  prove:
-    uses: ${KNOS_REF}
+  # ---- /knos bounty <amount> [stake] on an issue ------------------------------------------------------------------
+  fund:
+    if: github.event_name == 'issue_comment' && !github.event.issue.pull_request && startsWith(github.event.comment.body, '/knos bounty ')
+    permissions:
+      contents: read
+      id-token: write
+    uses: drexthealpha/Knos/.github/workflows/fund.yml@${KNOS_SHA}
+
+  fund-relay:
+    needs: fund
+    if: needs.fund.outputs.issue != ''
+    permissions:
+      issues: write
+      pull-requests: write
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_SHA}
     with:
-      job: \${{ vars.KNOS_JOB || '' }}
+      kind: fund
+      number: \${{ fromJSON(needs.fund.outputs.issue) }}
+
+  # ---- a pull request that says "Fixes #N" and "knos-payout: <address>" ------------------------------------------
+  job:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    outputs:
+      id: \${{ steps.id.outputs.id }}
+      payout: \${{ steps.id.outputs.payout }}
+      issue: \${{ steps.id.outputs.issue }}
+    steps:
+      - id: id
+        env:
+          BODY: \${{ github.event.pull_request.body }}
+          GH_TOKEN: \${{ github.token }}
+        run: |
+          issue=$(printf '%s\\n' "$BODY" | grep -oiE '\\b(fixes|closes|resolves)[[:space:]]+#[0-9]+' | head -1 | grep -oE '[0-9]+$' || true)
+          payout=$(printf '%s\\n' "$BODY" | grep -oE '^knos-payout:[[:space:]]*[1-9A-HJ-NP-Za-km-z]{32,44}' | head -1 | grep -oE '[1-9A-HJ-NP-Za-km-z]{32,44}$' || true)
+          id=""
+          if [ -n "$issue" ] && [ -n "$payout" ]; then
+            # the job id fund-relay posted on the issue (only this repo's own workflow comments as github-actions[bot])
+            id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$issue/comments?per_page=100" \\
+                   --jq '.[] | select(.user.login == "github-actions[bot]") | .body' \\
+                 | grep -oE 'knos-job: [0-9a-f]{64}' | tail -1 | cut -d' ' -f2 || true)
+          fi
+          echo "issue=$issue" >> "$GITHUB_OUTPUT"
+          echo "payout=$payout" >> "$GITHUB_OUTPUT"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "issue=#$issue payout=$payout job=$id"
+
+  prove:
+    needs: job
+    if: needs.job.outputs.id != ''
+    permissions:
+      contents: read
+      id-token: write
+    uses: drexthealpha/Knos/.github/workflows/prove.yml@${KNOS_SHA}
+    with:
+      job: \${{ needs.job.outputs.id }}
+      payout: \${{ needs.job.outputs.payout }}
+      issue: \${{ needs.job.outputs.issue }}
+
+  prove-relay:
+    needs: prove
+    permissions:
+      issues: write
+      pull-requests: write
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_SHA}
+    with:
+      kind: proof
+      number: \${{ github.event.pull_request.number }}
 `;
-  return `https://github.com/${owner}/${repo}/new/${encodeURIComponent(branch)}?filename=.github/workflows/knos.yml&value=${encodeURIComponent(wf)}`;
+
+export function protectUrl(owner, repo, branch) {
+  return `https://github.com/${owner}/${repo}/new/${encodeURIComponent(branch)}?filename=.github/workflows/knos.yml&value=${encodeURIComponent(WORKFLOW)}`;
+}
+
+// GitHub has no URL to prefill a ruleset's required checks: this opens a new active branch ruleset; the one extra
+// step is "Require status checks to pass" > add "prove / check" > Create.
+export function rulesetUrl(owner, repo) {
+  return `https://github.com/${owner}/${repo}/settings/rules/new?target=branch&enforcement=active`;
+}
+
+function protectRepo(ev) {
+  ev?.preventDefault();
+  const m = /^(?:https:\/\/github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(($("protect-repo")?.value || "").trim());
+  const out = $("protect-result");
+  if (!m) { out.textContent = "Enter owner/repo"; return; }
+  const [, o, r] = m;
+  out.innerHTML = `<a class="button" id="protect-open" href="${esc(protectUrl(o, r, $("protect-branch")?.value || "main"))}" target="_blank" rel="noopener">Commit .github/workflows/knos.yml to ${esc(o)}/${esc(r)}</a>
+    <p class="fine">Then <a id="protect-rules" href="${esc(rulesetUrl(o, r))}" target="_blank" rel="noopener">make the Knos check required</a>
+      (one extra click on GitHub: Require status checks &gt; add "prove / check").</p>`;
 }
 
 // ---- UI ------------------------------------------------------------------------------------------------------------
@@ -154,7 +266,9 @@ async function check(ev) {
       </dl>
       ${agentRecord(index, agent)}
       <a class="button" id="protect" href="${esc(protectUrl(repo.owner.login, repo.name, repo.default_branch))}" target="_blank" rel="noopener">Protect ${esc(repo.full_name)}</a>
-      <p class="fine">Adds one workflow file; GitHub asks you to commit it. From then on an agent is paid only when
+      <a class="button" href="${esc(rulesetUrl(repo.owner.login, repo.name))}" target="_blank" rel="noopener">Make it required</a>
+      <p class="fine">Adds one workflow file; GitHub asks you to commit it. "Make it required" opens GitHub's ruleset page:
+        Require status checks &gt; add "prove / check" (one extra click). From then on an agent is paid only when
         GitHub's own signature, checked by Solana, proves its PR passed. 2.5% fee, only on proven work.</p>`;
   } catch (e) {
     out.innerHTML = e instanceof RateLimited
@@ -168,5 +282,6 @@ async function check(ev) {
 if (typeof document !== "undefined" && $("pr-form")) {
   $("pr-form").addEventListener("submit", check);
   $("pr-url").addEventListener("paste", () => setTimeout(() => check(), 0));
+  $("protect-form")?.addEventListener("submit", protectRepo);
   loadIndex();
 }
