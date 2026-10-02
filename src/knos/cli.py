@@ -803,6 +803,16 @@ def bench(
     raise typer.Exit(bench_mod.main(out_file, quick=quick, say=lambda s: out.print(s, markup=False)))
 
 
+@app.command("mainnet-check")
+def mainnet_check_cmd(
+    multisig: str = typer.Option(None, "--multisig", help="the Squads v4 multisig (default: KNOS_SQUADS_MULTISIG)"),
+) -> None:
+    """The mainnet gates, checked on chain: Squads time-locked authority, verified build, security.txt, IDL, audit."""
+    from . import mainnet_check
+
+    raise typer.Exit(mainnet_check.main(lambda s: out.print(s, markup=False), multisig=multisig))
+
+
 # ---- plumbing --------------------------------------------------------------------------------
 
 
