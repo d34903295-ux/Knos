@@ -154,7 +154,8 @@ jobs:
           echo "upgrade authority: $auth  (Squads vault: ${vault:-none})"
           have=$(solana -u devnet program show "$PROGRAM_ID" --output json | python3 -c 'import sys,json;print(json.load(sys.stdin)["dataLen"])')
           need=$(stat -c%s knos_escrow.so)
-          if [ "$need" -gt "$have" ]; then solana -u devnet program extend "$PROGRAM_ID" $(( need - have + 4096 )) --keypair "$RUNNER_TEMP/up.json"; fi
+          # with the vault as authority the extension is part of the proposal (ExtendProgramChecked, signed by the vault)
+          if [ "$need" -gt "$have" ] && [ "$auth" != "$vault" ]; then solana -u devnet program extend "$PROGRAM_ID" $(( need - have + 4096 )) --keypair "$RUNNER_TEMP/up.json"; fi
           if [ -n "$vault" ] && [ "$auth" = "$vault" ]; then
             solana -u devnet program write-buffer knos_escrow.so --keypair "$RUNNER_TEMP/up.json" --output json-compact | tee buffer.json
             buffer=$(python3 -c 'import json;print(json.load(open("buffer.json"))["buffer"])')

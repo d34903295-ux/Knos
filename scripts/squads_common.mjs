@@ -67,6 +67,13 @@ export const loader = {
   setAuthority: ({ account, current, next }) => new web3.TransactionInstruction({ programId: LOADER, data: u32(4),
     keys: [{ pubkey: account, isSigner: false, isWritable: true }, { pubkey: current, isSigner: true, isWritable: false },
       { pubkey: next, isSigner: false, isWritable: false }] }),
+  // Tag 9 ExtendProgramChecked {additional_bytes u32}: the upgrade authority signs (a program with an authority can
+  // no longer be extended by anyone else); the payer funds the rent.
+  extendChecked: ({ programId = KNOS_PROGRAM_ID, authority, payer, bytes }) => new web3.TransactionInstruction({ programId: LOADER,
+    data: Buffer.concat([u32(9), u32(bytes)]),
+    keys: [{ pubkey: programDataAddress(programId), isSigner: false, isWritable: true }, { pubkey: programId, isSigner: false, isWritable: true },
+      { pubkey: authority, isSigner: true, isWritable: false }, { pubkey: web3.SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: payer, isSigner: true, isWritable: true }] }),
   upgrade: ({ programId = KNOS_PROGRAM_ID, buffer, spill, authority }) => new web3.TransactionInstruction({ programId: LOADER, data: u32(3),
     keys: [{ pubkey: programDataAddress(programId), isSigner: false, isWritable: true }, { pubkey: programId, isSigner: false, isWritable: true },
       { pubkey: buffer, isSigner: false, isWritable: true }, { pubkey: spill, isSigner: false, isWritable: true },

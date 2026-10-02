@@ -4,7 +4,7 @@
 // Creates the vault transaction (loader Upgrade, spill = the proposer) + its proposal and prints both.
 // Two members then approve; it executes after the multisig's time lock.
 // usage: node scripts/squads_propose_upgrade.mjs <buffer> [proposer-key-path]
-import { web3, multisig, connection, loadKey, loadState, loader, KNOS_PROGRAM_ID, send } from "./squads_common.mjs";
+import { web3, multisig, connection, loadKey, loadState, loader, programDataAddress, KNOS_PROGRAM_ID, send } from "./squads_common.mjs";
 
 const [bufferArg, keyArg] = process.argv.slice(2);
 if (!bufferArg) { console.error("usage: squads_propose_upgrade.mjs <buffer> [proposer-key]"); process.exit(2); }
@@ -18,8 +18,21 @@ if (!binfo || binfo.data.readUInt32LE(0) !== 1 || binfo.data[4] !== 1 || !new we
 const ms = await multisig.accounts.Multisig.fromAccountAddress(connection, st.multisigPda);
 const transactionIndex = BigInt(ms.transactionIndex.toString()) + 1n;
 const { blockhash } = await connection.getLatestBlockhash("confirmed");
-const message = new web3.TransactionMessage({ payerKey: st.vaultPda, recentBlockhash: blockhash,
-  instructions: [loader.upgrade({ buffer, spill: proposer.publicKey, authority: st.vaultPda })] });
+// A larger ELF first extends the program data: ExtendProgramChecked, signed by the vault (the upgrade authority),
+// which also pays the rent (fund the vault first: the script stops if it cannot).
+const pdinfo = await connection.getAccountInfo(programDataAddress(), "confirmed");
+const extra = (binfo.data.length - 37) - (pdinfo.data.length - 45);
+const instructions = [];
+if (extra > 0) {
+  const bytes = extra + 4096;
+  const rent = await connection.getMinimumBalanceForRentExemption(pdinfo.data.length + bytes)
+    - await connection.getMinimumBalanceForRentExemption(pdinfo.data.length);
+  const vaultLamports = await connection.getBalance(st.vaultPda, "confirmed");
+  if (vaultLamports < rent + 10_000_000) throw new Error(`the vault needs ${(rent + 10_000_000) / 1e9} SOL to extend the program data (has ${vaultLamports / 1e9})`);
+  instructions.push(loader.extendChecked({ authority: st.vaultPda, payer: st.vaultPda, bytes }));
+}
+instructions.push(loader.upgrade({ buffer, spill: proposer.publicKey, authority: st.vaultPda }));
+const message = new web3.TransactionMessage({ payerKey: st.vaultPda, recentBlockhash: blockhash, instructions });
 const memo = `knos escrow upgrade ${process.env.GITHUB_SHA || ""}`.trim();
 const tx = new web3.Transaction().add(
   multisig.instructions.vaultTransactionCreate({ multisigPda: st.multisigPda, transactionIndex, creator: proposer.publicKey,
