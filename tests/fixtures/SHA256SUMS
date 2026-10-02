@@ -1,2 +1,4 @@
 bfdf836a51e526a2d4c07b66578ce6f349971f2841a08162e55ea81b84512d14  docs/agent_pr_ci.json
 5214c99eff1031f2f316e51ed6ef59869e5fb4f7a8d59bc36c4e67a9955d3c8f  tests/data/release_replay.json
+07632da10e6f14ed5935e63400aee7005fc9e5d48b0fd6b58083dae377c538e2  crates/knos-oidc-interface/tests/fixtures/verified_token.bin
+4451b1721b9b20d0c994e05faf7aae12ccbb873146c405842c32dddc4a543f32  crates/knos-oidc-interface/tests/fixtures/verified_token.json

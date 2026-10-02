@@ -2,30 +2,30 @@
  "facts": [
   {
    "say": [
-    "2,431"
+    "826"
    ],
-   "what": "agent pull requests in the index that claim tests or CI pass and have finished CI",
+   "what": "repositories in the index with an agent pull request that claims tests or CI pass",
    "json": "docs/bench.json",
-   "path": "market.index.overall.claimed_green",
-   "equals": 2431
+   "path": "market.index.overall.by_repo.repos",
+   "equals": 826
   },
   {
    "say": [
-    "660"
+    "147"
    ],
-   "what": "of those, the ones with a failing check at the head commit",
+   "what": "of those, the ones whose first such pull request had a failing check at its head commit",
    "json": "docs/bench.json",
-   "path": "market.index.overall.actually_failed",
-   "equals": 660
+   "path": "market.index.overall.by_repo.failed",
+   "equals": 147
   },
   {
    "say": [
-    "27.2%"
+    "17.8%"
    ],
-   "what": "660 of 2,431",
+   "what": "147 of 826",
    "json": "docs/bench.json",
-   "path": "market.index.overall.share",
-   "equals": 0.2715
+   "path": "market.index.overall.by_repo.share",
+   "equals": 0.178
   },
   {
    "say": [
@@ -125,7 +125,7 @@
    ],
    "what": "an RSA-2048 signature check is 2 transactions, each under 1M compute units",
    "file": "docs/BENCH.md",
-   "has": "| 2 | 764,395 and 832,314 |"
+   "has": "| 2 | 778,986 and 848,363 |"
   },
   {
    "say": [
@@ -137,37 +137,35 @@
   },
   {
    "say": [
-    "22,515"
+    "21,632"
    ],
-   "what": "compute units for another program to read a verified token",
+   "what": "compute units for another program to read a verified token through the interface crate",
    "file": "docs/BENCH.md",
-   "has": "| part of its own | 22,515 |"
+   "has": "| part of its own | 21,632 |"
   },
   {
    "say": [
-    "1,470",
-    "175"
+    "0.99",
+    "100"
    ],
-   "what": "payouts on the Algora bounty board in 2025, and in 2026 to 10 Aug",
-   "source": "https://incubagent.com/research/agent-bounty-market/",
+   "what": "Intercom's Fin: $0.99 per resolved conversation, near $100M a year (secondary coverage of Mostly Metrics)",
+   "source": "https://enterprisedna.co/resources/ai-pulse/ai-pulse-2026-08-02-intercom-s-fin-ai-agent-is-nearing-100m-arr-roughly-half-of/",
    "read": "2026-10-02"
   },
   {
    "say": [
-    "$5",
-    "5"
+    "64"
    ],
-   "what": "run-rate revenue of coding agents sold by usage, about $5B (Claude Code over $2.5B, Cursor $2B, Cognition $492M); the three sources are in docs/MARKET.md",
-   "source": "https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation",
+   "what": "open bounties on GitHub issues across all boards: 59 verified, $64,291",
+   "source": "https://bountyos.rovidev.com/en/github-bounty-board/",
    "read": "2026-10-02"
   },
   {
    "say": [
-    "75.41",
-    "75"
+    "7"
    ],
-   "what": "x402 agent payments in 30 days, in millions of transactions",
-   "source": "https://solanacompass.com/news/solana-processes-76-of-all-x402-ai-agent-transactions-232-million-in-four-weeks",
+   "what": "run-rate revenue of coding agents billed by usage, about $7B: Cursor about $4B (this source), Claude Code over $2.5B, Cognition $492M; all three sources are in docs/MARKET.md",
+   "source": "https://dealroom.co/news/134107-cursor-tops-4b-annualized-revenue/",
    "read": "2026-10-02"
   },
   {

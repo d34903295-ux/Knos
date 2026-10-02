@@ -5,16 +5,16 @@ Every number Knos states about itself, with the command that reproduces it. Noth
 ## How often agents say "tests pass" when CI failed
 
 <!-- bench:market -->
-**Agent PR Index, 2026-10-02:** 2,431 PRs by AI coding agents claiming tests or CI pass (created 2026-06-04 – 2026-10-01); 9,207 PRs on repos owned by the PR's author or the human who assigned the agent were excluded. Of the 2,431 whose CI had finished at the head commit, **660 (27.2%) had a failing check** (95% Wilson interval 25.4%–28.9%). Published as `index.json` on the Pages site; built every 6 hours by `.github/workflows/index.yml`.
+**Agent PR Index, 2026-10-02:** in 826 repositories, the first pull request by an AI coding agent whose description said tests or CI pass had **a failing check in 147 (17.8%)** (95% Wilson interval 15.3%–20.5%). Counting every such pull request instead of one per repository, it is 660 of 2,431 (27.2%); that figure leans on a few busy repositories, so the per-repository one is the one to quote. Pull requests created 2026-06-04 – 2026-10-01 whose CI had finished at the head commit; 9,207 on repositories owned by the pull request's author or the person who assigned the agent were left out. A failing check is GitHub's record, not a judgment of why it failed. Published as `index.json` on the Pages site; rebuilt every 6 hours by `.github/workflows/index.yml`.
 
-| agent | claiming PRs with finished CI | CI failed | 95% interval |
-|---|---|---|---|
-| GitHub Copilot coding agent | 787 | 194 (24.6%) | 21.8%–27.8% |
-| Devin | 520 | 270 (51.9%) | 47.6%–56.2% |
-| Claude GitHub app | 716 | 68 (9.5%) | 7.6%–11.9% |
-| Claude Code | 206 | 17 (8.2%) | 5.2%–12.8% |
-| OpenAI Codex | 202 | 111 (54.9%) | 48.1%–61.7% |
-| **all** | **2,431** | **660 (27.2%)** | **25.4%–28.9%** |
+| agent | repositories | first claiming PR failed CI | 95% interval | all claiming PRs | failed CI |
+|---|---|---|---|---|---|
+| GitHub Copilot coding agent | 341 | 85 (24.9%) | 20.6%–29.8% | 787 | 194 (24.6%) |
+| Devin | 78 | 13 (16.7%) | 10.0%–26.5% | 520 | 270 (51.9%) |
+| Claude GitHub app | 182 | 17 (9.3%) | 5.9%–14.4% | 716 | 68 (9.5%) |
+| Claude Code | 191 | 17 (8.9%) | 5.6%–13.8% | 206 | 17 (8.2%) |
+| OpenAI Codex | 40 | 17 (42.5%) | 28.5%–57.8% | 202 | 111 (54.9%) |
+| **all** | **826** | **147 (17.8%)** | **15.3%–20.5%** | 2,431 | 660 (27.2%) |
 <!-- /bench:market -->
 
 Method: `scripts/agent_pr_ci.py` (the claim patterns and the CI verdict) and `scripts/agent_pr_index.py` (the scan and
@@ -29,15 +29,16 @@ description is not evidence.
 
 ## The verifier on chain (knos-oidc)
 
-Measured in LiteSVM against the built program: `pytest -q -s tests/test_oidc_chain.py tests/test_oidc_gate.py`.
+Measured in LiteSVM against the test build of this source (the deployed build differs only in which keys it
+trusts): `pytest -q -s tests/test_oidc_chain.py tests/test_oidc_gate.py`.
 
 | | transactions | compute units, each |
 |---|---|---|
-| verify a GitHub token (RSA-2048), a typical token | 2 | 764,395 and 832,314 |
-| the longest token GitHub's claims allow (4,092 bytes) | 2 | 780,992 and 953,332 |
-| the longest token the program accepts (8,192 bytes) | 2 | 809,355 and 1,188,020 |
-| verify a GitLab token (RSA-4096) | 6 | 909,088 to 1,159,360 |
-| another program reads a verified token (`examples/oidc_gate`) | part of its own | 22,515 |
+| verify a GitHub token (RSA-2048), a typical token | 2 | 778,986 and 848,363 |
+| the longest token GitHub's claims allow (4,092 bytes) | 2 | 794,939 and 970,506 |
+| the longest token the program accepts (8,192 bytes) | 2 | 824,403 and 1,209,372 |
+| verify a GitLab token (RSA-4096) | 6 | 914,354 to 1,214,240 |
+| another program reads a verified token (`examples/oidc_gate`) | part of its own | 21,632 |
 
 The limit is 1,400,000 per transaction. A real GitHub Actions token today is 2,086 to 2,276 bytes (the ones we
 captured), so writing it takes 3 transactions of 880 bytes each.
@@ -84,6 +85,17 @@ So a bounty to someone who has been paid before, in a repository that has funded
 lamports (0.000105 SOL) end to end. A first payout to a new person costs about 3,150,000 more, once. A token that is
 refused costs nothing when a read can tell (the usual case: `precheck` in `src/knos/settle/relay.py`), and fees only
 when it takes the signature check to tell; the token account's rent always comes back.
+
+## On devnet
+
+Read from the escrow's own logs on 2 Oct 2026 (`scripts/network_stats.py`; the site's Numbers page shows today's):
+4 bounties funded, 3 paid, 1 vetoed, 1 claimed, and a median of 360 seconds from the funding comment to the payment,
+most of it GitHub Actions starting jobs. Every one of these was Knos's own account paying itself to prove the path;
+outside use was zero.
+
+The first devnet run also found what the local chain could not: a transaction gets 200,000 compute units unless it
+asks for more, and the local test chain did not enforce that. Every transaction the relay sends now asks for the
+limit it needs (`src/knos/chain.py`).
 
 ## The judge
 

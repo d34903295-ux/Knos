@@ -8,8 +8,8 @@ name: knos prove
 #
 # The author is paid by GitHub user id: no wallet and no address in the pull request.
 #
-#   check   every bounty pull request, on open and on each push. contents: read and checks: read only, NO id-token,
-#           NO secrets. It is the status a branch ruleset can require ("prove / check").
+#   check   every bounty pull request, on open and on each push. Read permissions only (contents, checks, issues),
+#           NO id-token, NO secrets. It is the status a branch ruleset can require ("prove / check").
 #             always      `knos proof gate`, which runs none of the pull request's code: the repository's own rules
 #                         (CONTRIBUTING.md), what this repository's history made required (tampering and false
 #                         claims caught before, remembered in Sibyl's local store, carried in this repository's
@@ -23,11 +23,14 @@ name: knos prove
 #   attest  tests mode only, after check passed. id-token: write only. Never checks out or runs PR code: a sparse
 #           checkout of the base's .knos/acceptance/<issue> only, recomputes the checks hash, then mints (mode 1).
 #           knos-pay holds that payment for the review window, in which the funder can veto it.
-#   merged  the pull request was merged by a maintainer. One job that runs no pull request code mints the token
-#           (mode 0, checks hash = 64 zeros). The maintainer's merge is the acceptance.
+#   merged  the pull request was merged by a maintainer AND the gate above holds at the merged head. One job that
+#           runs no pull request code re-runs the gate and only then mints the token (mode 0, checks hash = 64
+#           zeros). A maintainer's merge is the acceptance; the gate is why a false "tests pass" is never paid.
 #
 # The token is published as artifact `knos-proof`; the caller's relay.yml job posts it and Knos's always-on worker
-# (or anyone) relays it to the chain. A bot-authored pull request is paid to its first assignee.
+# (or anyone) relays it to the chain. Who is paid: the pull request's author; for a pull request a bot opened, the
+# person who ran it (its assignee, a "Requested by: @login" / "Knos-Pay-To: @login" line, or the co-author of its
+# head commit). An issue that is assigned pays only its assignee's pull request.
 on:
   workflow_call:
     inputs:
@@ -50,36 +53,91 @@ on:
 permissions: {}
 
 jobs:
-  # ---- mode 0: merged by a maintainer. No pull request code runs here. ---------------------------------------------
+  # ---- mode 0: merged by a maintainer, and the Knos check holds at the merged head. No pull request code runs here. --
   merged:
     if: github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
+      contents: read
+      checks: read
+      issues: read
       id-token: write
     steps:
-      - name: mint the OIDC token for the merged pull request
+      - name: checkout the base
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          fetch-depth: 0
+          persist-credentials: false
+      - name: the merged pull request's diff and description (nothing in it is run)
+        env:
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          NUM: ${{ github.event.pull_request.number }}
+          BODY: ${{ github.event.pull_request.body }}
+          ISSUE: ${{ inputs.issue }}
+        run: |
+          case "$ISSUE" in ''|*[!0-9]*) echo "no issue number"; exit 1;; esac
+          case "$HEAD" in *[!0-9a-f]*|"") echo "no pull request head sha"; exit 1;; esac
+          git -C base fetch --no-tags origin "+refs/pull/$NUM/head:refs/knos/head"
+          test "$(git -C base rev-parse refs/knos/head)" = "$HEAD"
+          git -C base diff "$BASE...$HEAD" > pr.diff
+          printf '%s' "$BODY" > body.md
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: install knos at this workflow's own commit
+        env:
+          REF: ${{ job.workflow_sha }}
+          REPO: ${{ job.workflow_repository }}
+          UV_EXCLUDE_NEWER: "2026-10-05T00:00:00Z"   # the judge's dependencies as published by this release, never newer
+        run: |
+          case "$REF" in
+            "") uv pip install --system "knos==0.3.11" ;;
+            *[!0-9a-f]*) echo "job.workflow_sha is not a commit sha"; exit 1 ;;
+            *) uv pip install --system "knos @ git+https://github.com/${REPO:-drexthealpha/Knos}@$REF" ;;
+          esac
+      - name: the judge's memory of this repo, from this repo's Actions cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/.knos-memory
+          key: knos-judge-sibyl-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: knos-judge-sibyl-
+      - name: knos proof gate at the merged head, then mint the OIDC token
         env:
           ISSUE: ${{ inputs.issue }}
           REPO_ID: ${{ github.repository_id }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
-          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
-          ASSIGNEE_ID: ${{ github.event.pull_request.assignees[0].id }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          case "$ISSUE" in ''|*[!0-9]*) echo "no issue number"; exit 1;; esac
-          case "$HEAD" in *[!0-9a-f]*|"") echo "no pull request head sha"; exit 1;; esac
-          author="$AUTHOR_ID"
-          if [ "$AUTHOR_TYPE" = "Bot" ]; then author="$ASSIGNEE_ID"; fi
-          case "$author" in ''|*[!0-9]*) echo "a bot's pull request needs a human assignee to be paid"; exit 1;; esac
+          # A merge alone does not pay. The same check every bounty pull request gets must hold at the head that was
+          # merged: the repository's rules, what its history requires, a "tests pass" that GitHub's record of this
+          # commit bears out, someone to pay, and the issue's assignment. A refusal mints nothing. Here the check is
+          # strict: a claim whose checks are still running, or cannot be read, is refused until the job is run again.
+          knos proof gate --base base --diff pr.diff --evidence evidence.json --store "$RUNNER_TEMP/.knos-memory" \
+            --repo "$GITHUB_REPOSITORY" --agent "$AUTHOR" --body-file body.md --head "$HEAD" --wait 300 \
+            --issue "$ISSUE" --event "$GITHUB_EVENT_PATH" --strict
+          author=$(knos proof payee --event "$GITHUB_EVENT_PATH" --repo "$GITHUB_REPOSITORY")
+          case "$author" in ''|*[!0-9]*) echo "nobody to pay"; exit 1;; esac
           aud="knos:pay:$REPO_ID:$ISSUE:$author:$HEAD:$(printf '0%.0s' $(seq 64)):0"
           mkdir -p knos-proof
           curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$aud" | jq -r .value > knos-proof/token.txt
           printf '%s\n' "$aud" > knos-proof/aud.txt
           echo "minted a token for $aud"
-      - uses: actions/upload-artifact@v4
+      - name: evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: knos-evidence
+          path: evidence.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: knos-proof
           path: knos-proof/
@@ -92,6 +150,7 @@ jobs:
     permissions:
       contents: read
       checks: read
+      issues: read
     outputs:
       passed: ${{ steps.judge.outputs.passed }}
       mode: ${{ steps.judge.outputs.mode }}
@@ -99,7 +158,7 @@ jobs:
       checks_hash: ${{ steps.judge.outputs.checks_hash }}
     steps:
       - name: checkout the base
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base
@@ -122,25 +181,26 @@ jobs:
           git -C base diff --name-only "$BASE...$HEAD" > changed.txt
           git -C base diff "$BASE...$HEAD" > pr.diff
           printf '%s' "$BODY" > body.md
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
       - name: install knos at this workflow's own commit, and pytest
         env:
           REF: ${{ job.workflow_sha }}
           REPO: ${{ job.workflow_repository }}
+          UV_EXCLUDE_NEWER: "2026-10-05T00:00:00Z"   # the judge's dependencies as published by this release, never newer
         run: |
           # The judge is the code at the very commit of this workflow file: the commit the bounty pinned on chain.
           # The calling repository cannot choose another. (A runner without job.workflow_sha installs the release
           # this file shipped in.)
           case "$REF" in
-            "") uv pip install --system "knos==0.3.10" pytest ;;
+            "") uv pip install --system "knos==0.3.11" pytest ;;
             *[!0-9a-f]*) echo "job.workflow_sha is not a commit sha"; exit 1 ;;
             *) uv pip install --system "knos @ git+https://github.com/${REPO:-drexthealpha/Knos}@$REF" pytest ;;
           esac
       - name: the judge's memory of this repo (rules, tampering, false claims) in Sibyl's local store .knos-memory/sibyl.db, from this repo's Actions cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/.knos-memory
           key: knos-judge-sibyl-${{ github.run_id }}-${{ github.run_attempt }}
@@ -156,7 +216,8 @@ jobs:
         run: |
           echo "head_sha=$HEAD" >> "$GITHUB_OUTPUT"
           common=(--base base --diff pr.diff --evidence evidence.json --store "$RUNNER_TEMP/.knos-memory"
-                  --repo "$GITHUB_REPOSITORY" --agent "$AUTHOR" --body-file body.md --head "$HEAD" --wait 600)
+                  --repo "$GITHUB_REPOSITORY" --agent "$AUTHOR" --body-file body.md --head "$HEAD" --wait 600
+                  --event "$GITHUB_EVENT_PATH")
           if [ -n "$(find "base/.knos/acceptance/$ISSUE" -type f 2>/dev/null | head -1)" ]; then
             echo "mode=tests" >> "$GITHUB_OUTPUT"
             echo "checks_hash=$(knos proof checks-hash --dir "base/.knos/acceptance/$ISSUE")" >> "$GITHUB_OUTPUT"
@@ -178,13 +239,13 @@ jobs:
           fi
       - name: remember what was learned
         if: always() && steps.judge.outputs.learn == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/.knos-memory
           key: knos-judge-sibyl-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
       - name: evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: knos-evidence
           path: evidence.json
@@ -200,27 +261,28 @@ jobs:
       id-token: write
     steps:
       - name: the acceptance bundle only, from the base (no pull request code in this job)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base
           sparse-checkout: .knos/acceptance/${{ inputs.issue }}
           sparse-checkout-cone-mode: false
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
       - name: install knos at this workflow's own commit (no pull request code in this job)
         env:
           REF: ${{ job.workflow_sha }}
           REPO: ${{ job.workflow_repository }}
+          UV_EXCLUDE_NEWER: "2026-10-05T00:00:00Z"   # the judge's dependencies as published by this release, never newer
         run: |
           # The judge is the code at the very commit of this workflow file: the commit the bounty pinned on chain.
           # The calling repository cannot choose another. (A runner without job.workflow_sha installs the release
           # this file shipped in.)
           case "$REF" in
-            "") uv pip install --system "knos==0.3.10" ;;
+            "") uv pip install --system "knos==0.3.11" ;;
             *[!0-9a-f]*) echo "job.workflow_sha is not a commit sha"; exit 1 ;;
             *) uv pip install --system "knos @ git+https://github.com/${REPO:-drexthealpha/Knos}@$REF" ;;
           esac
@@ -231,18 +293,16 @@ jobs:
           HEAD: ${{ needs.check.outputs.head_sha }}
           EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
           CHECKS: ${{ needs.check.outputs.checks_hash }}
-          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
-          AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
-          ASSIGNEE_ID: ${{ github.event.pull_request.assignees[0].id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           case "$ISSUE" in ''|*[!0-9]*) echo "no issue number"; exit 1;; esac
           test "$HEAD" = "$EVENT_HEAD" || { echo "check judged another head"; exit 1; }
           got=$(knos proof checks-hash --dir "base/.knos/acceptance/$ISSUE")
           test "$got" = "$CHECKS" || { echo "checks hash $got != $CHECKS"; exit 1; }
-          author="$AUTHOR_ID"
-          if [ "$AUTHOR_TYPE" = "Bot" ]; then author="$ASSIGNEE_ID"; fi
-          case "$author" in ''|*[!0-9]*) echo "a bot's pull request needs a human assignee to be paid"; exit 1;; esac
+          # who is paid is worked out here again, from GitHub's event, never taken from the job that ran the code
+          author=$(knos proof payee --event "$GITHUB_EVENT_PATH" --repo "$GITHUB_REPOSITORY")
+          case "$author" in ''|*[!0-9]*) echo "nobody to pay"; exit 1;; esac
           aud="knos:pay:$REPO_ID:$ISSUE:$author:$HEAD:$CHECKS:1"
           mkdir -p knos-proof
           curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
@@ -250,7 +310,7 @@ jobs:
           printf '%s\n' "$aud" > knos-proof/aud.txt
           echo "minted a token for $aud"
       - name: publish the token (the always-on worker, or anyone, relays it)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: knos-proof
           path: knos-proof/

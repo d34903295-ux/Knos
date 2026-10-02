@@ -1,0 +1,67 @@
+name: release
+
+# What a published GitHub release sets off. Neither job has a secret.
+#   npm       packs the JavaScript client (sdk/settle) and attaches the tarball to the release, so it installs with
+#             `npm i https://github.com/drexthealpha/Knos/releases/download/vX.Y.Z/knos-settle-X.Y.Z.tgz`: no registry
+#             account anywhere.
+#   registry  lists `knos mcp` in the official MCP registry (registry.modelcontextprotocol.io). It proves it owns the
+#             io.github.drexthealpha namespace with this run's GitHub OIDC token; the registry checks the PyPI package
+#             names the same server (the `mcp-name:` line at the end of README.md), so PyPI is published first.
+#             A version the registry already has is left alone.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  npm:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: test, pack, attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          cd sdk/settle
+          node test.mjs
+          test "v$(node -p "require('./package.json').version")" = "$TAG"
+          npm pack
+          gh release upload "$TAG" knos-settle-*.tgz --clobber --repo "$GITHUB_REPOSITORY"
+
+  registry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: publish server.json unless the registry already has this version
+        run: |
+          set -euo pipefail
+          name=$(jq -r .name server.json); version=$(jq -r .version server.json)
+          test "$(jq -r '.packages[0].version' server.json)" = "$version"
+          # the registry reads the PyPI page of this exact version for the mcp-name line: wait for PyPI to have it
+          for _ in $(seq 30); do
+            if curl -fsS "https://pypi.org/pypi/knos/$version/json" | jq -e --arg n "mcp-name: $name" '.info.description | contains($n)' > /dev/null; then break; fi
+            echo "PyPI does not show knos $version with the mcp-name line yet"; sleep 20
+          done
+          curl -fsS "https://pypi.org/pypi/knos/$version/json" | jq -e --arg n "mcp-name: $name" '.info.description | contains($n)' > /dev/null
+          if curl -fsS "https://registry.modelcontextprotocol.io/v0.1/servers?search=$name" \
+               | jq -e --arg n "$name" --arg v "$version" '[.servers[]? | (.server // .) | select(.name == $n and .version == $v)] | length > 0' > /dev/null; then
+            echo "$name $version is already in the registry"; exit 0
+          fi
+          url=$(curl -fsS https://api.github.com/repos/modelcontextprotocol/registry/releases/latest \
+                  | jq -r '.assets[].browser_download_url | select(test("linux") and test("amd64|x86_64") and test("tar.gz$"))' | head -1)
+          test -n "$url"
+          curl -fsSL "$url" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

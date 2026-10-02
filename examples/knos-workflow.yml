@@ -7,11 +7,13 @@
 #      it to Solana, where knos-oidc checks GitHub's signature and knos-pay opens the bounty. Knos pays the gas.
 #   2. Someone opens a pull request whose body says "Fixes #N". No wallet, no address. prove.yml's check job runs
 #      on it: the repo's own rules, and whether a "tests pass" in its description is true at its head commit.
-#   3. A maintainer merges it. prove.yml asks GitHub for a token that says "pull request by GitHub user U closing
-#      issue N was merged"; on Solana the bounty is held for U's GitHub account and released an hour later (until
-#      then /knos veto on the issue takes it back; "/knos bounty <amount> review 0" pays at once). U claims it
-#      whenever they like, to any address, with a token from a workflow in a repository U owns
-#      (https://drexthealpha.github.io/Knos/#claim).
+#   3. A maintainer merges it. prove.yml runs that same check once more at the merged head and, only if it holds,
+#      asks GitHub for a token that says "pull request by GitHub user U closing issue N was merged"; on Solana the
+#      bounty is held for U's GitHub account and released an hour later (until then /knos veto on the issue takes
+#      it back; "/knos bounty <amount> review 0" pays at once). A pull request an agent opened under a bot account
+#      pays the person who ran it. U claims it whenever they like, to any address: knos claim <address>, or
+#      https://drexthealpha.github.io/Knos/#claim.
+#      An issue that is assigned to someone pays only their pull request; an unassigned one is open to anyone.
 #   Optional, pay without waiting for a merge: put acceptance checks for issue N in .knos/acceptance/N/ on the default
 #   branch before funding. prove.yml then runs them against each pull request in a sandbox, in a job with no token
 #   and no secret, and only if they pass does a second job, which runs no pull request code, mint the token. That
@@ -83,6 +85,7 @@ jobs:
     permissions:
       contents: read
       checks: read
+      issues: read
       id-token: write
     uses: drexthealpha/Knos/.github/workflows/prove.yml@KNOS_COMMIT_SHA
     with:

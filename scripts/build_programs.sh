@@ -9,10 +9,12 @@
 #                                                                and tests/fixtures/knos_pay_test.so
 #                         real-money build (no faucet)        -> tests/fixtures/knos_pay_nodevnet.so
 #   examples/oidc_gate    the example consumer                -> tests/fixtures/oidc_gate_test.so
+#                         (reads tokens with crates/knos-oidc-interface, not with the program's crate)
 #
 # The test build of knos-oidc also trusts two seed-derived test keys; it is never deployed. The real build is built
 # LAST for each program, so what is left in target/deploy is the binary to deploy. Run this again after changing a
-# program id (programs/program_ids.json, OIDC_ID in knos_pay and oidc_gate) or ROTATE_SHA: the ids are compiled in.
+# program id (programs/program_ids.json, OIDC_ID in knos_pay, ID in crates/knos-oidc-interface) or ROTATE_SHA: the
+# ids are compiled in.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 fix=tests/fixtures

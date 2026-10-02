@@ -1,111 +1,124 @@
 # Market and money
 
-Three parts: what Knos charges and what a payment costs to run (measured); the market from the bottom up, with every
-input labelled **[SOURCED]**, **[MEASURED]** or **[ASSUMPTION]**; and how it reaches people without anyone selling
-it. Nothing here is a forecast. Change an assumption and the arithmetic changes with it.
+Four parts: what Knos charges and what a payment costs to run (measured); the market, with every input labelled
+**[SOURCED]**, **[MEASURED]** or **[ASSUMPTION]**; what would have to be true for this to be a business; and how it
+reaches people without anyone selling it. Nothing here is a forecast. Figures marked "secondary" were read in
+coverage of the original, not in the original.
 
 ## 1. What it charges, and what it costs
 
 | | price | where it is fixed |
 |---|---|---|
-| Verifying a GitHub or GitLab token on chain (`knos-oidc`) | free, for any program, forever | the program takes no fee and cannot be changed |
+| The check on a pull request (`check.yml`, or the paste box on the site), the Stop hook, `knos mcp`, the Agent PR Index | free | MIT |
+| Verifying a GitHub or GitLab token on chain (`knos-oidc`) | free, for any program | the program takes no fee and cannot be changed |
 | A bounty that is paid (`knos-pay`) | 2.5% of the payment, at least 0.05 USDC, taken only when someone is paid | `FEE_BPS = 250`, `FEE_MIN = 50_000` in an immutable program: Knos cannot raise it |
 | A bounty that is refunded, vetoed or never proven | nothing | |
-| The check on a pull request, the Stop hook, the Agent PR Index | free | MIT |
 
 **What a payment costs to relay** ([BENCH.md](BENCH.md), measured): 105,000 lamports of transaction fees for a whole
 bounty (fund, pay, claim: 21 transactions), and about 3,150,000 lamports once for each new person paid (their public
 record and their token account). Rent on the job itself comes back.
 
-So the unit economics of the fee, honestly:
+So the unit economics of the fee:
 
 - A 20 USDC bounty earns 0.50 USDC. Relaying it costs 0.000105 SOL in fees.
 - The first payout to a new person costs the relayer about 0.00315 SOL more. At a small bounty that is more than
   the fee; it is an acquisition cost paid once per person, in the open. Knos runs the public relayer today and
-  absorbs it on devnet. The plan for mainnet is that a claimer brings their own token account (they then pay that
-  rent, about 0.002 SOL, once), which leaves about 0.0011 SOL per new person.
+  absorbs it on devnet. On mainnet a claimer brings their own token account (they then pay that rent, about 0.002
+  SOL, once), which leaves about 0.0011 SOL per new person.
 - Nobody has to use Knos's relayer. `knos relay` is the same code; a repository or a payee can relay their own
   tokens and pay their own gas.
-- The fee is not bundled with anything. Earlier versions bundled a memory subscription with payments; that is gone.
+- At a 2.5% fee, 1M USDC of fees a year takes 40M USDC of payments a year.
 
-**A second line, planned and not built**: the check that reads a pull request's claims is free for public
-repositories and will stay free. For private repositories it would be a per-repository plan. The comparable is code
-review bots: CodeRabbit charges $12 to $48 a seat a month and reached $50M ARR in July 2026 with 8,000+ paying
-customers ([Sacra](https://sacra.com/c/coderabbit/)), which is evidence that teams pay monthly for a machine opinion
-on pull requests. Knos's check is not an opinion; it is a comparison with GitHub's own record.
+## 2. The market
 
-## 2. The market, bottom up
+### What exists today is small, and we say so
 
-### What is measured
-
-| # | input | value | label |
+| # | what | size | label |
 |---|---|---|---|
-| A | Agent-marked pull requests on GitHub a week | about 1.8M (Claude Code about 1.3M of them) | **[SOURCED]** [amplifying.ai](https://amplifying.ai/coding-agents/trends), read 1 Oct 2026. A third-party tracker; attribution-based counts are estimates |
-| B | Of agent pull requests that say tests pass, the share with a failing check | 27.2% (660 of 2,431) | **[MEASURED]** [BENCH.md](BENCH.md) |
-| C | Revenue run-rate of coding agents, sold by usage | about $5B: Claude Code over $2.5B, Cursor $2B, Cognition $492M | **[SOURCED]** [Anthropic, Feb 2026](https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation); Bloomberg via [Trending Topics](https://trendingtopics.eu/cursor-breaks-2-billion-in-annual-revenue/); [ai2.work](https://ai2.work/blog/cognition-hits-26b-as-coding-agents-get-priced-like-infrastructure) (secondary) |
-| D | Agent payments already on chain, with no proof of delivery | 75.41M transactions, $24.24M in 30 days; 76% on Solana | **[SOURCED]** [Solana Compass, 22 Sep 2026](https://solanacompass.com/news/solana-processes-76-of-all-x402-ai-agent-transactions-232-million-in-four-weeks) |
-| E | Open-source bounties paid through the largest board | 1,470 in 2025; 175 in 2026 to 10 Aug | **[SOURCED]** [incubagent](https://incubagent.com/research/agent-bounty-market/); one venue |
+| A | Open bounties on GitHub issues, all boards together | 59 verified bounties, $64,291 on 2 Oct 2026 | **[SOURCED]** [bountyos.rovidev.com](https://bountyos.rovidev.com/en/github-bounty-board/), read 2 Oct 2026 |
+| B | Payouts on the largest board | 1,470 in 2025; 175 in 2026 to 10 Aug | **[SOURCED]** [incubagent](https://incubagent.com/research/agent-bounty-market/); one venue |
+| C | Superteam Earn, the largest crypto bounty and grant board | $15.9M paid in all, 3,219 listings; mostly content and design, judged by the sponsor, none tied to a pull request | **[SOURCED]** [superteam.fun stats](https://superteam.fun/api/homepage/stats), read 2 Oct 2026 |
 
-### Three markets, smallest first
+Bounties on issues are where Knos starts because they need no sales and no contract: a comment funds one. They are
+not the business. At a 2.5% fee, all of A is about $1,600. We do not size Knos against this market.
 
-**(1) Bounties on GitHub issues: where Knos starts.** It is small today, and E shows it shrinking, for the reason
-Knos removes: funders cannot tell what to pay for. The arithmetic, with Knos's fee:
+### Where the money is: agents are paid for attempts
 
-| scenario | agent PRs a year (A × 52) | share tied to a bounty **[ASSUMPTION]** | average bounty **[ASSUMPTION]** | paid a year | fee pool at 2.5% |
-|---|---|---|---|---|---|
-| low | 93.6M | 0.1% | $50 | $4.68M | $117,000 |
-| mid | 93.6M | 0.5% | $100 | $46.8M | $1.17M |
-| high | 93.6M | 2% | $200 | $374.4M | $9.36M |
+| # | what | size | label |
+|---|---|---|---|
+| D | Revenue run-rate of coding agents, all billed by seat, token or compute | about $7B: Cursor about $4B, Claude Code over $2.5B, Cognition $492M | **[SOURCED]** [Dealroom, 9 Jun 2026](https://dealroom.co/news/134107-cursor-tops-4b-annualized-revenue/); [Anthropic, Feb 2026](https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation); [TechCrunch, 27 May 2026](https://techcrunch.com/2026/05/27/ai-coding-startup-cognition-raises-1b-at-25b-pre-money-valuation/) |
+| E | Agents already sold per outcome, where the vendor defines the outcome | Intercom Fin near $100M a year at $0.99 per resolution; Sierra $200M | **[SOURCED]**, secondary: [EnterpriseDNA, 2 Aug 2026](https://enterprisedna.co/resources/ai-pulse/ai-pulse-2026-08-02-intercom-s-fin-ai-agent-is-nearing-100m-arr-roughly-half-of/); [Value Add VC](https://valueaddvc.com/blog/how-does-sierra-ai-make-money-outcome-based-pricing-enterprise-agents-and-the-business-model-breakdown) |
+| F | Share of AI companies pricing by outcome | 18% to 23% in six months | **[SOURCED]** [ICONIQ, State of AI 2026](https://www.iconiq.com/growth/reports/state-of-ai-2026) |
+| G | Agent pull requests a week | about 1.8M | **[SOURCED]** [amplifying.ai](https://amplifying.ai/coding-agents/trends), an estimate from declared attribution |
+| H | Of agent pull requests that say tests pass, the share with a failing check | 17.8% of repositories' first such pull request (147 of 826) | **[MEASURED]** [BENCH.md](BENCH.md) |
 
-This is a wedge and not a business by itself, and we say so. No public source counts the share; it is the number
-that matters most and it is an assumption.
+E and F say buyers will pay per outcome when they can. D says that for code they cannot yet: we found no coding-agent
+vendor that prices per merged pull request. The reason is the meter. In support, the vendor's own system decides
+what "resolved" means and the buyer trusts it or leaves. For code, an agent vendor grading its own work has the
+problem in H.
 
-**(2) Agent work sold by outcome instead of by usage.** C is about $5B a year paid for attempts. A buyer who pays per
-merged pull request instead needs exactly what Knos is: a third party's signature that the work landed, and money
-that moves on it. If a share s of that spend moves to pay-on-proof contracts, the fee pool is $5B × s × 2.5%:
+Knos is a meter nobody owns: GitHub signs what happened, a program nobody can change checks the signature and moves
+the money. A buyer who wants to pay an agent, a vendor or a contractor per merged pull request can do it today with
+a comment; the seller cannot fake the outcome and the buyer cannot withhold the money once it is proven.
+
+If a share s of D is settled on proof instead of on usage, the fee pool is D × s × 2.5%:
 
 | s **[ASSUMPTION]** | settled on proof a year | fee pool at 2.5% |
 |---|---|---|
-| 1% | $50M | $1.25M |
-| 10% | $500M | $12.5M |
-| 30% | $1.5B | $37.5M |
+| 0.5% | $35M | $0.9M |
+| 5% | $350M | $8.75M |
+| 20% | $1.4B | $35M |
 
-Nothing here assumes C keeps growing.
+No public source gives s; today it is zero. It is the number that decides whether this is a business, and the next
+section says what would move it.
 
-**(3) Any payment that should depend on a signed fact.** `knos-oidc` is not about bounties. It lets any Solana
-program require a statement signed by GitHub or GitLab, and the same design takes any OIDC issuer. Uses that need
-nothing new from Knos: grants and retroactive funding paid to GitHub accounts with no wallet collection; a program
-upgrade that executes only for the commit CI built ([examples/oidc_gate](../examples/oidc_gate) is that gate);
-agent-to-agent payments (D) that settle on a delivery receipt instead of on request. Forecasts for agent commerce as
-a whole run from $144B to several trillion dollars by 2030 (McKinsey $3–5T; Morgan Stanley $190–385B for the US;
-via a [Stellagent roundup](https://stellagent.ai/insights/agentic-commerce-market-size-forecast-2030), not checked
-against the originals). We do not size Knos against those numbers. We note that every one of those payments has the
-problem in section 3 of [WHY.md](WHY.md): the rail moves money and says nothing about delivery.
+### A second use of the same primitive
 
-### What would change these numbers
+`knos-oidc` is not about bounties. It lets any Solana program require a statement GitHub or GitLab signed. One use
+needs nothing new from Knos and answers losses that have already happened: a program upgrade that executes only for
+the commit CI built. Bybit lost about $1.5B in February 2025 through one compromised developer machine
+([BleepingComputer](https://www.bleepingcomputer.com/news/security/lazarus-hacked-bybit-via-breached-safe-wallet-developer-machine/)),
+and Drift $285M in April 2026 after a contributor was compromised
+([Halborn](https://www.halborn.com/blog/post/explained-the-drift-hack-april-2026)).
+[examples/oidc_gate](../examples/oidc_gate) is that gate as a working program. We do not count this market; it is
+why the verifier is separate, free and usable without the escrow.
 
-- The share of agent pull requests tied to paid work. It can be measured by sampling, and the Agent PR Index is the
-  place to do it.
-- Whether agent vendors or their customers adopt outcome pricing. Knos does not need the vendors: a customer can
-  fund an issue and let any agent take it.
-- GitHub. It is the signer, and it could build this itself. `knos-oidc` already verifies GitLab tokens (RSA-4096)
-  and is issuer-agnostic by design; the escrow reads GitHub's claims today.
+## 3. What would have to be true
 
-## 3. How it reaches people
+Stated so that each can be checked, and none of them is true yet:
+
+1. **A buyer pays per merged pull request instead of per seat.** The first evidence would be one team or one agent
+   vendor that funds a repository's issues through Knos for a month. This needs real money, which needs the mainnet
+   version ([SECURITY.md](SECURITY.md)), which needs an audit.
+2. **Maintainers install the check because it is useful without money.** The check alone (`check.yml`) costs
+   nothing and touches no chain. The Numbers page counts repositories that fund through Knos; outside use there is
+   zero as of 2 Oct 2026.
+3. **Agents find the work.** `knos mcp` lists funded issues to any agent that has it; the MCP registry lists the
+   server.
+4. **The fee survives a fork.** The code is MIT and a fork can set the fee to zero (MergePay charges none). What a
+   fork cannot copy is the record: every payment is public under a GitHub account's id (`knos due <login>`), and
+   repositories, agents and their operators accumulate a history on one deployment. That is a thin advantage today,
+   and it is the honest answer.
+
+## 4. How it reaches people
 
 Nobody sells Knos. Each of these is in the product:
 
-1. **The free check.** Paste any agent pull request; in about a second the page says whether its "tests pass" is
-   true, with a "Protect this repo" button beside the verdict. No install, no login.
+1. **The free check.** Paste any agent pull request on the site, or commit one workflow file: every pull request's
+   "tests pass" is then compared with GitHub's own record. No money, no wallet, no chain. This is the part a
+   maintainer drowning in agent pull requests can use today (GitHub itself shipped pull-request limits for this in
+   [February](https://github.blog/changelog/2026-02-13-new-repository-settings-for-configuring-pull-request-access/)
+   and [June 2026](https://github.blog/changelog/2026-06-17-limit-open-pull-requests-for-users-without-write-access/)).
 2. **The Agent PR Index.** A public, checkable record of how often each agent's claims are false, rebuilt every 6
-   hours. It is the dataset nobody else publishes, and it is why a maintainer would look for a tool like this.
-3. **It lives where the work already is.** The funder types a comment on a GitHub issue. The worker opens a pull
-   request. The result is a comment on that pull request with the transaction. Every paid pull request is a public
-   page on GitHub that shows the product working.
-4. **Money waiting for you.** A bounty is paid to a GitHub account before its owner has ever heard of Knos or owns a
-   wallet. "19.50 USDC is waiting for you" is the invitation, and claiming it needs only a repository of their own.
-   This is how PayPal spread through eBay ([WHY.md](WHY.md), section 7).
-5. **A primitive others build on.** Any Solana program can use `knos-oidc` for free, with nothing to ask of Knos.
+   hours.
+3. **It lives where the work already is.** The funder comments on a GitHub issue. The worker opens a pull request.
+   The result is a comment on that pull request with the transaction.
+4. **Agents are users too.** `knos init` gives a coding agent an MCP server that lists paid work it can take. The
+   agent needs no wallet; its operator is paid to their GitHub account and claims with one command.
+5. **Money waiting for you.** A bounty is paid to a GitHub account before its owner has ever heard of Knos or owns a
+   wallet. This is how PayPal spread through eBay ([WHY.md](WHY.md), section 7).
+6. **A primitive others build on.** A dependency-free crate, IDLs and a JavaScript client, all installable without
+   an account anywhere ([OIDC.md](OIDC.md)).
 
 Outside use is counted from the escrow's own logs and published on the site's Numbers page, apart from Knos's own
 activity and from funders who paid themselves ([scripts/network_stats.py](../scripts/network_stats.py)). That page

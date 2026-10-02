@@ -2,12 +2,14 @@
 //! GitHub signed "a workflow ran here on a GitHub-hosted runner with audience oidc-gate:release". Anything on Solana
 //! (an upgrade multisig, a DAO, a token unlock) can then require "the commit being deployed is the one CI ran on".
 //!
-//! The whole integration is the 12 lines in `process`: check the token account's owner is knos-oidc, call
-//! `knos_oidc::verified`, check freshness, read the claims you care about. No oracle, no CPI, no admin.
+//! The whole integration is the 7 lines in `process`, and its only dependency on Knos is the interface crate
+//! (crates/knos-oidc-interface, which depends on nothing): `Token::read` checks that the token account's owner is
+//! knos-oidc, that the token is verified and that it is fresh; then read the claims you care about. No oracle, no
+//! CPI, no admin.
 //!
 //!   Record  payer(s,w) token gate(w) system        (no data)
 //!           gate = ["gate", repository_id (u64 LE)] : repository_id u64, slot u64, sha[40]
-use knos_oidc::claims::{fields, number, text};
+use knos_oidc_interface::{number, text, Error, Token, ISSUER_GITHUB};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     clock::Clock,
@@ -15,18 +17,24 @@ use solana_program::{
     entrypoint::ProgramResult,
     program::{invoke, invoke_signed},
     program_error::ProgramError,
-    pubkey,
     pubkey::Pubkey,
     rent::Rent,
     system_instruction,
     sysvar::Sysvar,
 };
 
-/// The knos-oidc program. PIN: the deployed address (programs/program_ids.json).
-pub const OIDC_ID: Pubkey = pubkey!("vpWym9azbPU5f2PH2a6n8c4RfmsyUeW2dMuWr1DSHcE");
 pub const GATE_LEN: usize = 56;
 
 entrypoint!(process);
+
+/// The interface's errors as program errors; a claim error keeps knos-oidc's code (61 to 63).
+fn refused(e: Error) -> ProgramError {
+    match e {
+        Error::NotOidc => ProgramError::IllegalOwner,
+        Error::NotVerified | Error::Stale => ProgramError::InvalidAccountData,
+        claim => ProgramError::Custom(claim.code()),
+    }
+}
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> ProgramResult {
     let it = &mut accounts.iter();
@@ -34,13 +42,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
     let sys = next_account_info(it)?;
     let clock = Clock::get()?;
     // ---- the integration ----
-    if *token.owner != OIDC_ID { return Err(ProgramError::IllegalOwner); }
     let data = token.try_borrow_data()?;
-    let v = knos_oidc::verified(&data).ok_or(ProgramError::InvalidAccountData)?;
-    if v.issuer != knos_oidc::pins::ISSUER_GITHUB || !knos_oidc::fresh(v.exp, clock.unix_timestamp) { return Err(ProgramError::InvalidAccountData); }
-    let [repo, sha, runner, aud] = fields(v.payload, [b"repository_id", b"sha", b"runner_environment", b"aud"])?;
-    if text(runner)? != b"github-hosted" || text(aud)? != b"oidc-gate:release" { return Err(ProgramError::InvalidArgument); }
-    let (repo, sha) = (number(repo)?, text(sha)?);
+    let tok = Token::read(&token.owner.to_bytes(), &data, clock.unix_timestamp).map_err(refused)?;
+    if tok.issuer() != ISSUER_GITHUB { return Err(ProgramError::InvalidAccountData); }
+    let [repo, sha, runner, aud] = tok.claims([b"repository_id", b"sha", b"runner_environment", b"aud"]).map_err(refused)?;
+    if !text(runner).map_err(refused)?.is("github-hosted") || !text(aud).map_err(refused)?.is("oidc-gate:release") { return Err(ProgramError::InvalidArgument); }
+    let (repo, sha) = (number(repo).map_err(refused)?, text(sha).map_err(refused)?);    // facts GitHub signed
     if sha.len() != 40 { return Err(ProgramError::InvalidArgument); }
     // ---- record it ----
     let rb = repo.to_le_bytes();
@@ -55,6 +62,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
     let mut g = gate.try_borrow_mut_data()?;
     g[0..8].copy_from_slice(&rb);
     g[8..16].copy_from_slice(&clock.slot.to_le_bytes());
-    g[16..56].copy_from_slice(&sha);
+    sha.copy_to(&mut g[16..56]).ok_or(ProgramError::InvalidArgument)?;
     Ok(())
 }

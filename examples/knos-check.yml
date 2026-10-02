@@ -1,0 +1,23 @@
+# .github/workflows/knos-check.yml - the free Knos check on every pull request. No bounty, no money, no chain.
+#
+# When a pull request's description says its tests pass or CI is green, Knos compares that with GitHub's own record of
+# the head commit and fails the status "check / claims" when a check failed. It also applies this repository's
+# CONTRIBUTING rules and remembers what was caught before. It runs none of the pull request's code.
+#
+# Security: pull_request_target runs THIS file from the base branch, so a pull request cannot edit what runs here; the
+# job has contents: read and checks: read and nothing else; the Knos workflow is referenced by full commit sha.
+# To require it before merge: Settings > Rules > New branch ruleset > Require status checks > add "check / claims".
+name: knos check
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  check:
+    permissions:
+      contents: read
+      checks: read
+    uses: drexthealpha/Knos/.github/workflows/check.yml@KNOS_COMMIT_SHA

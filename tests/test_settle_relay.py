@@ -17,6 +17,8 @@ from _settle import Chain, ChainLedger, b64, github_claims, modulus, sign_jwt, s
 
 from knos.settle import oidc, pay, relay  # noqa: E402
 
+ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
+
 REPO, OWNER, AUTHOR = 5550001, 777, 4242
 USDC = 1_000_000
 WF = "drexthealpha/Knos"
@@ -64,7 +66,7 @@ def test_fund_pay_claim_from_tokens_alone(env):
     assert pay.read_due(c.data(pay.due_pda(AUTHOR, usdc))) == 19_500_000
     # the same proof again: nothing left to pay
     again = go(token(c, pay.pay_audience(REPO, 7, AUTHOR, "a" * 40)))
-    assert not again["ok"] and again["why"] == "no bounty on this issue" and "sigs" not in again   # refused before any fee
+    assert not again["ok"] and again["why"].startswith("no bounty is in escrow for this issue") and "sigs" not in again   # refused before any fee
     # the author claims everything, in every mint, to one address
     wallet = Keypair().pubkey()
     r = go(token(c, pay.claim_audience(wallet), file="claim.yml", event_name="workflow_dispatch", actor_id=str(AUTHOR), repository_owner_id=str(AUTHOR)))
@@ -148,7 +150,8 @@ def test_bad_tokens_are_reported_not_raised(env):
     other = token(c, pay.pay_audience(REPO, 40, AUTHOR, "a" * 40), job_workflow_ref="evil/repo/.github/workflows/prove.yml@refs/heads/main")
     assert go(other)["why"] == "no open bounty on this issue pins this workflow at this commit" and ledger.n == n0
     assert go(token(c, pay.pay_audience(REPO, 40, AUTHOR, "a" * 40), runner_environment="self-hosted"))["why"] == "not from a GitHub-hosted runner"
-    assert go(token(c, pay.fund_audience(40, 5 * USDC), file="fund.yml"))["why"] == "this issue already has the repository's bounty"
+    # another amount for an issue that is funded (the very token that funded it would be "already done")
+    assert go(token(c, pay.fund_audience(40, 6 * USDC), file="fund.yml"))["why"] == "this issue already has the repository's bounty"
     assert go(token(c, pay.fund_audience(41, 5 * USDC), file="fund.yml"))["why"] == "an older fund token than the repository's last one"
     c.warp(1)
     n0 = ledger.n
@@ -206,8 +209,89 @@ def test_the_worker_pass_relays_oldest_first_retries_the_rate_limit_and_cranks(e
     assert logged and all(x.startswith("knos-relay ") for x in logged)
 
 
+def test_a_dropped_transaction_is_tried_again_and_a_second_relayer_does_no_harm(env, monkeypatch, tmp_path):
+    """What broke on devnet in 0.3.10: two runs carried the same proof at once and both gave up, so the payment waited
+    for a fresh token. A failure that says nothing about the token is retried on the next pass; a relayer with its own
+    key has its own token account; and whoever comes second finds the work done."""
+    import time
+
+    from solders.keypair import Keypair
+
+    from knos import chain
+    from knos.proof import ghrelay
+    c, ledger, jwks = env
+    c.warp(120)
+    fund = token(c, pay.fund_audience(61, 5 * USDC), file="fund.yml")
+    assert relay.submit(ledger, c.payer, fund, jwks, now=c.now())["ok"]
+    # a second relayer with the same fund token finds the bounty already open: done, and nothing to send
+    again = relay.submit(ledger, Keypair(), fund, jwks, now=c.now())
+    assert again["ok"] and again["already"] and again["sigs"] == [] and again["job"] == str(pay.job_pda(REPO, 61))
+    assert ghrelay.log_line("fund", "octo/widgets", 61, fund, {**again, "note": ghrelay.note(again)}).endswith("(another relayer carried it first)")
+    proof = token(c, pay.pay_audience(REPO, 61, AUTHOR, "c" * 40))
+
+    class Flaky:
+        """The ledger, but the next `fails` sends are refused the way a twin run's interference looks on chain."""
+        def __init__(self, fails): self.fails = fails
+        def __getattr__(self, name): return getattr(ledger, name)
+        def send(self, ixs, payer, signers=None):
+            if self.fails:
+                self.fails -= 1
+                raise chain.RpcError("transaction failed: {'InstructionError': [1, {'Custom': 69}]}")
+            return ledger.send(ixs, payer)
+    first = relay.submit(Flaky(1), c.payer, proof, jwks, now=c.now())
+    assert first == {"ok": False, "why": first["why"], "retry": True, "transient": True} and "'Custom': 69" in first["why"]
+    assert not relay.transient(chain.RpcError("transaction failed: {'InstructionError': [0, {'Custom': 86}]}"))   # a real refusal
+    assert relay.transient(TimeoutError("sig not confirmed within 60s"))
+
+    comments = {"octo/widgets": [("proof", 9, proof, "github-actions[bot]")]}
+    monkeypatch.setattr(ghrelay, "discover", lambda since, state: set(comments))
+    monkeypatch.setattr(ghrelay, "found", lambda repo, since: comments[repo])
+    monkeypatch.setattr(ghrelay, "post_log", lambda lines: None)
+    monkeypatch.setattr(ghrelay, "_state_path", lambda: tmp_path / "ghrelay.json")
+    flaky = Flaky(2)
+
+    def one(_ledger, payer, kind, jwt):
+        r = relay.submit(flaky, payer, jwt, jwks, now=c.now())
+        if r.get("ok"):
+            r["note"] = ghrelay.note(r)
+        return r
+    monkeypatch.setattr(ghrelay, "relay_one", one)
+    assert ghrelay.once(ledger, c.payer, now=time.time()) == []                 # dropped: no verdict yet, nothing logged
+    assert ghrelay.once(ledger, c.payer, now=time.time()) == []
+    lines = ghrelay.once(ledger, c.payer, now=time.time())
+    assert len(lines) == 1 and " ok " in lines[0]                              # third pass: paid
+    assert c.data(pay.job_pda(REPO, 61)) is None and pay.read_due(c.data(pay.due_pda(AUTHOR, pay.faucet_mint()))) >= 4_875_000
+    assert json.loads((tmp_path / "ghrelay.json").read_text())["tries"] == {}
+
+    # a second relayer, with a key of its own, arrives late with the same proof: refused by a read, at no cost
+    other = Keypair()
+    c.airdrop(other.pubkey(), 10**9) if hasattr(c, "airdrop") else c.svm.airdrop(other.pubkey(), 10**9)
+    late = relay.submit(ledger, other, proof, jwks, now=c.now())
+    assert late == {"ok": False, "kind": "pay", "why": "no bounty is in escrow for this issue (never funded, or already paid or refunded)"}
+
+    # waiting out the one-funding-per-minute limit is not a failure, however many passes it takes
+    waits = {"n": 0}
+
+    def limited(_ledger, payer, kind, jwt):
+        waits["n"] += 1
+        return {"ok": False, "kind": "fund", "why": "one funding per repository per minute", "retry": True}
+    monkeypatch.setattr(ghrelay, "relay_one", limited)
+    monkeypatch.setattr(ghrelay, "MAX_TRIES", 2)
+    comments["octo/widgets"] = [("fund", 63, token(c, pay.fund_audience(63, 5 * USDC), file="fund.yml"), "github-actions[bot]")]
+    assert [ghrelay.once(ledger, c.payer, now=time.time()) for _ in range(5)] == [[]] * 5 and waits["n"] == 5
+    monkeypatch.setattr(ghrelay, "relay_one", one)
+    # a failure that never clears is given up on, out loud
+    monkeypatch.setattr(ghrelay, "MAX_TRIES", 2)
+    c.warp(61)
+    comments["octo/widgets"] = [("fund", 62, token(c, pay.fund_audience(62, 5 * USDC), file="fund.yml"), "github-actions[bot]")]
+    flaky.fails = 99
+    assert ghrelay.once(ledger, c.payer, now=time.time()) == []
+    lines = ghrelay.once(ledger, c.payer, now=time.time())
+    assert len(lines) == 1 and " fail " in lines[0] and "gave up after 2 passes" in lines[0]
+
+
 def test_captured_tokens_replay_in_order_with_the_clock_set_to_each(tmp_path):
-    """scripts/replay_tokens.py: what Claude Code (or anyone) runs on real tokens before deploying."""
+    """scripts/replay_tokens.py: real tokens against real builds, before anything is deployed."""
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -235,3 +319,55 @@ def test_captured_tokens_replay_in_order_with_the_clock_set_to_each(tmp_path):
     said.clear()
     assert not replay_tokens.replay(bad, FIX / "knos_oidc_test.so", FIX / "knos_pay_test.so", jwks, said.append)
     assert any(x.startswith("FAIL") for x in said)
+
+
+def test_knos_claim_does_the_five_steps_with_gh_and_waits_for_the_money(env):
+    """`knos claim <address>`: the repository, the workflow file, the run and the wait, with nothing but a gh login."""
+    import base64 as b64mod
+
+    from knos import claim as claiming
+    c, ledger, jwks = env
+    c.warp(200)
+    wallet = Keypair().pubkey()
+    assert relay.submit(ledger, c.payer, token(c, pay.fund_audience(71, 20 * USDC), file="fund.yml"), jwks, now=c.now())["ok"]
+    assert relay.submit(ledger, c.payer, token(c, pay.pay_audience(REPO, 71, AUTHOR, "d" * 40)), jwks, now=c.now())["ok"]
+    calls, said, have = [], [], set()
+    waiting = pay.read_due(c.data(pay.due_pda(AUTHOR, pay.faucet_mint())))     # this bounty's 19.50 and any earlier test's
+    assert waiting >= 19_500_000
+
+    def gh(*args, inp=None):
+        calls.append(args)
+        if args[:2] == ("api", "user"):
+            return json.dumps({"login": "mona", "id": AUTHOR})
+        if args[0] == "api" and args[1].startswith("repos/") and "-X" not in args:
+            if args[1] not in have:
+                raise claiming.Cannot("HTTP 404")
+            return "{}"
+        if args[:2] == ("repo", "create"):
+            have.add(f"repos/{args[2]}")
+            return ""
+        if args[:3] == ("api", "-X", "PUT"):
+            assert b64mod.b64decode(json.loads(inp)["content"]) == (ROOT / "examples" / "knos-claim.yml").read_bytes()
+            have.add(args[3])
+            return "{}"
+        if args[:2] == ("workflow", "run"):
+            # GitHub signs; the relayer carries it: here, at once
+            r = relay.submit(ledger, c.payer, token(c, pay.claim_audience(wallet), file="knos-claim.yml", event_name="workflow_dispatch",
+                                                    actor_id=str(AUTHOR), repository_owner_id=str(AUTHOR)), jwks, now=c.now())
+            assert r["ok"], r
+            return ""
+        raise AssertionError(args)
+    got = claiming.claim(str(wallet), gh=gh, ledger=ledger, say=said.append, sleep=lambda s: None)
+    assert got["arrived"] and got["created"] and got["repo"] == "mona/knos-claim" and got["due"][0][1] == waiting
+    assert said[0] == f"{waiting / 1e6:,.2f} USDC is waiting for mona." and said[-1] == f"Sent {waiting / 1e6:,.2f} USDC to {wallet}."
+    assert ("workflow", "run", "knos-claim.yml", "-R", "mona/knos-claim", "-f", f"address={wallet}") in calls
+    assert pay.read_due(c.data(pay.due_pda(AUTHOR, pay.faucet_mint()))) == 0
+    # nothing due: it says so before touching GitHub any further; a repository someone else owns is refused; so is a bad address
+    calls.clear()
+    with pytest.raises(claiming.Cannot, match="Nothing is waiting for mona"):
+        claiming.claim(str(wallet), gh=gh, ledger=ledger, say=said.append, sleep=lambda s: None)
+    assert calls == [("api", "user")]
+    with pytest.raises(claiming.Cannot, match="not a Solana address"):
+        claiming.claim("0xabc", gh=gh, ledger=ledger)
+    # the workflow file the command installs is the example, byte for byte
+    assert claiming.TEMPLATE.read_bytes() == (ROOT / "examples" / "knos-claim.yml").read_bytes()

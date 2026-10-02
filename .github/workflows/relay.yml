@@ -37,7 +37,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: knos-evidence
@@ -64,7 +64,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: knos-${{ inputs.kind }}
           path: ${{ runner.temp }}/knos
@@ -106,7 +106,7 @@ jobs:
           if [ -z "$line" ]; then
             body="Knos: no verdict from the always-on worker within $WAIT minutes for token $ID."
           elif printf '%s' "$line" | grep -q " ok "; then
-            sigs=$(printf '%s' "$line" | grep -oE 'sig=[^ ]+' | cut -d= -f2 | tr ',' ' ')
+            sigs=$(printf '%s' "$line" | grep -oE 'sig=[^ ]+' | cut -d= -f2 | tr ',' ' ' || true)   # none when another relayer was first
             note=$(printf '%s' "$line" | sed -n 's/.* note=\(.*\)$/\1/p')
             case "$KIND" in
               fund) body="Knos: bounty funded. $note";;
@@ -115,6 +115,7 @@ jobs:
             esac
             last=""
             for s in $sigs; do last="$s"; done
+            [ "$last" = none ] && last=""      # carried by another relayer, whose transaction this one could not name
             [ -n "$last" ] && body="$body
           Transaction: [$last](https://explorer.solana.com/tx/$last?cluster=devnet)"
           else

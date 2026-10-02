@@ -1,5 +1,7 @@
 """The zero-secret GitHub relay: the always-on worker (worker.yml) carries the tokens that repositories' own workflows
-minted to Solana, and pays the gas. Anyone else can run it too; a relayer decides nothing.
+minted to Solana, and pays the gas. Anyone else can run it too; a relayer decides nothing. Each relayer uses a key of
+its own (a token's account on chain belongs to the key that carried it, so two relayers never touch each other's; two
+runs sharing one key do, and the loser of that race tries again on its next pass).
 
 Transport (caller -> worker). A repo that installed Knos (examples/knos-workflow.yml) has NO Knos secret, so it cannot
 call the Knos repo or its API with auth. Its workflow posts the GitHub Actions OIDC token it minted as a comment with
@@ -49,6 +51,7 @@ LOG_LABEL = "knos-relay"
 # The repository the relay keeps its public log in, and whose own issues it always scans: the one whose worker.yml runs
 # it (worker.yml passes its own name), Knos's by default. relay.yml polls the log of the repository it was called from.
 HOME_REPO = os.environ.get("KNOS_RELAY_LOG_REPO") or "drexthealpha/Knos"
+MAX_TRIES = 12   # failed passes a token gets when the failure may clear (the cluster dropped it, a twin run)
 
 
 def claims(jwt: str) -> dict:
@@ -156,7 +159,8 @@ def log_line(kind: str, repo: str, n: int, jwt: str, r: dict) -> str:
     head = f"knos-relay {kind} {repo}#{n} {token_id(jwt)}"
     if not r["ok"]:
         return f"{head} fail {r['why']}"
-    return f"{head} ok sig={','.join(r['sigs'][-3:])} note={r['note']}"
+    first = " (another relayer carried it first)" if r.get("already") else ""
+    return f"{head} ok sig={','.join(r['sigs'][-3:]) or 'none'} note={r['note']}{first}"
 
 
 def _log_issue() -> int:
@@ -191,6 +195,7 @@ def once(ledger=None, payer=None, now: float | None = None) -> list[str]:
     now = now or time.time()
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 70 * 60))   # a token is accepted for an hour
     seen = set(state.get("seen", []))
+    tries = dict(state.get("tries", {}))
     if ledger is None:
         from .. import chain
         ledger, payer = chain.ledger(), chain.key()
@@ -212,10 +217,15 @@ def once(ledger=None, payer=None, now: float | None = None) -> list[str]:
                 continue
             seen.add(tid)
             r = relay_one(ledger, payer, kind, jwt)
-            if r.get("retry"):          # e.g. one funding per repository per minute: the next pass tries again
-                seen.discard(tid)
-                continue
-            if r.get("ok") and not r.get("sigs"):
+            if r.get("retry"):          # the per-minute limit, or the cluster dropped it: the next pass tries again
+                if r.get("transient"):  # only a failure counts toward giving up; waiting out the limit does not
+                    tries[tid] = tries.get(tid, 0) + 1
+                if tries.get(tid, 0) < MAX_TRIES:
+                    seen.discard(tid)
+                    continue
+                r["why"] = f"{r.get('why')} (gave up after {MAX_TRIES} passes; run the workflow again for a fresh token)"
+            tries.pop(tid, None)
+            if r.get("ok") and not r.get("sigs") and not r.get("already"):
                 continue                # nothing had to be done (a key the chain already has): no log line
             lines.append(log_line(kind, repo, n, jwt, r))
             state.setdefault("owners", [])
@@ -232,6 +242,7 @@ def once(ledger=None, payer=None, now: float | None = None) -> list[str]:
     except Exception as why:  # noqa: BLE001 - the crank is best effort; the next pass tries again
         print(f"settle/refund: {why}", file=sys.stderr)
     state["seen"] = sorted(seen)[-2000:]
+    state["tries"] = dict(list(tries.items())[-500:])
     sp.parent.mkdir(parents=True, exist_ok=True)
     sp.write_text(json.dumps(state), encoding="utf-8")
     try:

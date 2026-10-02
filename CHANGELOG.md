@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.11 (2 Oct 2026)
+
+No change to the two programs: they are immutable, and `programs/` is byte for byte what was deployed.
+
+- **A merge alone no longer pays.** The check every bounty pull request gets runs once more at the merged commit,
+  in the job that asks GitHub for the token and runs no pull request code. A description that says tests pass
+  mints a token only if GitHub's record of that commit bears it out: a failed check, checks still running or an
+  unreadable record all mint nothing. A pull request that claims nothing is paid on the merge and the repository's
+  rules.
+- **An agent's pull request pays the person who ran it.** A pull request opened under a bot account (Copilot, Devin,
+  Jules, Cursor) names its operator in different ways: an assignee, a `Requested by: @login` line, the co-author of
+  the head commit. Knos reads each, or an explicit `Knos-Pay-To: @login`; a description that names two people, or a
+  name GitHub does not confirm, pays nobody. Before, a bot's pull request with no assignee failed.
+- **An assigned issue pays only its assignee.** An unassigned bounty is open to anyone; assigning it reserves it.
+- **The check alone, with no money.** `check.yml` and `examples/knos-check.yml`: one file, and every pull request's
+  "tests pass" is compared with GitHub's record. No token, no wallet, no chain. The site offers both installs.
+- **`knos claim <address>`.** One command does what took five steps in the browser: it uses your `gh` login, runs
+  the claim in a repository you own, and waits until the money has arrived.
+- **`knos mcp`.** A read-only MCP server, registered by `knos init` for Claude Code, Codex, Cursor and Gemini CLI:
+  an agent can list funded issues it could take, check a pull request's claims, and see what its operator is owed.
+  Listed in the MCP registry on release.
+- **For other programs.** `crates/knos-oidc-interface`, a Rust crate with no dependency that reads a verified
+  token (the example now uses it: 21,632 compute units); IDLs for both programs in `idl/`; the JavaScript client as
+  an npm tarball on every release.
+- **The relay survives a race.** On devnet, two runs carried one proof at once and both gave up. A failure that
+  says nothing about the token is now tried again on the next pass; every transaction asks for the compute units
+  it needs (a cluster gives 200,000 unless asked, which the local test chain had not enforced).
+- **Every action is pinned to a commit**, in every workflow and example.
+- **The measurement is restated.** One pull request per repository: 147 of 826 (17.8%). The earlier figure, 660 of
+  2,431 pull requests (27.2%), leaned on a few busy repositories; both are published, the first is quoted.
+- **The docs say what this version cannot do**: a trusted key cannot be revoked, rotation depends on timing, and
+  bugs are for ever ([docs/SECURITY.md](docs/SECURITY.md)), with what the mainnet version changes. The market
+  section now says how small the bounty market is and where the money is ([docs/MARKET.md](docs/MARKET.md)).
+- Knos runs on its own repository (`.github/workflows/knos.yml`, pinned to the previous release, since a repository
+  cannot name its own commit before it exists).
+- Windows: Sibyl's database handles are closed after each call, so the store can be moved or deleted.
+
 ## 0.3.10 (2 Oct 2026)
 
 AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.

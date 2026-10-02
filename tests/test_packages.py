@@ -1,0 +1,108 @@
+"""What other teams build on: the Rust interface crate (crates/knos-oidc-interface), the IDLs (idl/), the npm package
+of the JavaScript client (sdk/settle). They carry one version, the crate points at the deployed program, its fixture
+is what the test build of knos-oidc writes, and the npm tarball holds the client and nothing else."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from solders.pubkey import Pubkey
+
+ROOT = Path(__file__).resolve().parents[1]
+CRATE = ROOT / "crates" / "knos-oidc-interface"
+SDK = ROOT / "sdk" / "settle"
+
+
+def _read(*parts: str) -> str:
+    return ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+
+def _locked(lock: str, package: str) -> str:
+    return re.search(rf'name = "{package}"\nversion = "([^"]+)"', lock).group(1)
+
+
+def _versions() -> dict[str, str]:
+    """Every place one of these artifacts states its version, or the release tag it is installed from."""
+    v = {
+        "crates/knos-oidc-interface/Cargo.toml": re.search(r'^version = "([^"]+)"', _read("crates", "knos-oidc-interface", "Cargo.toml"), re.M).group(1),
+        "crates/knos-oidc-interface/Cargo.lock": _locked(_read("crates", "knos-oidc-interface", "Cargo.lock"), "knos-oidc-interface"),
+        "examples/oidc_gate/Cargo.lock": _locked(_read("examples", "oidc_gate", "Cargo.lock"), "knos-oidc-interface"),
+        "sdk/settle/package.json": json.loads(_read("sdk", "settle", "package.json"))["version"],
+    }
+    for idl in sorted((ROOT / "idl").glob("*.json")):
+        v[f"idl/{idl.name}"] = json.loads(idl.read_text(encoding="utf-8"))["version"]
+    if (ROOT / "server.json").exists():
+        v["server.json"] = json.loads(_read("server.json"))["version"]
+    # the install lines people copy
+    for name, text in (("crates/knos-oidc-interface/README.md", _read("crates", "knos-oidc-interface", "README.md")),
+                       ("examples/oidc_gate/Cargo.toml", _read("examples", "oidc_gate", "Cargo.toml"))):
+        v[f"{name} (tag)"] = re.search(r'git = "https://github.com/drexthealpha/Knos", tag = "v([^"]+)"', text).group(1)
+    readme = _read("sdk", "settle", "README.md")
+    tag, tarball = re.search(r"releases/download/v([\d.]+)/knos-settle-([\d.]+)\.tgz", readme).groups()
+    v["sdk/settle/README.md (release)"], v["sdk/settle/README.md (tarball)"] = tag, tarball
+    v["sdk/settle/README.md (cdn)"] = re.search(r"cdn\.jsdelivr\.net/gh/drexthealpha/Knos@v([\d.]+)/sdk/settle/index\.js", readme).group(1)
+    return v
+
+
+def test_the_artifacts_carry_one_version():
+    v = _versions()
+    assert len(v) >= 11 and len(set(v.values())) == 1, v
+
+
+def test_it_is_the_version_of_the_python_package():
+    """The crate, the IDLs and the npm package are released with the Python package, under its version (pyproject.toml)."""
+    version = re.search(r'^version = "([^"]+)"', _read("pyproject.toml"), re.M).group(1)
+    stale = {where: got for where, got in _versions().items() if got != version}
+    assert not stale, f"pyproject.toml says {version}; these do not: {stale}"
+
+
+def test_the_npm_tarball_holds_the_client_and_nothing_else():
+    # on Windows the npm on PATH is a .cmd; the extensionless `npm` beside it is a shell script CreateProcess cannot run
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if not npm:
+        pytest.skip("needs npm")
+    r = subprocess.run([npm, "pack", "--dry-run", "--json"], cwd=str(SDK), capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stderr
+    [packed] = json.loads(r.stdout)
+    manifest = json.loads(_read("sdk", "settle", "package.json"))
+    assert {f["path"] for f in packed["files"]} == {"package.json", "index.js", "README.md"}
+    assert (packed["name"], packed["version"]) == ("knos-settle", manifest["version"])
+    assert packed["filename"] == f"knos-settle-{manifest['version']}.tgz"       # the file name in the README's install line
+    assert not list(SDK.glob("*.tgz")), "a dry run writes nothing"
+    assert manifest["type"] == "module" and manifest["exports"] == "./index.js" and manifest["license"] == "MIT"
+    assert manifest["repository"]["directory"] == "sdk/settle" and manifest["scripts"] == {"test": "node test.mjs"}
+    assert not any(k in manifest for k in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"))
+
+
+def test_the_interface_crate_names_the_deployed_program_and_depends_on_nothing():
+    ids = json.loads(_read("programs", "program_ids.json"))
+    lib = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert re.search(r'pub const ID_STR: &str = "(\w+)";', lib).group(1) == ids["knos_oidc"]
+    body = re.search(r"pub const ID: \[u8; 32\] = \[(.*?)\];", lib, re.S).group(1)
+    assert bytes(int(x, 16) for x in re.findall(r"0x([0-9a-f]{2})", body)) == bytes(Pubkey.from_string(ids["knos_oidc"]))
+    assert "#![no_std]" in lib
+    manifest = (CRATE / "Cargo.toml").read_text(encoding="utf-8")
+    deps = manifest.split("[dependencies]")[1].split("[features]")[0]
+    assert not [line for line in deps.splitlines() if line.strip() and not line.startswith("#")], deps
+    # the example consumer reads tokens with the interface crate only, as an outside program would
+    gate = _read("examples", "oidc_gate", "Cargo.toml")
+    assert 'knos-oidc-interface = { path = "../../crates/knos-oidc-interface" }' in gate and "knos_oidc" not in gate
+
+
+def test_the_interface_fixture_is_what_knos_oidc_writes():
+    """crates/knos-oidc-interface/tests/fixtures: a token account verified by the test build of knos-oidc, regenerated
+    here byte for byte (nothing in it is random), and the claims the crate's tests expect are the ones in its bytes."""
+    pytest.importorskip("solders.litesvm")
+    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "interface_fixture.py"), "--check"], capture_output=True, text=True, check=False)
+    assert r.returncode == 0, r.stderr or r.stdout
+    from knos.settle import oidc
+    want = json.loads((CRATE / "tests" / "fixtures" / "verified_token.json").read_text(encoding="utf-8"))
+    tok = oidc.read_token((CRATE / "tests" / "fixtures" / "verified_token.bin").read_bytes())
+    assert tok.verified and (tok.issuer, tok.exp, tok.claims()) == (want["issuer"], want["exp"], want["claims"])
+    assert want["owner"] == str(oidc.OIDC_ID) and want["exp"] == want["now"] + 300

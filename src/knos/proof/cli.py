@@ -66,6 +66,9 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
             evidence.write_text(json.dumps(v, indent=1, default=str), encoding="utf-8")
         for r in v["evidence"].get("required_by_history", []):
             out.print(f"REQUIRED by this repo's history: {r}", markup=False, emoji=False)
+        who = v["evidence"].get("payee") or {}
+        if who.get("id"):
+            out.print(f"paid to @{who.get('login')} (GitHub user id {who['id']}): {who['why']}", markup=False, emoji=False)
         for r in v["reasons"]:
             out.print(f"NO  {r}", markup=False, emoji=False)
         if v["checks_hash"]:
@@ -89,7 +92,33 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
             runs = judge.check_runs(repo_name, head, wait=wait, body=body)
         return st, diff_text, body, runs
 
+    def _who(event, repo_name: str, issue: str, issue_file):
+        """(the pull request, the issue, who is paid) from the pull_request event GitHub hands the workflow; three
+        Nones without one. The issue is read from GitHub for its assignees; when GitHub does not answer, no assignment
+        is held against the pull request."""
+        from .. import judge
+        if not event:
+            return None, None, None
+        pull = json.loads(event.read_text(encoding="utf-8")).get("pull_request") or {}
+        message = ""
+        if (pull.get("user") or {}).get("type") == "Bot" and repo_name and (pull.get("head") or {}).get("sha"):
+            try:
+                message = judge.github(f"repos/{repo_name}/commits/{pull['head']['sha']}")["commit"]["message"]
+            except Exception:  # noqa: BLE001 - the description or the assignee may still name the person
+                message = ""
+        issue_data = None
+        if issue_file:
+            issue_data = json.loads(issue_file.read_text(encoding="utf-8"))
+        elif repo_name and str(issue).isdigit():
+            try:
+                issue_data = judge.github(f"repos/{repo_name}/issues/{issue}")
+            except Exception:  # noqa: BLE001
+                issue_data = None
+        return pull, issue_data, judge.payee(pull, message)
+
     common = dict(
+        event=typer.Option(None, "--event", help="the pull_request event (GITHUB_EVENT_PATH): who is paid, and the issue's assignment"),
+        issue_file=typer.Option(None, "--issue-file", help="the issue as GitHub's API gives it (else fetched)"),
         diff=typer.Option(None, "--diff", help="the pull request's unified diff from the base"),
         evidence=typer.Option(None, "--evidence", help="write the evidence JSON here"),
         store=typer.Option(None, "--store", help="a directory the judge remembers in (Sibyl's local store: <dir>/sibyl.db)"),
@@ -106,12 +135,27 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
              issue: str = typer.Option("", "--issue"),
              diff: Path = common["diff"], evidence: Path = common["evidence"], store: Path = common["store"],
              repo_name: str = common["repo_name"], agent: str = common["agent"], body_file: Path = common["body_file"],
-             checks_file: Path = common["checks_file"], head: str = common["head"], wait: int = common["wait"]) -> None:
-        """Every bounty pull request, before merge, running none of its code: the repo's rules, what its history
-        requires, and whether the description's "tests pass" is true at the head commit. Exit 1 unless it passes."""
+             checks_file: Path = common["checks_file"], head: str = common["head"], wait: int = common["wait"],
+             event: Path = common["event"], issue_file: Path = common["issue_file"],
+             strict: bool = typer.Option(False, "--strict", help="at the merged commit: a claim that cannot be checked is refused")) -> None:
+        """A pull request, running none of its code: the repo's rules, what its history requires, and whether the
+        description's "tests pass" is true at the head commit; for a bounty's pull request also who is paid and the
+        issue's assignment. Exit 1 unless it passes."""
         from .. import judge
         st, diff_text, body, runs = _inputs(store, diff, body_file, checks_file, repo_name, head, wait)
-        _say(judge.gate(base, diff_text, st, repo_name or None, agent or None, body, runs, issue), evidence)
+        pull, issue_data, paid = _who(event, repo_name, issue, issue_file)
+        _say(judge.gate(base, diff_text, st, repo_name or None, agent or None, body, runs, issue, pull, issue_data, paid,
+                        strict), evidence)
+
+    @proof.command("payee")
+    def payee(event: Path = typer.Option(..., "--event", help="the pull_request event (GITHUB_EVENT_PATH)"),
+              repo_name: str = common["repo_name"]) -> None:
+        """Print the GitHub user id a pull request's bounty is paid to: its author, or the person who ran the bot
+        that opened it. Exit 1, saying why, when nobody can be named."""
+        _pull, _issue, paid = _who(event, repo_name, "", None)
+        if not paid or not paid.get("id"):
+            raise Stop((paid or {}).get("why") or "not a pull request event")
+        print(paid["id"])
 
     @proof.command("judge")
     def judge_cmd(base: Path = typer.Option(..., "--base", help="the base branch checkout"),
@@ -123,7 +167,8 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
                   diff: Path = common["diff"], evidence: Path = common["evidence"], store: Path = common["store"],
                   repo_name: str = common["repo_name"], agent: str = common["agent"],
                   body_file: Path = common["body_file"], checks_file: Path = common["checks_file"],
-                  head: str = common["head"], wait: int = common["wait"]) -> None:
+                  head: str = common["head"], wait: int = common["wait"],
+                  event: Path = common["event"], issue_file: Path = common["issue_file"]) -> None:
         """Tests mode: the gate, then the funder's acceptance checks in a sandbox (fail on the base, pass on the pull
         request). Exit 1 unless it passes."""
         from .. import judge
@@ -134,8 +179,9 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
         if changed:
             names = [x.strip() for x in changed.read_text(encoding="utf-8").splitlines() if x.strip()]
         st, diff_text, body, runs = _inputs(store, diff, body_file, checks_file, repo_name, head, wait)
+        pull, issue_data, paid = _who(event, repo_name, issue, issue_file)
         _say(judge.judge_with_rules(base, pr, cfg, names, diff_text, st, repo_name or None, agent or None, body, runs,
-                                    setup or None, sandbox), evidence)
+                                    setup or None, sandbox, pull, issue_data, paid), evidence)
 
     @proof.command("observe")
     def observe(sha: str = typer.Argument(...), check: str = typer.Argument(..., help="e.g. ci"),

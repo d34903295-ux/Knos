@@ -88,6 +88,13 @@ def test_caller_workflow_has_no_secret_and_front_matches():
     wf_js = re.search(r"export const WORKFLOW = `(.*?)`;\n", js, re.DOTALL).group(1)
     wf_js = wf_js.replace("${KNOS_SHA}", "KNOS_COMMIT_SHA").replace("${KNOS_RELAY_SHA}", "KNOS_COMMIT_SHA")
     assert wf_js.replace("\\${{", "${{").replace("\\\\", "\\") == wf
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("front_workflow", ROOT / "scripts" / "front_workflow.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main(["--check"]) == 0          # both templates the site hands out are the examples, byte for byte
+    check = re.search(r"export const CHECK_WORKFLOW = `(.*?)`;\n", js, re.DOTALL).group(1)
+    assert "check.yml@${KNOS_SHA}" in check and "id-token" not in check
     net = (ROOT / ".github" / "workflows" / "network.yml").read_text(encoding="utf-8")
     assert 'bash scripts/build_site.sh _site "$GITHUB_SHA"' in net
     assert 's/KNOS_COMMIT_SHA/$sha/g' in (ROOT / "scripts" / "build_site.sh").read_text(encoding="utf-8")

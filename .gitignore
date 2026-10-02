@@ -30,3 +30,6 @@ id_rsa*
 node_modules/
 programs/target
 examples/*/target
+
+# agent tooling scratch
+.claude/

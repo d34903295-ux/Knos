@@ -15,9 +15,10 @@ the PR's author or the human who assigned the agent (self repos are not a market
 and classifies CI at each head SHA. The build writes:
 
     {"date", "window", "n_prs", "excluded_self_repo", "overall": {...}, "agents": {name: {claimed_green,
-     actually_failed, share, ci95: [lo, hi]}}, "prs": [...], "root"}
+     actually_failed, share, ci95: [lo, hi], by_repo: {repos, failed, share, ci95}}}, "prs": [...], "root"}
 
-`ci95` is the 95% Wilson interval of `share`. `root` is the sha256 Merkle root over the per-PR records, so anyone can
+`ci95` is the 95% Wilson interval of `share`. `by_repo` counts one pull request per repository (its first in the
+window), so one busy repository cannot move the figure; it is the one the docs quote first. `root` is the sha256 Merkle root over the per-PR records, so anyone can
 check that the published list is the one that was counted: recompute it with `python scripts/agent_pr_index.py check`.
 """
 import argparse
@@ -71,14 +72,28 @@ def tally(mine):
             "share": round(failed / green, 4) if green else None, "ci95": wilson(failed, green)}
 
 
+def by_repo(mine):
+    """One pull request per repository: the first (lowest-numbered) one in the window. A repository whose agent opened
+    150 failing pull requests then counts once, like a repository with one; this is the figure to quote."""
+    first = {}
+    for r in mine:
+        key = r["repo"].lower()
+        if key not in first or r["number"] < first[key]["number"]:
+            first[key] = r
+    failed = sum(1 for r in first.values() if r["class"] == "failed")
+    n = len(first)
+    return {"repos": n, "failed": failed, "share": round(failed / n, 4) if n else None, "ci95": wilson(failed, n)}
+
+
 def build(rows, date, window, excluded=0):
     """rows: classified candidates with a claim; only those whose CI had finished at the head SHA are counted and
     listed. Deterministic for the same rows (order-independent)."""
     prs = sorted((record(r) for r in rows if r.get("class") in COMPLETED), key=lambda r: (r["repo"].lower(), r["number"]))
-    agents = {name: tally([r for r in prs if r["agent"] == name]) for name, _ in agent_pr_ci.AGENTS}
+    agents = {name: {**tally(mine), "by_repo": by_repo(mine)}
+              for name, _ in agent_pr_ci.AGENTS for mine in [[r for r in prs if r["agent"] == name]]}
     root = merkle_root([leaf(r) for r in prs])
     return {"date": date, "window": list(window), "n_prs": len(prs), "excluded_self_repo": excluded,
-            "overall": tally(prs), "agents": agents, "prs": prs, "root": root.hex()}
+            "overall": {**tally(prs), "by_repo": by_repo(prs)}, "agents": agents, "prs": prs, "root": root.hex()}
 
 
 def check(path):

@@ -1,9 +1,11 @@
 """The knos command line.
 
     knos init                 the free Stop hook: your coding agent cannot say done while Knos cannot prove it
+    knos mcp                  paid bounties and claim checks for a coding agent, over MCP (knos init registers it)
     knos proof ...            the same checks by hand; and the judge GitHub runs on a bounty's pull request
     knos bounty owner/repo#7  what is in escrow for an issue, and its state
     knos due <github login>   what is waiting for a GitHub account to claim
+    knos claim <address>      send it to a Solana address, in one command (uses your gh login)
     knos relay                carry GitHub-signed tokens to Solana (what the always-on worker runs; anyone can)
     knos mainnet-check        every gate that must hold before mainnet, with its evidence
 
@@ -63,9 +65,11 @@ def _main(_v: bool = typer.Option(False, "--version", callback=_version, is_eage
 
 @app.command()
 def init(undo: bool = typer.Option(False, "--undo", help="remove what knos init added"),
-         hosts: str = typer.Option(None, "--hosts", help="claude,codex (default: every one installed here)")) -> None:
-    """Install the Stop hook for Claude Code and Codex: no "done" Knos cannot prove. Free; nothing leaves this machine
-    except the public GitHub and PyPI lookups a claim needs."""
+         hosts: str = typer.Option(None, "--hosts",
+                                   help="claude,codex,cursor,gemini (default: every one installed here)")) -> None:
+    """Install the Stop hook for Claude Code and Codex: no "done" Knos cannot prove. And register `knos mcp` with them,
+    Cursor and Gemini CLI, so an agent can find paid bounties. Free; nothing leaves this machine except the public
+    GitHub, PyPI and Solana lookups a claim or a tool needs."""
     from . import init as setup
     picked = [h.strip() for h in hosts.split(",") if h.strip()] if hosts else None
     rep = setup.undo(picked) if undo else setup.install(picked)
@@ -73,16 +77,24 @@ def init(undo: bool = typer.Option(False, "--undo", help="remove what knos init 
         out.print(f"  removed {what} (it moved to knos-labs in 0.3.10)", markup=False)
     for host, where in rep["done"]:
         out.print(f"  {'removed from' if undo else 'Stop hook for'} {host}: {where}", markup=False)
+    for host, where in rep["mcp"]:
+        out.print(f"  {'removed from' if undo else 'MCP server for'} {host}: {where}", markup=False)
     for host, why in rep["skipped"]:
         out.print(f"  skipped {host}: {why}", markup=False)
     if undo:
-        out.print("Knos is out of your agents' settings." if rep["done"] or rep["removed"] else "Nothing of Knos's was installed.")
+        out.print("Knos is out of your agents' settings." if rep["done"] or rep["mcp"] or rep["removed"]
+                  else "Nothing of Knos's was installed.")
         return
-    if not rep["done"]:
-        raise Stop("No coding agent Knos knows (Claude Code, Codex) is installed here.",
+    if not rep["done"] and not rep["mcp"]:
+        raise Stop("No coding agent Knos knows (Claude Code, Codex, Cursor, Gemini CLI) is installed here.",
                    "Install one, or name it: knos init --hosts claude")
-    out.print("From the next session, when your agent says tests pass, CI is green, it shipped or it is done, Knos "
-              "runs that check itself before the agent may stop. Undo: knos init --undo")
+    if rep["done"]:
+        out.print("From the next session, when your agent says tests pass, CI is green, it shipped or it is done, Knos "
+                  "runs that check itself before the agent may stop.")
+    if rep["mcp"]:
+        out.print("From the next session your agent can also ask Knos for paid bounties (knos_bounties) and whether a "
+                  "pull request's claims are true (knos_check_pr).")
+    out.print("Undo: knos init --undo")
 
 
 @app.command("hook", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -92,6 +104,14 @@ def hook_cmd(ctx: typer.Context, which: str = typer.Argument(...)) -> None:
         from .proof import hook
         raise typer.Exit(hook.main_proof(list(ctx.args)))
     raise typer.Exit(0)
+
+
+@app.command()
+def mcp() -> None:
+    """Paid bounties and claim checks for a coding agent, over MCP on stdio. Read-only: no key, no wallet. An agent
+    host starts this; `knos init` registers it."""
+    from . import mcp as server
+    raise typer.Exit(server.main())
 
 
 def _register_proof() -> None:
@@ -163,8 +183,21 @@ def due(login: str = typer.Argument(..., help="a GitHub login")) -> None:
         out.print(f"Paid for {rep.paid_jobs} pull request(s) in {rep.repositories} repositor{'y' if rep.repositories == 1 else 'ies'}: "
                   f"{_usdc(rep.total_paid)} in all.", markup=False)
     if got:
-        out.print("Claim it to any Solana address from a repository you own: "
-                  "https://drexthealpha.github.io/Knos/#claim", markup=False)
+        out.print("Claim it to any Solana address: knos claim <address>   (or in the browser: "
+                  "https://drexthealpha.github.io/Knos/#claim)", markup=False)
+
+
+@app.command()
+def claim(address: str = typer.Argument(..., help="the Solana address that should receive it"),
+          repo: str = typer.Option(None, "--repo", help="a repository you own to run the claim in (default: <you>/knos-claim, created if missing)"),
+          wait: int = typer.Option(600, "--wait", help="seconds to wait for the money to arrive")) -> None:
+    """Send everything waiting under your GitHub account to a Solana address. Uses your `gh` login: GitHub signs the
+    claim in a repository you own (yours/knos-claim, created public with one workflow file if you have none)."""
+    from . import claim as claiming
+    try:
+        claiming.claim(address, repo, wait, say=lambda s: out.print(s, markup=False))
+    except claiming.Cannot as why:
+        raise Stop(str(why)) from None
 
 
 @app.command()

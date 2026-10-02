@@ -100,7 +100,7 @@ def test_the_test_command_follows_the_language(tmp_path):
     assert checks.test_command(tmp_path) == "" and checks.test_command(tmp_path, "make test") == "make test"
 
 
-def test_init_installs_only_the_stop_hook_and_undo_removes_it(knos_home, _isolated):
+def test_init_installs_the_stop_hook_and_undo_removes_it(knos_home, _isolated):
     from knos import init
     home = _isolated
     (home / ".claude").mkdir()
@@ -129,18 +129,168 @@ def test_init_removes_what_older_versions_installed(knos_home, _isolated):
                      "SessionStart": [{"hooks": [{"type": "command", "command": "knos hook start --client claude #knos-guard"}]}],
                      "Stop": [{"hooks": [{"type": "command", "command": "knos hook proof --client claude #knos-guard"}]}]}}
     (home / ".claude" / "settings.json").write_text(json.dumps(old), "utf-8")
-    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"knos": {"command": "knos", "args": ["mcp"]},
+    # an older install whose interpreter is gone (a host then fails to start the server at all)
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"knos": {"command": "C:/python.exe", "args": ["-m", "knos", "mcp"]},
                                                                   "other": {"command": "x"}}}), "utf-8")
     (home / ".codex").mkdir()
-    (home / ".codex" / "config.toml").write_text('model = "x"\n\n[mcp_servers.knos]\ncommand = "knos"\nargs = ["mcp"]\n\n[other]\na = 1\n', "utf-8")
+    (home / ".codex" / "config.toml").write_text('model = "x"\n\n[mcp_servers.knos]\ncommand = "C:/python.exe"\nargs = ["-m", "knos", "mcp"]\n\n[other]\na = 1\n', "utf-8")
     rep = init.install()
     assert any("MCP server" in x for x in rep["removed"])
     hooks = json.loads((home / ".claude" / "settings.json").read_text())["hooks"]
     assert set(hooks) == {"PreToolUse", "Stop"} and json.dumps(hooks).count("knos-guard") == 1
     assert hooks["PreToolUse"] == [{"matcher": "Bash", "hooks": [{"type": "command", "command": "other"}]}]
-    assert json.loads((home / ".claude.json").read_text())["mcpServers"] == {"other": {"command": "x"}}
+    command, args = init.mcp_server()                                  # the old entry is replaced by this version's
+    assert args == ["mcp"] and Path(command).is_absolute()
+    assert json.loads((home / ".claude.json").read_text())["mcpServers"] == {
+        "other": {"command": "x"}, "knos": {"type": "stdio", "command": command, "args": ["mcp"]}}
     toml = (home / ".codex" / "config.toml").read_text()
-    assert "mcp_servers.knos" not in toml and "[other]" in toml and 'model = "x"' in toml
+    assert toml == f'model = "x"\n\n[other]\na = 1\n\n[mcp_servers.knos]\ncommand = {json.dumps(command)}\nargs = ["mcp"]\n'
+    assert init.install()["removed"] == []                             # and this version's is not an old one
+    rep = init.undo()                                                  # undo takes this version's out as well
+    assert json.loads((home / ".claude.json").read_text()) == {"mcpServers": {"other": {"command": "x"}}}
+    assert (home / ".codex" / "config.toml").read_text() == 'model = "x"\n\n[other]\na = 1\n'
+    assert {h for h, _ in rep["mcp"]} == {"claude", "codex"}
+
+
+def test_init_registers_the_mcp_server_with_every_host_that_is_here_and_undo_puts_the_files_back(knos_home, _isolated):
+    from knos import init
+    home = _isolated
+    for folder in (".claude", ".codex", ".cursor", ".gemini"):
+        (home / folder).mkdir()
+    as_written = lambda data: json.dumps(data, indent=2) + "\n"  # noqa: E731
+    before = {
+        home / ".claude.json": as_written({"numStartups": 7, "mcpServers": {"zeta": {"command": "z"}, "alpha": {"command": "a"}},
+                                           "projects": {"/r": {"allowedTools": []}}}),
+        home / ".gemini" / "settings.json": as_written({"theme": "Dracula", "selectedAuthType": "oauth-personal"}),
+        home / ".codex" / "config.toml": '# mine\nmodel = "o3"\n\n[mcp_servers.other]\ncommand = "x"   # keep\n',
+    }
+    for path, text in before.items():
+        path.write_text(text, "utf-8")
+    rep = init.install()
+    assert [h for h, _ in rep["mcp"]] == ["claude", "codex", "cursor", "gemini"] and rep["removed"] == []
+    assert [h for h, _ in rep["done"]] == ["claude", "codex"]          # the Stop hook stays with the two that have one
+    command, args = init.mcp_server()
+    entry = {"type": "stdio", "command": command, "args": ["mcp"]}
+    claude = json.loads((home / ".claude.json").read_text())
+    assert list(claude) == ["numStartups", "mcpServers", "projects"] and claude["projects"] == {"/r": {"allowedTools": []}}
+    assert list(claude["mcpServers"]) == ["zeta", "alpha", "knos"] and claude["mcpServers"]["knos"] == entry
+    assert json.loads((home / ".cursor" / "mcp.json").read_text()) == {"mcpServers": {"knos": entry}}
+    gemini = json.loads((home / ".gemini" / "settings.json").read_text())
+    assert gemini == {"theme": "Dracula", "selectedAuthType": "oauth-personal",
+                      "mcpServers": {"knos": {"command": command, "args": ["mcp"]}}}
+    toml = (home / ".codex" / "config.toml").read_text()
+    assert toml == before[home / ".codex" / "config.toml"] + f'\n[mcp_servers.knos]\ncommand = {json.dumps(command)}\nargs = ["mcp"]\n'
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+    assert tomllib.loads(toml)["mcp_servers"] == {"other": {"command": "x"}, "knos": {"command": command, "args": ["mcp"]}}
+    after = {p: p.read_text() for p in [*before, home / ".cursor" / "mcp.json"]}
+    init.install()                                                     # a second init changes nothing
+    assert {p: p.read_text() for p in after} == after
+    for path, text in before.items():                                  # each file as it was before Knos first changed it
+        assert path.with_name(path.name + ".knos-backup").read_text() == text
+    rep = init.undo()
+    assert [h for h, _ in rep["mcp"]] == ["claude", "codex", "cursor", "gemini"] and rep["removed"] == []
+    assert {p: p.read_text() for p in before} == before                # byte for byte
+    assert not (home / ".cursor" / "mcp.json").exists()                # the file Knos created is gone again
+    assert init.undo()["mcp"] == []
+
+
+def test_init_leaves_a_working_knos_server_and_everything_else_in_a_users_files_alone(knos_home, _isolated):
+    """A `knos mcp` entry that still starts (another install's, or one a registry wrote) is not touched; Codex's TOML
+    keeps its comments, its line endings and its other tables whatever shape the old knos table had; a file knos
+    cannot read is skipped; the backup keeps the original's permissions."""
+    import os
+    import sys
+
+    from knos import init
+    home = _isolated
+    for folder in (".claude", ".codex"):
+        (home / folder).mkdir()
+    working = {"command": sys.executable, "args": ["-m", "knos", "mcp"], "env": {"GH_TOKEN": "x"}}
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"knos": working}}, indent=2) + "\n", "utf-8")
+    os.chmod(home / ".claude.json", 0o600)
+    toml = home / ".codex" / "config.toml"
+    old = ('model = "o3"\r\n\r\n[mcp_servers."knos"]   # old\r\ncommand = "C:/gone/python.exe"\r\nargs = ["-m", "knos", "mcp"]\r\n'
+           '[mcp_servers.knos.env]\r\nA = "1"\r\n\r\n# about the next table\r\n[mcp_servers.other]\r\ncommand = "x"\r\n')
+    toml.write_bytes(old.encode())
+    rep = init.install()
+    assert json.loads((home / ".claude.json").read_text())["mcpServers"]["knos"] == working      # left exactly as it was
+    assert not (home / ".claude.json.knos-backup").exists()
+    command, _ = init.mcp_server()
+    got = toml.read_bytes().decode()
+    assert got == ('model = "o3"\r\n\r\n# about the next table\r\n[mcp_servers.other]\r\ncommand = "x"\r\n'
+                   f'\r\n[mcp_servers.knos]\r\ncommand = {json.dumps(command)}\r\nargs = ["mcp"]\r\n')
+    assert any("config.toml" in x for x in rep["removed"])
+    # the user adds a setting to the table knos wrote: a later init keeps it, and undo leaves a table that is no longer only knos's
+    toml.write_bytes((got + 'startup_timeout_sec = 20\r\n').encode())
+    kept = toml.read_bytes()
+    init.install()
+    assert toml.read_bytes() == kept
+    # a file that is not text, or not TOML, is skipped and never rewritten
+    toml.write_bytes(b"\xff\xfe not utf-8")
+    rep = init.install()
+    assert toml.read_bytes() == b"\xff\xfe not utf-8" and any(h == "codex" for h, _ in rep["skipped"])
+    toml.write_bytes(b"[mcp_servers.knos]\n[mcp_servers.knos]\n")
+    init.install()
+    assert toml.read_bytes() == b"[mcp_servers.knos]\n[mcp_servers.knos]\n"
+    # a dead entry in a private file: replaced, and the backup is as private as the original
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"knos": {"command": "/gone/knos", "args": ["mcp"]}}}), "utf-8")
+    os.chmod(home / ".claude.json", 0o600)
+    init.install()
+    assert json.loads((home / ".claude.json").read_text())["mcpServers"]["knos"]["command"] == command
+    if os.name != "nt":
+        assert (home / ".claude.json.knos-backup").stat().st_mode & 0o777 == 0o600
+        assert (home / ".claude.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_init_touches_cursor_and_gemini_only_when_they_are_installed(knos_home, _isolated):
+    from knos import init
+    home = _isolated
+    (home / ".claude").mkdir()
+    rep = init.install()
+    assert [h for h, _ in rep["mcp"]] == ["claude"] and not (home / ".cursor").exists() and not (home / ".gemini").exists()
+    assert {h for h, _ in rep["skipped"]} == {"codex"}                 # the two without a hook are not even mentioned
+    rep = init.install(["cursor", "gemini", "vim"])                    # named, and still not here
+    assert rep["mcp"] == [] and not (home / ".cursor").exists()
+    assert dict(rep["skipped"])["cursor"] == "not installed here" and "unknown host" in dict(rep["skipped"])["vim"]
+
+
+def test_init_keeps_a_knos_server_someone_extended_and_another_install_s_is_replaced(knos_home, _isolated):
+    from knos import init
+    home = _isolated
+    (home / ".cursor").mkdir()
+    command, _ = init.mcp_server()
+    mine = {"command": command, "args": ["mcp"], "env": {"GH_TOKEN": "t"}}
+    path = home / ".cursor" / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": {"knos": mine}}), "utf-8")
+    assert init.install(["cursor"])["removed"] == [] and json.loads(path.read_text())["mcpServers"]["knos"] == mine
+    path.write_text(json.dumps({"mcpServers": {"knos": {"command": "/old/venv/bin/knos", "args": ["mcp"]}, "x": {"command": "x"}}}), "utf-8")
+    rep = init.install(["cursor"])
+    assert rep["removed"] == [f"the knos MCP server in {path}"]
+    assert json.loads(path.read_text())["mcpServers"] == {"x": {"command": "x"}, "knos": {"type": "stdio", "command": command, "args": ["mcp"]}}
+    bad = home / ".cursor" / "mcp.json"
+    bad.write_text(json.dumps({"mcpServers": ["knos"]}), "utf-8")      # not a table of servers: left exactly as it is
+    rep = init.install(["cursor"])
+    assert rep["mcp"] == [] and "left it alone" in dict(rep["skipped"])["cursor"] and json.loads(bad.read_text()) == {"mcpServers": ["knos"]}
+
+
+def test_knos_init_prints_one_line_for_each_hook_and_each_mcp_server(knos_home, _isolated, capsys):
+    from knos.cli import main
+    home = _isolated
+    (home / ".claude").mkdir()
+    (home / ".gemini").mkdir()
+    assert main(["init"]) == 0
+    said = capsys.readouterr().out
+    assert f"Stop hook for claude: {home / '.claude' / 'settings.json'}" in said.replace("\n", "")
+    assert f"MCP server for claude: {home / '.claude.json'}" in said.replace("\n", "")
+    assert f"MCP server for gemini: {home / '.gemini' / 'settings.json'}" in said.replace("\n", "")
+    assert "knos_bounties" in said and "Undo: knos init --undo" in said
+    assert main(["init", "--undo"]) == 0
+    said = capsys.readouterr().out.replace("\n", "")
+    assert f"removed from gemini: {home / '.gemini' / 'settings.json'}" in said and "Knos is out of your agents' settings." in said
+    assert not (home / ".claude.json").exists() and not (home / ".gemini" / "settings.json").exists()
 
 
 def test_a_settings_file_knos_cannot_read_is_left_alone(knos_home, _isolated):

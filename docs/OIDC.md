@@ -21,22 +21,32 @@ It has no admin and no upgrade authority, charges nothing, and does not know Kno
 
 A verified token is an account owned by knos-oidc. Your program reads it. There is no CPI and no oracle.
 
-```rust
-use knos_oidc::claims::{fields, number, text};
+The interface crate, [`crates/knos-oidc-interface`](../crates/knos-oidc-interface), has no dependency and does not
+allocate, so it builds with solana-program, pinocchio or anchor of any version:
 
-if *token.owner != OIDC_ID { return Err(ProgramError::IllegalOwner); }
-let data = token.try_borrow_data()?;
-let v = knos_oidc::verified(&data).ok_or(ProgramError::InvalidAccountData)?;      // None unless fully verified
-if v.issuer != knos_oidc::pins::ISSUER_GITHUB || !knos_oidc::fresh(v.exp, clock.unix_timestamp) {
-    return Err(ProgramError::InvalidAccountData);
-}
-let [repo, sha, runner, aud] = fields(v.payload, [b"repository_id", b"sha", b"runner_environment", b"aud"])?;
-if text(runner)? != b"github-hosted" || text(aud)? != b"my-app:release" { return Err(ProgramError::InvalidArgument); }
-let (repo, sha) = (number(repo)?, text(sha)?);          // facts GitHub signed
+```toml
+knos-oidc-interface = { git = "https://github.com/drexthealpha/Knos", tag = "v0.3.11" }
 ```
 
-In `Cargo.toml`: `knos_oidc = { path = "...", features = ["no-entrypoint"] }`. Reading a verified token cost 22,515
-compute units in the example.
+```rust
+use knos_oidc_interface::{Token, ISSUER_GITHUB};
+
+let data = token.try_borrow_data()?;
+// refuses an account knos-oidc does not own, a token not verified to the end, and one over an hour past its expiry
+let tok = Token::read(&token.owner.to_bytes(), &data, clock.unix_timestamp).map_err(|_| ProgramError::InvalidAccountData)?;
+if tok.issuer() != ISSUER_GITHUB { return Err(ProgramError::InvalidAccountData); }
+let repo = tok.claim_u64("repository_id").ok_or(ProgramError::InvalidArgument)?;
+let sha = tok.claim("sha").ok_or(ProgramError::InvalidArgument)?;
+let runner = tok.claim("runner_environment").ok_or(ProgramError::InvalidArgument)?;
+let aud = tok.audience().ok_or(ProgramError::InvalidArgument)?;
+if !runner.is("github-hosted") || !aud.is("my-app:release") { return Err(ProgramError::InvalidArgument); }
+// repo and sha are facts GitHub signed
+```
+
+[`examples/oidc_gate`](../examples/oidc_gate) is a whole program written this way, with its test; reading a verified
+token costs it 21,632 compute units. The instructions and account layouts of both programs are in
+[`idl/`](../idl) (Shank format, checked against the clients by `tests/test_idl.py`). From JavaScript:
+[`sdk/settle`](../sdk/settle), one file with no dependency, attached to every release as an npm tarball.
 
 Three things your program must decide for itself, because knos-oidc only says the token is genuine:
 
@@ -84,5 +94,6 @@ A token account belongs to whoever paid for it; nobody else can write or close i
 
 - Tokens up to 8,192 bytes. RS256 only, 2048- or 4096-bit keys. GitHub Actions and GitLab issuers.
 - A token is accepted until one hour after its `exp` (GitHub's tokens live five minutes; relaying takes time).
-- Immutable means bugs are forever too. That is why it has been tested the way [BENCH.md](BENCH.md) describes, and
-  why mainnet waits for an outside audit.
+- Immutable means bugs are forever too, and a key the program trusts cannot be revoked
+  ([SECURITY.md](SECURITY.md), "Known limits of this version"). That is why it has been tested the way
+  [BENCH.md](BENCH.md) describes, why it is on devnet only, and why mainnet waits for an outside audit.

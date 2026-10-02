@@ -43,19 +43,23 @@
       <div id="protect-result" role="status" aria-live="polite"></div>
     </form>
     <ol class="steps">
-      <li><strong>Protect the repo</strong> (above). Every pull request that closes a funded issue then gets a Knos
-        check: the repo's own rules, and whether a "tests pass" in its description is true.</li>
+      <li><strong>Protect the repo</strong> (above). Every pull request then gets a Knos check that runs none of its
+        code: the repo's own rules, and whether a "tests pass" in its description is true. The check alone is free
+        and needs no money at all.</li>
       <li><strong>Fund an issue</strong> by commenting <code>/knos bounty 20</code> on it. That is the whole step
         (<a href="#bounty">details</a>).</li>
-      <li><strong>Merge the pull request you want.</strong> GitHub signs that it was merged, Solana checks the
-        signature, and an hour later the bounty belongs to the author's GitHub account (until then
-        <code>/knos veto</code> takes it back). They <a href="#claim">claim it</a> to any address, whenever they like.</li>
+      <li><strong>Merge the pull request you want.</strong> Knos runs its check once more at the merged commit; if it
+        holds, GitHub signs that the pull request was merged, Solana checks the signature, and an hour later the
+        bounty belongs to the author's GitHub account (until then <code>/knos veto</code> takes it back). A pull
+        request an agent opened under a bot account pays the person who ran it. They
+        <a href="#claim">claim it</a> to any address, whenever they like.</li>
     </ol>
     <p class="fine">Devnet: the money is test USDC. Read live from the public GitHub API and Solana in your browser;
       there is no Knos server. Agent records come from the <a href="index.json">Agent PR Index</a>, rebuilt every 6 hours.</p>
-    <p class="fine"><strong>Free, for your own agent:</strong> <code>pipx install knos</code> then <code>knos init</code>
-      adds a Stop hook to Claude Code and Codex. When the agent says tests pass, CI is green or it is done, Knos runs
-      that check itself before the agent may stop.</p>
+    <p class="fine"><strong>For your own agent:</strong> <code>pipx install knos</code> then <code>knos init</code>.
+      It adds a Stop hook to Claude Code and Codex (when the agent says tests pass, CI is green or it is done, Knos
+      runs that check itself before the agent may stop) and an MCP server, <code>knos mcp</code>, that lets the agent
+      list funded issues it can take, check a pull request's claims, and see what its operator is owed.</p>
   </section>
 
   <section id="view-bounty" class="view" hidden>
@@ -117,8 +121,16 @@
       <button type="submit" id="due-go">See what is waiting</button>
       <div id="due-result" role="status" aria-live="polite"></div>
     </form>
+    <div class="card">
+      <h2>Claim it with one command</h2>
+      <pre>pipx install knos
+knos claim YOUR_SOLANA_ADDRESS</pre>
+      <p class="fine">It uses your <code>gh</code> login: GitHub signs the claim in a repository you own
+        (<code>you/knos-claim</code>, created with one workflow file if you have none), a relayer carries it to Solana
+        and pays the fee, and the command waits until the money has arrived.</p>
+    </div>
     <form id="claim-form" class="card">
-      <h2>Claim it</h2>
+      <h2>Or in the browser</h2>
       <label for="claim-repo">A repository you own (any; a new empty one is fine)</label>
       <input id="claim-repo" type="text" autocomplete="off" required placeholder="octocat/hello-world">
       <label for="claim-branch">Its default branch</label>
@@ -148,16 +160,23 @@
       which account ran it. It has no admin and cannot be upgraded.</p>
     <div class="card">
       <h2>Use it from your program</h2>
-      <p>A verified token is an account owned by knos-oidc. Read it; do not call anything.</p>
-      <pre>if *token.owner != OIDC_ID { return Err(ProgramError::IllegalOwner); }
+      <p>A verified token is an account owned by knos-oidc. Read it; do not call anything. The interface crate has no
+        dependency, so it builds with solana-program, pinocchio or anchor of any version.</p>
+      <pre>knos-oidc-interface = { git = "https://github.com/drexthealpha/Knos", tag = "v0.3.11" }</pre>
+      <pre>use knos_oidc_interface::{Token, ISSUER_GITHUB};
+
 let data = token.try_borrow_data()?;
-let v = knos_oidc::verified(&amp;data).ok_or(ProgramError::InvalidAccountData)?;
-if !knos_oidc::fresh(v.exp, clock.unix_timestamp) { return Err(ProgramError::InvalidAccountData); }
-let [repo, sha, runner] = fields(v.payload, [b"repository_id", b"sha", b"runner_environment"])?;
-// number(repo)?, text(sha)?, text(runner)? are now facts GitHub signed</pre>
+// refuses an account knos-oidc does not own, a token not verified to the end, and a stale one
+let tok = Token::read(&amp;token.owner.to_bytes(), &amp;data, now).map_err(|_| ProgramError::InvalidAccountData)?;
+if tok.issuer() != ISSUER_GITHUB { return Err(ProgramError::InvalidAccountData); }
+let repo = tok.claim_u64("repository_id").ok_or(ProgramError::InvalidArgument)?;
+let sha = tok.claim("sha").ok_or(ProgramError::InvalidArgument)?;
+// repo and sha are now facts GitHub signed; check the audience and keep your own replay guard</pre>
       <p class="fine">A complete example program with its test:
         <a href="https://github.com/drexthealpha/Knos/tree/main/examples/oidc_gate">examples/oidc_gate</a>.
-        A JavaScript client with no dependency:
+        The crate: <a href="https://github.com/drexthealpha/Knos/tree/main/crates/knos-oidc-interface">crates/knos-oidc-interface</a>.
+        IDLs of both programs: <a href="https://github.com/drexthealpha/Knos/tree/main/idl">idl/</a>.
+        A JavaScript client with no dependency (an npm tarball on every release):
         <a href="https://github.com/drexthealpha/Knos/tree/main/sdk/settle">sdk/settle</a>.</p>
     </div>
     <div class="card">

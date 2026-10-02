@@ -1,0 +1,88 @@
+# Knos on its own repository: issues here are funded, checked and paid exactly as in any repository that installed
+# examples/knos-workflow.yml. The one difference is the pin. A repository cannot name its own commit before that
+# commit exists, and a bounty is paid only from the workflow commit it pinned, so this file pins the previous
+# release's commit (0.3.10); each release moves it forward by one. Every other repository pins the commit the site
+# gives it.
+name: knos
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, closed]
+  issue_comment:
+    types: [created]
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  # ---- /knos bounty <amount>, /knos veto on an issue ---------------------------------------------------------------
+  fund:
+    if: >-
+      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
+       (startsWith(github.event.comment.body, '/knos bounty ') || startsWith(github.event.comment.body, '/knos veto'))) ||
+      (github.event_name == 'issues' && contains(github.event.issue.body, '/knos bounty '))
+    permissions:
+      contents: read
+      id-token: write
+    uses: drexthealpha/Knos/.github/workflows/fund.yml@0e76b28d1c361602792e9b9fb35c8656995f4a60
+
+  fund-relay:
+    needs: fund
+    if: needs.fund.outputs.issue != ''
+    permissions:
+      issues: write
+      pull-requests: write
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@0e76b28d1c361602792e9b9fb35c8656995f4a60
+    with:
+      kind: ${{ needs.fund.outputs.kind }}
+      number: ${{ fromJSON(needs.fund.outputs.issue) }}
+
+  # ---- a pull request that says "Fixes #N" -------------------------------------------------------------------------
+  job:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    outputs:
+      issue: ${{ steps.id.outputs.issue }}
+    steps:
+      - id: id
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          issue=$(printf '%s\n' "$BODY" | grep -oiE '\b(fixes|closes|resolves)[[:space:]]+#[0-9]+' | head -1 | grep -oE '[0-9]+$' || true)
+          echo "issue=$issue" >> "$GITHUB_OUTPUT"
+          echo "issue=#$issue"
+
+  prove:
+    needs: job
+    if: needs.job.outputs.issue != ''
+    permissions:
+      contents: read
+      checks: read
+      issues: read
+      id-token: write
+    uses: drexthealpha/Knos/.github/workflows/prove.yml@0e76b28d1c361602792e9b9fb35c8656995f4a60
+    with:
+      issue: ${{ needs.job.outputs.issue }}
+
+  prove-relay:
+    needs: prove
+    if: needs.prove.outputs.passed == 'true'
+    permissions:
+      issues: write
+      pull-requests: write
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@0e76b28d1c361602792e9b9fb35c8656995f4a60
+    with:
+      kind: proof
+      number: ${{ github.event.pull_request.number }}
+
+  prove-refused:
+    needs: [job, prove]
+    if: always() && needs.job.outputs.issue != '' && needs.prove.result == 'failure'
+    permissions:
+      issues: write
+      pull-requests: write
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@0e76b28d1c361602792e9b9fb35c8656995f4a60
+    with:
+      kind: refused
+      number: ${{ github.event.pull_request.number }}

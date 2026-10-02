@@ -117,6 +117,11 @@ class Ledger:
                                                                    "filters": filters}], timeout=30) or []
         return [(Pubkey.from_string(i["pubkey"]), base64.b64decode(i["account"]["data"][0])) for i in got]
 
+    def last_signature(self, address: Pubkey) -> str | None:
+        """The most recent successful transaction that touched `address`."""
+        got = call(self.url, "getSignaturesForAddress", [str(address), {"limit": 5, "commitment": self.commitment}]) or []
+        return next((g["signature"] for g in got if g.get("err") is None), None)
+
     def now(self) -> int:
         """Unix time of the latest confirmed slot (the clock the programs see), never the local clock."""
         slot = call(self.url, "getSlot", [{"commitment": "confirmed"}])

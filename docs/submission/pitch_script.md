@@ -1,60 +1,60 @@
 # Pitch (under three minutes)
 
-Narration, about 450 words. Every number is in `docs/facts.json` with its source and is checked by
+Narration, about 470 words. Every number is in `docs/facts.json` with its source and is checked by
 `python scripts/claims_check.py`.
 
-## The problem (0:00)
+## The thesis (0:00)
 
-Coding agents open pull requests by the million, and they all say the same thing: "all tests pass."
+AI coding agents are paid for attempts. Knos pays them for results, on a signature nobody can fake.
 
-We took 2,431 agent pull requests that say tests or CI pass, and looked at what GitHub's CI recorded at
-that commit. In 660 of them, 27.2%, a check had failed.
+## The problem (0:10)
 
-So nobody can pay for agent work on the agent's word. One open-source bounty board went from 1,470 payouts in 2025
-to 175 this year.
+Agents open pull requests by the million, and they all say "all tests pass." We checked that against GitHub's own
+record. In 826 repositories, the first agent pull request that said so had a failing check in 147. That is 17.8%.
 
-## The insight (0:30)
+So nobody pays an agent on its word. Every coding agent is billed by the seat or the token, whatever comes out.
 
-A merchant ships goods a buyer cannot see. Trade solved it with the letter of credit: the
-bank pays against a document a third party signed, never against the seller's word.
+## The insight (0:35)
 
-For code, the third party exists. GitHub signs a statement about every workflow run. What was missing is a bank that
-can read that signature by itself, and that nobody controls.
+Where a seller can define the outcome, buyers already pay per outcome. One support agent charges 0.99 dollars per
+resolved conversation and is near 100 million dollars a year. But the seller decides what "resolved" means.
 
-## The product (0:55)
+Code is different. A neutral party already signs the outcome: GitHub records who opened a pull request, what its
+checks said, and who merged it. Trade has worked this way for centuries: a letter of credit pays against a document
+a third party signed, never against the seller's word. What was missing is a bank that reads GitHub's signature by
+itself, and that nobody controls.
+
+## The product (1:05)
 
 Knos is that bank, on Solana.
 
-A maintainer funds an issue with one comment: slash knos bounty 20. Anyone opens a pull request. No wallet, no
-sign-up. A maintainer merges it. GitHub signs that it was merged, a Solana program checks GitHub's RSA signature on
-chain, and the bounty goes to the author's GitHub account.
+A maintainer funds an issue with one comment. An agent opens a pull request. Knos checks its claims against GitHub's
+record without running its code. A maintainer merges it. GitHub signs that, a Solana program verifies the signature
+on chain, and the money goes to the GitHub account of whoever ran the agent. No wallet to do the work. One command
+to claim.
 
-Nobody sits between the proof and the payment. The program has no admin and no upgrade authority. GitHub's keys are
-fixed inside it, and a new key can enter only on GitHub's own signature.
+The program has no admin and no upgrade authority. Nobody sits between the proof and the payment, including me.
 
-## Why it holds (1:30)
+## Why it holds (1:40)
 
-It can never be patched, so we tested it that way. 517 Wycheproof vectors against the RSA
-code. 10,000 random steps against the escrow, no money lost. And 21 cheating pull requests: plain CI was fooled by
-17, our black-box check by none.
+It cannot be patched, so it was tested that way: 517 Wycheproof vectors against the RSA code, 10,000 random steps
+against the escrow with no money lost, and 21 cheating pull requests. Plain CI was fooled by 17, our black-box
+check by none.
 
-## The market (1:50)
+## The market (2:00)
 
-Bounties are the wedge. The market is every payment for agent work. Coding agents sell about 5 billion dollars a
-year of attempts, billed by the token whatever comes out. And 75 million agent payments a month already settle on
-chain with no proof of delivery. We take 2.5%, only when someone is paid, and the program does not let us raise it.
+Bounties are the wedge, and a small one: about 64 thousand dollars is open across every board today. The market is
+the 7 billion dollars a year paid for coding agents by usage. Knos is the meter that lets a buyer pay per merged
+pull request instead. We take 2.5%, only when someone is paid.
 
-The verifier itself is free: any Solana program can now require a fact that GitHub signed.
+## How it spreads (2:20)
 
-## How it spreads (2:15)
+The check is free: one file, and every pull request's claims are tested. Agents find paid work through an MCP
+server. And the person you pay finds money waiting under their GitHub name before they have heard of us.
 
-You paste a pull request and see whether its claim is true. You fund with a comment on
-GitHub. And the person you pay finds money waiting under their GitHub name before they have heard of us.
+## Who (2:40)
 
-## Who (2:30)
-
-I am drexthealpha, and I work alone. Knos won the Sibyl Labs hackathon in September as a memory tool. In this
-hackathon I measured the problem, tried several products around it, and kept the one that fixes it. It runs on
-devnet today. An audit comes before mainnet.
+I am drexthealpha. I work alone, with coding agents, all day. I built this because my own agents told me the tests
+passed when they had not. It runs on devnet today. Nobody outside has used it yet. An audit comes before real money.
 
 AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.

@@ -59,4 +59,5 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--bg); bord
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0; }
 .facts dt { font-weight: 600; color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
-a.button { display: inline-block; font-weight: 600; border-radius: 10px; padding: 10px 16px; background: var(--accent); color: var(--accent-fg); text-decoration: none; margin-top: 8px; }
+a.button { display: inline-block; font-weight: 600; border-radius: 10px; padding: 10px 16px; background: var(--accent); color: var(--accent-fg); text-decoration: none; margin: 8px 8px 0 0; }
+a.button.quiet { background: transparent; color: var(--accent); border: 1px solid var(--accent); padding: 9px 15px; }

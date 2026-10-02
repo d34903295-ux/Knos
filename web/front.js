@@ -105,11 +105,13 @@ export const WORKFLOW = `# .github/workflows/knos.yml - Knos on GitHub, with no 
 #      it to Solana, where knos-oidc checks GitHub's signature and knos-pay opens the bounty. Knos pays the gas.
 #   2. Someone opens a pull request whose body says "Fixes #N". No wallet, no address. prove.yml's check job runs
 #      on it: the repo's own rules, and whether a "tests pass" in its description is true at its head commit.
-#   3. A maintainer merges it. prove.yml asks GitHub for a token that says "pull request by GitHub user U closing
-#      issue N was merged"; on Solana the bounty is held for U's GitHub account and released an hour later (until
-#      then /knos veto on the issue takes it back; "/knos bounty <amount> review 0" pays at once). U claims it
-#      whenever they like, to any address, with a token from a workflow in a repository U owns
-#      (https://drexthealpha.github.io/Knos/#claim).
+#   3. A maintainer merges it. prove.yml runs that same check once more at the merged head and, only if it holds,
+#      asks GitHub for a token that says "pull request by GitHub user U closing issue N was merged"; on Solana the
+#      bounty is held for U's GitHub account and released an hour later (until then /knos veto on the issue takes
+#      it back; "/knos bounty <amount> review 0" pays at once). A pull request an agent opened under a bot account
+#      pays the person who ran it. U claims it whenever they like, to any address: knos claim <address>, or
+#      https://drexthealpha.github.io/Knos/#claim.
+#      An issue that is assigned to someone pays only their pull request; an unassigned one is open to anyone.
 #   Optional, pay without waiting for a merge: put acceptance checks for issue N in .knos/acceptance/N/ on the default
 #   branch before funding. prove.yml then runs them against each pull request in a sandbox, in a job with no token
 #   and no secret, and only if they pass does a second job, which runs no pull request code, mint the token. That
@@ -181,6 +183,7 @@ jobs:
     permissions:
       contents: read
       checks: read
+      issues: read
       id-token: write
     uses: drexthealpha/Knos/.github/workflows/prove.yml@${KNOS_SHA}
     with:
@@ -209,6 +212,36 @@ jobs:
       number: \${{ github.event.pull_request.number }}
 `;
 
+// The free check alone: exactly examples/knos-check.yml.
+export const CHECK_WORKFLOW = `# .github/workflows/knos-check.yml - the free Knos check on every pull request. No bounty, no money, no chain.
+#
+# When a pull request's description says its tests pass or CI is green, Knos compares that with GitHub's own record of
+# the head commit and fails the status "check / claims" when a check failed. It also applies this repository's
+# CONTRIBUTING rules and remembers what was caught before. It runs none of the pull request's code.
+#
+# Security: pull_request_target runs THIS file from the base branch, so a pull request cannot edit what runs here; the
+# job has contents: read and checks: read and nothing else; the Knos workflow is referenced by full commit sha.
+# To require it before merge: Settings > Rules > New branch ruleset > Require status checks > add "check / claims".
+name: knos check
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  check:
+    permissions:
+      contents: read
+      checks: read
+    uses: drexthealpha/Knos/.github/workflows/check.yml@${KNOS_SHA}
+`;
+
+export function checkUrl(owner, repo, branch) {
+  return `https://github.com/${owner}/${repo}/new/${encodeURIComponent(branch)}?filename=.github/workflows/knos-check.yml&value=${encodeURIComponent(CHECK_WORKFLOW)}`;
+}
+
 export function protectUrl(owner, repo, branch) {
   return `https://github.com/${owner}/${repo}/new/${encodeURIComponent(branch)}?filename=.github/workflows/knos.yml&value=${encodeURIComponent(WORKFLOW)}`;
 }
@@ -225,10 +258,13 @@ function protectRepo(ev) {
   const out = $("protect-result");
   if (!m) { out.textContent = "Enter owner/repo"; return; }
   const [, o, r] = m;
-  out.innerHTML = `<a class="button" id="protect-open" href="${esc(protectUrl(o, r, $("protect-branch")?.value || "main"))}" target="_blank" rel="noopener">Commit .github/workflows/knos.yml to ${esc(o)}/${esc(r)}</a>
-    <p class="fine">Then fund an issue: comment <code>/knos bounty 20</code> on it (<a href="#bounty">or open a funded issue</a>).
+  const branch = $("protect-branch")?.value || "main";
+  out.innerHTML = `<a class="button" id="protect-open" href="${esc(protectUrl(o, r, branch))}" target="_blank" rel="noopener">Check and pay: commit knos.yml to ${esc(o)}/${esc(r)}</a>
+    <a class="button quiet" id="protect-check" href="${esc(checkUrl(o, r, branch))}" target="_blank" rel="noopener">Check only, no money: commit knos-check.yml</a>
+    <p class="fine">Both check every pull request's "tests pass" against GitHub's record and run none of its code. With the
+      first, fund an issue by commenting <code>/knos bounty 20</code> on it (<a href="#bounty">or open a funded issue</a>).
       Optional: <a id="protect-rules" href="${esc(rulesetUrl(o, r))}" target="_blank" rel="noopener">make the Knos check required</a>
-      (on GitHub: Require status checks &gt; add "prove / check").</p>`;
+      (on GitHub: Require status checks &gt; add "prove / check", or "check / claims" for the check alone).</p>`;
 }
 
 // ---- UI ------------------------------------------------------------------------------------------------------------
@@ -240,12 +276,16 @@ function agentRecord(index, agent) {
   const a = agent && index.agents?.[agent];
   if (!a) return `<p class="fine">No record for ${agent ? esc(agent) : "this author"} in the Agent PR Index (${esc(index.date || "")}).</p>`;
   const pct = (x) => `${(x * 100).toFixed(1)}%`;
-  const share = a.share == null ? "n/a" : pct(a.share);
-  const ci = a.ci95 ? `, 95% interval ${pct(a.ci95[0])}–${pct(a.ci95[1])}` : "";
-  return `<p><strong>${esc(agent)}</strong> in the Agent PR Index (${esc(index.date)}): claimed tests pass on
-    <strong>${a.claimed_green}</strong> PRs with CI; CI actually failed on <strong>${a.actually_failed}</strong>
-    (<strong>${share}</strong>${ci}).${index.excluded_self_repo ? ` PRs on the author's own repos are excluded
-    (${index.excluded_self_repo}).` : ""}</p>`;
+  const ci = (c) => (c ? `, 95% interval ${pct(c[0])}–${pct(c[1])}` : "");
+  const all = `Counting every such pull request: ${a.actually_failed} of ${a.claimed_green}${a.share == null ? "" : ` (${pct(a.share)})`}.`;
+  const r = a.by_repo;
+  const lead = r && r.repos
+    ? `in <strong>${r.repos}</strong> repositories, its first pull request that said tests pass had a failing check in
+       <strong>${r.failed}</strong> (<strong>${pct(r.share)}</strong>${ci(r.ci95)}). ${all}`
+    : `said tests pass on <strong>${a.claimed_green}</strong> pull requests with finished CI; a check had failed on
+       <strong>${a.actually_failed}</strong> (<strong>${a.share == null ? "n/a" : pct(a.share)}</strong>${ci(a.ci95)}).`;
+  return `<p><strong>${esc(agent)}</strong> in the Agent PR Index (${esc(index.date)}): ${lead}${index.excluded_self_repo
+    ? ` Pull requests on the author's own repositories are left out (${index.excluded_self_repo}).` : ""}</p>`;
 }
 
 async function check(ev) {

@@ -80,6 +80,9 @@ await page.click("#protect-go");
 const href = await page.getAttribute("#protect-open", "href");
 check("protect link prefills the workflow at the site's commit", href.startsWith("https://github.com/octo/widgets/new/main?filename=.github/workflows/knos.yml") && decodeURIComponent(href).includes("prove.yml@" + "c".repeat(40)) && decodeURIComponent(href).includes("checks: read"));
 
+const chk = decodeURIComponent(await page.getAttribute("#protect-check", "href"));
+check("the check alone, with no money, is one file too", chk.startsWith("https://github.com/octo/widgets/new/main?filename=.github/workflows/knos-check.yml") && chk.includes("check.yml@" + "c".repeat(40)) && !chk.includes("id-token"));
+
 // fund: a new issue
 await page.goto(base + "#bounty");
 check("bounty view", await page.isVisible("#view-bounty") && await page.isHidden("#view-check"));
@@ -107,6 +110,7 @@ await page.click("#claim-go");
 await page.waitForSelector("#claim-add");
 const add = decodeURIComponent(await page.getAttribute("#claim-add", "href"));
 check("claim workflow prefilled", add.startsWith("https://github.com/mona/dotfiles/new/main?filename=.github/workflows/knos-claim.yml") && add.includes("audience=knos:claim:$ADDRESS") && add.includes("workflow_dispatch"));
+check("claim: one command first", (await page.textContent("#view-claim")).includes("knos claim YOUR_SOLANA_ADDRESS"));
 check("claim run link", (await page.getAttribute("#claim-run", "href")) === "https://github.com/mona/dotfiles/actions/workflows/knos-claim.yml");
 
 // deep links
@@ -125,7 +129,7 @@ check("numbers: immutability checked live", (await page.textContent("#network-pr
 
 // build
 await page.goto(base + "#build");
-check("build view", (await page.textContent("#view-build")).includes("knos_oidc::verified"));
+check("build view", (await page.textContent("#view-build")).includes("knos_oidc_interface::{Token"));
 
 // narrow screen: nothing overflows
 await page.setViewportSize({ width: 360, height: 700 });

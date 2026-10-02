@@ -128,8 +128,17 @@ def _workflow(c: dict) -> tuple[bytes, str, str]:
 def precheck(ledger, c: dict, kind: str, aud: str, now: float) -> dict | None:
     """What the chain would refuse, found with reads alone, before any fee is spent. Anyone can get GitHub to sign a
     token with any audience from a workflow of their own, so a relayer that verified first and asked later could be
-    made to pay fees for nothing. Returns None to go ahead, or the refusal ({"ok": False, "why", ["retry"]})."""
+    made to pay fees for nothing. Returns None to go ahead, the refusal ({"ok": False, "why", ["retry"]}), or, when
+    another relayer has already carried this very token, the result with no transaction ({"ok": True, "already"})."""
     no = lambda why, **kw: {"ok": False, "kind": kind, "why": why, **kw}  # noqa: E731
+    # the chain already shows what this token asks for: another relayer was first. Done, and nothing to send
+    def already(at, **kw):
+        last = getattr(ledger, "last_signature", None)
+        try:
+            sig = last(at) if last else None
+        except Exception:  # noqa: BLE001 - the verdict does not depend on finding the transaction
+            sig = None
+        return {"ok": True, "kind": kind, "sigs": [sig] if sig else [], "already": True, **kw}
     p = aud.split(":")
     wf_repo, wf_file, wf_sha = _workflow(c)
     if kind != "key" and c.get("runner_environment") != "github-hosted":
@@ -141,11 +150,16 @@ def precheck(ledger, c: dict, kind: str, aud: str, now: float) -> dict | None:
                 return no("a fund token must come from fund.yml")
             if not (amount == 0 or pay.MIN_AMOUNT <= amount <= pay.FAUCET_CAP):
                 return no(f"a devnet bounty is {pay.MIN_AMOUNT // 10**6} to {pay.FAUCET_CAP // 10**6} test USDC")
-            if ledger.account(pay.job_pda(repo_id, issue)) is not None:
-                return no("this issue already has the repository's bounty")
             rate = ledger.account(pay.rate_pda(repo_id))
-            if rate and len(rate) == 16:
-                last, last_iat = (int.from_bytes(rate[i:i + 8], "little", signed=True) for i in (0, 8))
+            last_iat = int.from_bytes(rate[8:16], "little", signed=True) if rate and len(rate) == 16 else None
+            have = pay.read_job(ledger.account(pay.job_pda(repo_id, issue)))
+            if have is not None:
+                if last_iat == int(c.get("iat", 0)) and have.amount == amount and have.wf_sha == wf_sha:
+                    return already(pay.job_pda(repo_id, issue), job=str(pay.job_pda(repo_id, issue)), repo_id=repo_id, issue=issue, amount=amount,
+                                   mode=have.mode, review=int(p[7]))     # another relayer carried this very token
+                return no("this issue already has the repository's bounty")
+            if last_iat is not None:
+                last = int.from_bytes(rate[0:8], "little", signed=True)
                 if int(c.get("iat", 0)) <= last_iat:
                     return no("an older fund token than the repository's last one")
                 if now < last + 60:
@@ -156,8 +170,15 @@ def precheck(ledger, c: dict, kind: str, aud: str, now: float) -> dict | None:
                 return no("not from the workflow or the repository the audience names")
             jobs = jobs_for(ledger, repo_id, issue)
             want = "open" if kind == "pay" else "proven"
+            if kind == "pay":
+                held = [(a, j) for a, j in jobs if j.state == "proven" and j.author_id == int(p[4]) and j.wf_sha == wf_sha]
+                if held and not any(j.state == "open" for _a, j in jobs):
+                    return already(held[0][0], paid=[{"job": str(a), "amount": j.amount, "fee": pay.fee_of(j.amount), "mint": str(j.mint),
+                                          "waits": j.review} for a, j in held],
+                                   repo_id=repo_id, issue=issue, author_id=int(p[4]), head=p[5])
             if not any(j.state == want and j.wf_repo_hash == wf_repo and j.wf_sha == wf_sha for _a, j in jobs):
-                return no(f"no {want} bounty on this issue pins this workflow at this commit" if jobs else "no bounty on this issue")
+                return no(f"no {want} bounty on this issue pins this workflow at this commit" if jobs else
+                          "no bounty is in escrow for this issue (never funded, or already paid or refunded)")
         elif kind == "claim":
             if c.get("event_name") != "workflow_dispatch" or not c.get("actor_id") or c.get("actor_id") != c.get("repository_owner_id"):
                 return no("a claim must be run by hand (workflow_dispatch) by the owner of the repository it runs in")
@@ -166,6 +187,18 @@ def precheck(ledger, c: dict, kind: str, aud: str, now: float) -> dict | None:
     except (KeyError, ValueError, IndexError):
         return no("malformed audience or claims")
     return None
+
+
+def transient(why: BaseException) -> bool:
+    """A failure that says nothing about the token: the cluster did not answer or dropped the transaction, or another
+    run with this same relayer key was moving the same token account (knos-oidc refuses with 67 or 69, and knos-pay
+    with 84 when the account was closed under it). The same token may succeed on the next pass."""
+    if isinstance(why, (OSError, TimeoutError)):
+        return True
+    text = str(why)
+    return any(mark in text for mark in ("custom program error: 0x43", "custom program error: 0x45", "custom program error: 0x54",
+                                         "'Custom': 67", "'Custom': 69", "'Custom': 84", "Blockhash not found",
+                                         "block height exceeded", "Too Many Requests", "Node is behind"))
 
 
 def submit(ledger, payer: Keypair, jwt: str, jwks: dict | None = None, now: float | None = None) -> dict:
@@ -213,6 +246,8 @@ def submit(ledger, payer: Keypair, jwt: str, jwks: dict | None = None, now: floa
                 try:
                     sig = ledger.send([pay.create_ata_ix(me, pay.FEE_OWNER, j.mint), pay.pay_ix(me, tok, addr, author, j.mint, j.funder)], payer)
                 except Exception as why:  # noqa: BLE001 - a job pinning another workflow refuses; the others still pay
+                    if transient(why):
+                        raise
                     out.setdefault("refused", []).append(f"{addr}: {str(why)[:120]}")
                     continue
                 paid.append({"job": str(addr), "amount": j.amount, "fee": pay.fee_of(j.amount), "mint": str(j.mint), "waits": j.review})
@@ -245,7 +280,8 @@ def submit(ledger, payer: Keypair, jwt: str, jwks: dict | None = None, now: floa
             out.update(key=str(oidc.key_pda(issuer, n)), added=bool(new))
         return out
     except Exception as why:  # noqa: BLE001 - one bad token never stops the relay loop
-        return {"ok": False, "why": f"{type(why).__name__}: {str(why)[:200]}"}
+        return {"ok": False, "why": f"{type(why).__name__}: {str(why)[:200]}",
+                **({"retry": True, "transient": True} if transient(why) else {})}
     finally:
         if opened:      # the token account has done its work, or failed to: take the rent back either way
             try:

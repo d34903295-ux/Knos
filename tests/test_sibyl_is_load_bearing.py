@@ -8,6 +8,7 @@ memory is real.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import sqlite3
@@ -50,7 +51,8 @@ def test_what_was_learned_is_in_sibyls_own_store_and_nowhere_else(knos_home, rep
     _teach(repo)
     db = store.shared_store()
     assert db.name == "memory.db" and db.parent.name == ".sibyl-memory"      # Sibyl's own store, under Sibyl's cap
-    rows = sqlite3.connect(db).execute("select count(*) from entities where tenant_id = ?", (store.tenant(repo),)).fetchone()
+    with contextlib.closing(sqlite3.connect(db)) as con:     # closed before the file is deleted: Windows locks an open one
+        rows = con.execute("select count(*) from entities where tenant_id = ?", (store.tenant(repo),)).fetchone()
     assert rows[0] >= 3                                                      # the claim, the outcome, the rule
     assert not list(knos_home.rglob("*.db")) and not (repo / ".knos").exists()   # no copy anywhere else
     for f in db.parent.glob("memory.db*"):

@@ -3,6 +3,7 @@ Wilson intervals, self-repo exclusion, and a root that refuses an edited list.""
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -53,10 +54,11 @@ def test_classification_and_deterministic_root(monkeypatch):
     b = agent_pr_index.build(list(reversed(claimed)), "2026-10-01", WINDOW)
     assert a == b and len(a["root"]) == 64
     assert a["agents"]["copilot"] == {"claimed_green": 1, "actually_failed": 1, "share": 1.0,
-                                      "ci95": agent_pr_index.wilson(1, 1)}
+                                      "ci95": agent_pr_index.wilson(1, 1),
+                                      "by_repo": {"repos": 1, "failed": 1, "share": 1.0, "ci95": agent_pr_index.wilson(1, 1)}}
     assert a["agents"]["codex"]["share"] == 0.0 and a["agents"]["codex"]["ci95"][0] == 0.0
-    assert a["agents"]["devin"] == {"claimed_green": 0, "actually_failed": 0, "share": None,
-                                    "ci95": None}  # no CI is not green
+    assert a["agents"]["devin"] == {"claimed_green": 0, "actually_failed": 0, "share": None, "ci95": None,   # no CI is not green
+                                    "by_repo": {"repos": 0, "failed": 0, "share": None, "ci95": None}}
     assert a["overall"]["claimed_green"] == 2 and a["overall"]["actually_failed"] == 1
     assert set(a["prs"][0]) == set(agent_pr_index.PR_KEYS)
     assert a["n_prs"] == 2  # the no-CI PR is not listed: only finished CI at the head SHA counts
@@ -112,3 +114,20 @@ def test_check_refuses_a_tampered_list(tmp_path):
     p.write_text(json.dumps(idx), encoding="utf-8")
     with pytest.raises(SystemExit):
         agent_pr_index.check(str(p))
+
+
+def test_one_pull_request_per_repository_is_counted_beside_every_pull_request():
+    """A repository whose agent opened many failing pull requests counts once: the figure the docs quote first."""
+    rows = [{"agent": "devin", "repo": "busy/Repo", "number": n, "sha": "a" * 40, "class": "failed", "failed_checks": ["ci"], "phrase": "tests pass"}
+            for n in range(2, 12)]
+    rows.append({"agent": "devin", "repo": "busy/repo", "number": 1, "sha": "b" * 40, "class": "passed", "failed_checks": [], "phrase": "tests pass"})
+    rows += [{"agent": "devin", "repo": f"quiet/r{i}", "number": 5, "sha": "c" * 40, "class": "passed" if i else "failed",
+              "failed_checks": [], "phrase": "tests pass"} for i in range(4)]
+    ix = agent_pr_index.build(rows, "2026-10-02", ["2026-06-04", "2026-10-01"])
+    assert ix["overall"]["actually_failed"] == 11 and ix["overall"]["claimed_green"] == 15           # 73% of pull requests
+    # five repositories; busy/repo's first pull request (#1) passed, so only quiet/r0 counts as failed
+    assert ix["overall"]["by_repo"] == {"repos": 5, "failed": 1, "share": 0.2, "ci95": agent_pr_index.wilson(1, 5)}
+    assert ix["agents"]["devin"]["by_repo"]["repos"] == 5 and ix["agents"]["codex"]["by_repo"]["repos"] == 0
+    bench = json.loads((Path(__file__).resolve().parents[1] / "docs" / "bench.json").read_text(encoding="utf-8"))["market"]["index"]
+    assert bench["overall"]["by_repo"]["failed"] <= bench["overall"]["actually_failed"]
+    assert bench["overall"]["by_repo"]["repos"] <= bench["n_prs"]

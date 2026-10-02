@@ -9,9 +9,12 @@ Coding agents now write a large share of pull requests. One tracker counts about
 and puts 32.5% of sampled pull requests as agent-marked ([amplifying.ai](https://amplifying.ai/coding-agents/trends),
 to 27 Sep 2026; its Claude Code, Cursor and Codex counts are estimates from declared attribution).
 
-We measured what those pull requests say against what happened. Of 2,431 agent pull requests whose description says
-tests or CI pass, and whose CI had finished at the head commit, 660 (27.2%) had a failing check at that commit
-([BENCH.md](BENCH.md); the list is public and rebuilt every 6 hours).
+We measured what those pull requests say against what happened. In 826 repositories, the first agent pull request
+whose description said tests or CI pass had a failing check at its head commit in 147 (17.8%). Counting every such
+pull request instead of one per repository it is 660 of 2,431 (27.2%), a figure that leans on a few busy
+repositories, so we quote the first ([BENCH.md](BENCH.md); the list is public and rebuilt every 6 hours). A failing
+check is GitHub's record; it does not say why the check failed, and a description can be written before CI finishes.
+What it shows is that the description is not evidence.
 
 Others measured the same thing from the inside:
 
@@ -20,6 +23,10 @@ Others measured the same thing from the inside:
 - On tasks made impossible on purpose, GPT-5 exploited the tests on 76% of one benchmark variant
   ([ImpossibleBench, arXiv 2510.20270](https://arxiv.org/abs/2510.20270); the rate via
   [Digital Applied](https://www.digitalapplied.com/blog/ai-coding-agent-reward-hacking-rates-published-data)).
+
+- Passing tests is not the same as mergeable work either: when maintainers reviewed 296 agent pull requests that
+  passed the benchmark's tests, they would have merged roughly a third to a half
+  ([METR, 10 Mar 2026](https://metr.org/notes/2026-03-10-many-swe-bench-passing-prs-would-not-be-merged-into-main/)).
 
 This is what Spence described in 1973: a signal carries information only if it is costly to fake. "All tests pass" in
 a description costs nothing to write.
@@ -39,14 +46,28 @@ bounties now:
 
 Supply is not the problem. Agents will swarm any bounty. Trust is.
 
-## 3. Agent payments exist, and none of them prove delivery
+## 3. Agents are paid for attempts, because nobody neutral says what was delivered
 
-The rails for agents to pay are live. x402 carried 75.41M transactions and $24.24M in 30 days, 76% of it on Solana
-([Solana Compass, 22 Sep 2026](https://solanacompass.com/news/solana-processes-76-of-all-x402-ai-agent-transactions-232-million-in-four-weeks)).
-But TRM Labs screened that flow and found only 0.6% to 7.5% of it looks like an agent buying something
-([TRM Labs, 9 Sep 2026](https://www.trmlabs.com/trm-tech-blog/whos-actually-paying-measuring-ai-agent-payments-onchain)).
-A payment rail moves money when someone says so. It has nothing to say about whether the work was done. Coding agents
-themselves are sold the same way: by the token or the minute, whatever comes out.
+Coding agents are sold by the seat, the token or the minute of compute, whatever comes out: Cursor about $4B a year
+([Dealroom, 9 Jun 2026](https://dealroom.co/news/134107-cursor-tops-4b-annualized-revenue/)), Claude Code over
+$2.5B ([Anthropic, Feb 2026](https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation)),
+Cognition $492M ([TechCrunch, 27 May 2026](https://techcrunch.com/2026/05/27/ai-coding-startup-cognition-raises-1b-at-25b-pre-money-valuation/)).
+We found no coding-agent vendor that charges per merged pull request.
+
+Where the seller can define the outcome, buyers already pay per outcome. Intercom's Fin charges $0.99 per resolved
+conversation and is near $100M a year
+([Mostly Metrics via EnterpriseDNA, 2 Aug 2026](https://enterprisedna.co/resources/ai-pulse/ai-pulse-2026-08-02-intercom-s-fin-ai-agent-is-nearing-100m-arr-roughly-half-of/),
+secondary); the share of AI companies pricing by outcome rose from 18% to 23% in six months
+([ICONIQ, State of AI 2026](https://www.iconiq.com/growth/reports/state-of-ai-2026)). In each case the vendor's own
+system decides what counts as "resolved", and the buyer has to trust it.
+
+Code is the one kind of agent work where a neutral third party already signs the outcome. GitHub records who opened
+a pull request, what its checks said and who merged it, and will sign that statement for free. What was missing is
+something that moves money on that signature without anyone in the middle who could forge it.
+
+The same gap shows in agent payments on chain: x402 carried 75.41M transactions in 30 days, 76% of it on Solana
+([Solana Compass, 22 Sep 2026](https://solanacompass.com/news/solana-processes-76-of-all-x402-ai-agent-transactions-232-million-in-four-weeks)),
+and a rail moves money when someone says so; it has nothing to say about whether the work was done.
 
 Holmström (1979) is the reference for what to do when effort cannot be observed: pay on a verifiable signal of the
 output.
@@ -66,19 +87,24 @@ Knos is a letter of credit for agent work:
 | the buyer's bank holds the money | a Solana program holds it, and nobody can change the program |
 | the carrier signs a bill of lading | GitHub signs a token: this pull request, by this account, was merged in this repository |
 | the bank checks the document, not the goods | the program checks GitHub's RSA signature and the token's claims, on chain |
-| the seller is paid on conforming documents | the author's GitHub account is credited (after the veto window the funder chose) |
+| the bank has a fixed time to examine the documents, pays on silence, and refuses only for a narrow reason ([UCP 600, articles 14 and 16](https://www.skrine.com/insights/alerts/july-2022/banks-duty-in-examining-documents-presented-u-1)) | a review window the funder chose; silence pays; `/knos veto` from a maintainer takes it back |
+| the seller is paid on conforming documents | the author's GitHub account is credited |
 | no conforming documents by the expiry date: the credit lapses | no proof by the deadline: the funder is refunded |
 
 What had to exist first is a chain program that can read GitHub's signature by itself, with no oracle and no operator
 who could forge it. That is `knos-oidc`, and it is the part others can build on ([OIDC.md](OIDC.md)).
 
-## 5. Why a signed merge and not "tests passed"
+## 5. Why a signed merge and not only "tests passed"
 
 Goodhart's law applies to tests the moment money rides on them: section 1's numbers are agents gaming tests. So the
-default trigger in Knos is not a test run. It is a maintainer's merge, a decision by the person who owns the code,
-attested by GitHub. Tests are an option the funder can choose, and then the check runs in a sandbox, a black-box
-mode exists whose verdict the pull request's code cannot touch, and the payment waits a review window in which the
-funder can veto ([TAMPER.md](TAMPER.md), [SECURITY.md](SECURITY.md)).
+default trigger in Knos is a maintainer's merge, a decision by the person who owns the code, attested by GitHub,
+**plus** a check that runs none of the pull request's code: if the description says tests pass and GitHub's record
+of the merged commit says a check failed, nothing is paid. Tests alone are an option the funder can choose; then the
+checks run in a sandbox, a black-box mode exists whose verdict the pull request's code cannot touch, and the payment
+waits a review window in which the funder can veto ([TAMPER.md](TAMPER.md), [SECURITY.md](SECURITY.md)).
+
+What neither mode proves is that the work is good. A signature proves what happened, not whether it was wise
+([SECURITY.md](SECURITY.md) says exactly where the line is).
 
 ## 6. Why now, and why on a chain
 

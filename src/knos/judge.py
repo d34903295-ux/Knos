@@ -96,29 +96,140 @@ def _rule_violations(base: Path, diff_text: str | None, store, repo, agent):
     return required, contributing, violations
 
 
+_KNOS_JOBS = re.compile(r"^(?:prove|fund)(?:-relay|-refused)? / |^knos| / claims$")
+
+
 def _ours(run: dict) -> bool:
-    """A check run of this very workflow run (the Knos jobs themselves): never evidence about the pull request."""
+    """A check run that is Knos's own (this workflow run's jobs, and the Knos jobs of earlier runs on the same commit:
+    the check, the proof, the relay and its verdict): never evidence about the pull request."""
     mine = os.environ.get("GITHUB_RUN_ID", "")
-    name = str(run.get("name", ""))
-    return bool(mine and f"/runs/{mine}/" in str(run.get("details_url", ""))) or name.startswith(("prove /", "knos"))
+    return bool(mine and f"/runs/{mine}/" in str(run.get("details_url", ""))) or bool(_KNOS_JOBS.search(str(run.get("name", ""))))
 
 
-def claim_check(body: str, check_runs: list[dict] | None) -> list[str]:
+def github(path: str):
+    """GET api.github.com/<path> (GH_TOKEN or GITHUB_TOKEN is sent when set). Raises OSError when GitHub says no."""
+    import urllib.request
+    req = urllib.request.Request(f"https://api.github.com/{path}",
+                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "knos"})
+    tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if tok:
+        req.add_header("Authorization", f"Bearer {tok}")
+    with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 - api.github.com
+        return json.loads(resp.read())
+
+
+# How the agents that open pull requests under a bot account name the person who ran them. Each is a whole line of
+# the description: Devin ends it with "Requested by: @login"; Jules with "PR created automatically by Jules for task
+# N started by @login"; anyone can write "Knos-Pay-To: @login".
+_LOGIN = r"@([A-Za-z0-9][A-Za-z0-9-]{0,38})"
+_PAY_TO = (re.compile(r"knos-pay-to:[ \t]{0,8}" + _LOGIN + r"\.?", re.I),
+           re.compile(r"requested by:?[ \t]{0,8}" + _LOGIN + r"\.?", re.I),
+           re.compile(r"pr created automatically by jules\b[^@]{0,120}\bstarted by[ \t]{0,8}" + _LOGIN + r"\.?", re.I))
+# Copilot and Cursor credit that person in the commit: a GitHub no-reply address carries the numeric user id.
+_CO_AUTHOR = re.compile(r"co-authored-by:[^<]{0,120}<(\d{1,12})\+[A-Za-z0-9-]{1,39}@users\.noreply\.github\.com>", re.I)
+
+
+def _named(body: str) -> set[str]:
+    """The logins a description's own lines name as the person to pay. Quoted lines and fenced code are not the
+    description's own words (an agent may have copied them from an issue), so they are skipped."""
+    out, fenced = set(), False
+    for line in (body or "").splitlines()[-400:]:
+        line = line.strip()
+        if line.startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if fenced or line.startswith(">") or len(line) > 300:
+            continue
+        for pat in _PAY_TO:
+            m = pat.fullmatch(line)
+            if m:
+                out.add(m.group(1).lower())
+    return out
+
+
+def payee(pull: dict, head_message: str = "", get=None) -> dict:
+    """Who a pull request's bounty is paid to: {"id", "login", "why"}, or {"id": None, "why"} when nobody can be named.
+
+    A person's pull request pays that person, whatever its description says. An agent that opens pull requests under
+    a bot account (Copilot, Devin, Jules, Cursor) has no account to be paid into, so the money goes to the person who
+    ran it, found the way that agent itself names them: the pull request's assignee; else a line of its description;
+    else the co-author of its head commit. A description that names two different people, or a name GitHub does not
+    confirm as a person, pays nobody: better no payment than one to whoever got a line into the text.
+    `pull` is the pull request as the event or the API gives it; `get(path)` reads api.github.com."""
+    get = get or github
+    user = pull.get("user") or {}
+    if user.get("type") != "Bot":
+        return {"id": user.get("id"), "login": user.get("login"), "why": "the pull request's author"}
+    bot = user.get("login")
+    nobody = lambda why: {"id": None, "login": None, "why": why}  # noqa: E731
+    fix = "assign the pull request to the person who ran it, or keep one line `Knos-Pay-To: @login` in its description"
+    for a in pull.get("assignees") or []:
+        if a.get("type", "User") == "User" and a.get("id"):
+            return {"id": a["id"], "login": a.get("login"), "why": f"assignee of {bot}'s pull request"}
+
+    def person(path: str) -> dict | None:
+        try:
+            who = get(path)
+        except Exception:  # noqa: BLE001 - GitHub did not answer: nobody is confirmed
+            return None
+        return who if isinstance(who, dict) and who.get("type") == "User" and who.get("id") else None
+
+    named = _named(pull.get("body") or "")
+    if len(named) > 1:
+        return nobody(f"{bot}'s description names more than one person to pay ({', '.join('@' + n for n in sorted(named))}): {fix}")
+    if named:
+        login = next(iter(named))
+        who = person(f"users/{login}")
+        if not who:
+            return nobody(f"{bot}'s description names @{login}, which GitHub did not confirm as a person: {fix}")
+        return {"id": who["id"], "login": who.get("login"), "why": f"named in the description of {bot}'s pull request"}
+    ids = {int(m.group(1)) for line in (head_message or "").splitlines()[-200:] if len(line) <= 300
+           for m in [_CO_AUTHOR.fullmatch(line.strip())] if m}
+    if len(ids) == 1:
+        uid = next(iter(ids))
+        who = person(f"user/{uid}")
+        if who and who["id"] == uid:
+            return {"id": uid, "login": who.get("login"), "why": f"co-author of {bot}'s head commit"}
+    return nobody(f"{bot} is a bot and nothing names the one person who ran it: {fix}")
+
+
+def assignment_check(issue: dict | None, pull: dict, paid: dict) -> list[str]:
+    """An issue someone is assigned to is theirs: a bounty on it is paid only for a pull request by an assignee (or by
+    the agent an assignee ran). An unassigned issue is open to anyone. `issue` is the issue as the API gives it."""
+    assigned = [a for a in (issue or {}).get("assignees") or [] if a.get("id")]
+    if not assigned:
+        return []
+    ids = {a["id"] for a in assigned}
+    if (pull.get("user") or {}).get("id") in ids or paid.get("id") in ids:
+        return []
+    names = ", ".join("@" + str(a.get("login")) for a in assigned[:4])
+    return [f"assigned: issue #{issue.get('number')} is assigned to {names}; only an assignee's pull request is paid for it"]
+
+
+def claim_check(body: str, check_runs: list[dict] | None, strict: bool = False) -> list[str]:
     """What the pull request's description claims against GitHub's record of its head commit. `check_runs` is the
     commit's check runs (GET /repos/{repo}/commits/{sha}/check-runs). A claim of passing tests or green CI is refused
-    when a finished check failed. Unfinished checks are not held against it."""
+    when a finished check failed. Before a merge, unfinished or unreadable checks are not held against it. `strict`
+    (the merged commit, where money moves): a claim that cannot be checked is refused too, until it can be."""
     from .proof import claims
     kinds = claims.read(body or "").kinds & {"tests", "ci"}
-    if not kinds or check_runs is None:
-        return []
-    bad = sorted({r.get("name", "?") for r in check_runs
-                  if r.get("status") == "completed" and r.get("conclusion") in ("failure", "timed_out", "cancelled",
-                                                                                   "startup_failure", "action_required")
-                  and not _ours(r)})
-    if not bad:
+    if not kinds:
         return []
     said = " and ".join(sorted({"tests": "tests pass", "ci": "CI is green"}[k] for k in kinds))
-    return [f"claim: the description says {said}, but these checks failed at the head commit: {', '.join(bad[:6])}"]
+    if check_runs is None:
+        return [f"claim: the description says {said}, and GitHub's record of the head commit could not be read; "
+                "run this job again"] if strict else []
+    others = [r for r in check_runs if not _ours(r)]
+    bad = sorted({r.get("name", "?") for r in others
+                  if r.get("status") == "completed" and r.get("conclusion") in ("failure", "timed_out", "cancelled",
+                                                                                   "startup_failure", "action_required")})
+    if bad:
+        return [f"claim: the description says {said}, but these checks failed at the head commit: {', '.join(bad[:6])}"]
+    running = sorted({r.get("name", "?") for r in others if r.get("status") != "completed"})
+    if strict and running:
+        return [f"claim: the description says {said}, and these checks have not finished at the head commit: "
+                f"{', '.join(running[:6])}; run this job again when they have"]
+    return []
 
 
 def check_runs(repo: str, sha: str, wait: float = 0, body: str = "", get=None, sleep=None) -> list[dict] | None:
@@ -126,26 +237,25 @@ def check_runs(repo: str, sha: str, wait: float = 0, body: str = "", get=None, s
     when set). When the description makes a claim, waits up to `wait` seconds for the other checks to finish, so a
     claim made before CI ran is still checked. None when GitHub could not be read: then nothing is held against it."""
     import time
-    import urllib.request
     from .proof import claims
 
     def fetch(url: str):
-        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "knos"})
-        tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-        if tok:
-            req.add_header("Authorization", f"Bearer {tok}")
-        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 - api.github.com
-            return json.loads(resp.read())
+        return github(url.split("api.github.com/", 1)[1])
 
     get, sleep = get or fetch, sleep or time.sleep
     claims_something = bool(claims.read(body or "").kinds & {"tests", "ci"})
     end = time.monotonic() + (wait if claims_something else 0)
     while True:
+        runs = []
         try:
-            got = get(f"https://api.github.com/repos/{repo}/commits/{sha}/check-runs?per_page=100")
+            for page in range(1, 11):       # a commit can have more than 100 check runs
+                got = get(f"https://api.github.com/repos/{repo}/commits/{sha}/check-runs?per_page=100&page={page}")
+                batch = got.get("check_runs", []) if isinstance(got, dict) else []
+                runs += batch
+                if len(batch) < 100:
+                    break
         except Exception:  # noqa: BLE001 - an unreadable API is not the pull request's fault
             return None
-        runs = got.get("check_runs", []) if isinstance(got, dict) else []
         others = [r for r in runs if not _ours(r)]
         if all(r.get("status") == "completed" for r in others) or time.monotonic() >= end:
             return runs
@@ -153,9 +263,12 @@ def check_runs(repo: str, sha: str, wait: float = 0, body: str = "", get=None, s
 
 
 def gate(base_dir, diff_text: str | None, store, repo: str | None = None, agent: str | None = None,
-         body: str = "", check_runs: list[dict] | None = None, issue: str = "") -> dict:
+         body: str = "", check_runs: list[dict] | None = None, issue: str = "", pull: dict | None = None,
+         issue_data: dict | None = None, paid: dict | None = None, strict: bool = False) -> dict:
     """The verdict that needs no pull request code. {"passed", "checks_hash" (""), "reasons", "evidence"}. A rule
-    violation is learned: that check is then required for every later pull request to this repo or by this agent."""
+    violation is learned: that check is then required for every later pull request to this repo or by this agent.
+    With `pull` (the pull request) and `paid` (payee(pull)), a bounty's pull request must also name someone to pay,
+    and respect the issue's assignment (`issue_data`)."""
     from .proof import history
     base = Path(base_dir)
     required, contributing, violations = _rule_violations(base, diff_text, store, repo, agent)
@@ -163,11 +276,17 @@ def gate(base_dir, diff_text: str | None, store, repo: str | None = None, agent:
         first = next(x for x in violations if x.rule["kind"] == kind)
         history.learn_tamper(store, repo, agent, f"rule:{kind}", str(first))
     reasons = [f"repo rule: {x}" for x in violations]
-    false_claims = claim_check(body, check_runs)
-    if false_claims:
+    false_claims = claim_check(body, check_runs, strict)
+    if false_claims and "failed at the head commit" in false_claims[0]:    # a claim that could not be checked is not a lie
         history.learn_tamper(store, repo, agent, "false-claim", false_claims[0])
     reasons += false_claims
-    ev = {"issue": str(issue), "mode": "merge", "repo_rules": [str(x) for x in violations],
+    who = []
+    if pull is not None and paid is not None:
+        if not paid.get("id"):
+            who.append(f"payee: {paid['why']}")
+        who += assignment_check(issue_data, pull, paid)
+    reasons += who
+    ev = {"issue": str(issue), "mode": "merge", **({"payee": paid} if paid is not None else {}), "repo_rules": [str(x) for x in violations],
           "rules_known": len(contributing), "claims": false_claims,
           "checks_seen": None if check_runs is None else len(check_runs), "required_by_history": required,
           "learned": sorted(history.tamper_checks_required(store, repo, agent))}
@@ -176,12 +295,13 @@ def gate(base_dir, diff_text: str | None, store, repo: str | None = None, agent:
 
 def judge_with_rules(base_dir, pr_dir, cfg: dict, changed: list[str] | None, diff_text: str | None, store,
                      repo: str | None = None, agent: str | None = None, body: str = "",
-                     check_runs: list[dict] | None = None, setup: str | None = None, sandbox: str = "auto") -> dict:
+                     check_runs: list[dict] | None = None, setup: str | None = None, sandbox: str = "auto",
+                     pull: dict | None = None, issue_data: dict | None = None, paid: dict | None = None) -> dict:
     """gate() first; only a pull request that clears it has its code run by judge(). A protected-path refusal is
     learned the same way a rule violation is."""
     from .proof import history
     base = Path(base_dir)
-    g = gate(base, diff_text, store, repo, agent, body, check_runs, str(cfg.get("issue", "")))
+    g = gate(base, diff_text, store, repo, agent, body, check_runs, str(cfg.get("issue", "")), pull, issue_data, paid)
     if not g["passed"]:
         try:
             g["checks_hash"] = checks_hash(base / ".knos" / "acceptance" / str(cfg.get("issue", "")))
@@ -194,6 +314,8 @@ def judge_with_rules(base_dir, pr_dir, cfg: dict, changed: list[str] | None, dif
     if bad:
         history.learn_tamper(store, repo, agent, "protected-path", bad[0])
     v["evidence"]["mode"] = "tests"
+    if paid is not None:
+        v["evidence"]["payee"] = paid
     if g["evidence"]["rules_known"]:
         v["evidence"]["repo_rules"] = []
     v["evidence"]["required_by_history"] = g["evidence"]["required_by_history"]
@@ -426,7 +548,7 @@ class Box:
             argv, full = self.wrap(argv, net, env)
         try:
             got = subprocess.run(argv, cwd=str(cwd or self.work), env=full, capture_output=True, timeout=timeout,
-                                 shell=shell)
+                                 shell=shell, stdin=subprocess.DEVNULL)   # a test that reads stdin must not wait on ours
         except subprocess.TimeoutExpired:
             return 124, "timed out"
         except OSError as why:
