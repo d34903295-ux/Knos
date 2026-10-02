@@ -13,7 +13,7 @@ on:
   workflow_call:
     inputs:
       kind:
-        description: fund or proof
+        description: fund, proof, or refused (prove.yml's judge said no; comments its reasons, no token exists)
         required: true
         type: string
       number:
@@ -29,7 +29,35 @@ on:
 permissions: {}
 
 jobs:
+  refused:
+    if: inputs.kind == 'refused'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: knos-evidence
+          path: ${{ runner.temp }}/knos
+      - name: comment why the pull request is not paid
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N: ${{ inputs.number }}
+        run: |
+          ev="$RUNNER_TEMP/knos/evidence.json"
+          if [ -s "$ev" ]; then
+            reasons=$(jq -r '.reasons[]? | "- " + .' "$ev")
+          fi
+          [ -n "${reasons:-}" ] || reasons="- the check job failed before a verdict (see the run log)"
+          printf 'Knos: refused, no token was minted and nothing is paid.\n%s\n\nRun: %s/%s/actions/runs/%s\n' \
+            "$reasons" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
+            | gh api "repos/$GITHUB_REPOSITORY/issues/$N/comments" -F body=@- --jq .html_url
+
   relay:
+    if: inputs.kind != 'refused'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

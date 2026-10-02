@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 const API = "https://api.github.com";
 // Knos's reusable workflows, pinned by full commit sha (the escrow checks the token's job_workflow_sha).
 export const KNOS_SHA = "81d40cda2d0d40636c881befbdf07008665ff288";
+export const KNOS_RELAY_SHA = "f3414b39cfccf0931e0344ea92f6c74f322708b1";
 
 // ---- claim detection (port of scripts/agent_pr_ci.py) -----------------------------------------------------------
 const PASS = String.raw`(?:pass(?:es|ed|ing)?|green)`;
@@ -141,7 +142,7 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_SHA}
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_RELAY_SHA}
     with:
       kind: fund
       number: \${{ fromJSON(needs.fund.outputs.issue) }}
@@ -186,15 +187,27 @@ jobs:
     with:
       job: \${{ needs.job.outputs.id }}
       issue: \${{ needs.job.outputs.issue }}
+      knos-ref: ${KNOS_SHA}
 
   prove-relay:
     needs: prove
     permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_SHA}
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_RELAY_SHA}
     with:
       kind: proof
+      number: \${{ github.event.pull_request.number }}
+
+  prove-refused:
+    needs: [job, prove]
+    if: always() && needs.job.outputs.id != '' && needs.prove.result == 'failure'
+    permissions:
+      issues: write
+      pull-requests: write
+    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_RELAY_SHA}
+    with:
+      kind: refused
       number: \${{ github.event.pull_request.number }}
 `;
 

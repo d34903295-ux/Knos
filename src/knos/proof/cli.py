@@ -76,18 +76,28 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
               pr: Path = typer.Option(..., "--pr", help="the pull request head source"),
               issue: str = typer.Option(..., "--issue", help="the acceptance bundle: .knos/acceptance/<issue>/"),
               changed: Path = typer.Option(None, "--changed", help="file listing the PR's changed paths"),
-              evidence: Path = typer.Option(None, "--evidence", help="write the evidence JSON here")) -> None:
-        """prove.yml's check job: overlay, protected paths, sentinel, fail-to-pass. Exit 1 unless it passes."""
+              evidence: Path = typer.Option(None, "--evidence", help="write the evidence JSON here"),
+              diff: Path = typer.Option(None, "--diff", help="the PR's unified diff from the base (for repo rules)"),
+              store: Path = typer.Option(None, "--store", help="a directory the judge remembers tampering in"),
+              repo_name: str = typer.Option("", "--repo", help="owner/name, the key tamper rules are kept under"),
+              agent: str = typer.Option("", "--agent", help="the PR author, the other tamper key")) -> None:
+        """prove.yml's check job: the repo's CONTRIBUTING rules first, then overlay, protected paths, sentinel,
+        fail-to-pass. A violation is learned: that check is required on every later PR to this repo or by this agent.
+        Exit 1 unless it passes."""
         from ..jobs import prove
-        from . import engine
+        from . import engine, history
         cfg = dict(engine.config(base))
         cfg["issue"] = issue
         names = None
         if changed:
             names = [x.strip() for x in changed.read_text(encoding="utf-8").splitlines() if x.strip()]
-        v = prove.judge(base, pr, cfg, names)
+        st = history.JsonStore(store) if store else history.NullStore()
+        diff_text = diff.read_text(encoding="utf-8", errors="replace") if diff else None
+        v = prove.judge_with_rules(base, pr, cfg, names, diff_text, st, repo_name or None, agent or None)
         if evidence:
             evidence.write_text(json.dumps(v, indent=1), encoding="utf-8")
+        for r in v["evidence"].get("required_by_history", []):
+            out.print(f"REQUIRED by this repo's history: {r}", markup=False, emoji=False)
         for r in v["reasons"]:
             out.print(f"NO  {r}", markup=False, emoji=False)
         out.print(f"checks_hash {v['checks_hash']}", markup=False)
