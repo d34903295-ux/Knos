@@ -348,11 +348,25 @@ async function readAccount(ev) {
   if (!/^[\w-]+(\[bot\])?$/.test(login)) return say(out, "Enter a GitHub login.", "bad");
   say(out, "Reading GitHub and Solana…");
   try {
+    const V1_PAY = "9UzPFbh2A4e4sEPgngKG523FfYLnQ3qPfFVfFTTAdfDi";
     const [user, k] = await Promise.all([gh(`/users/${login}`), client()]);
-    const [bindRaw, repRaw, jobs] = await Promise.all([knos.account(RPC, await k.bind(user.id)), knos.account(RPC, await k.rep(user.id)),
-      knos.programAccounts(RPC, k.ids.knos_pay, knos.v2.JOB_LEN, 56, le(user.id))]);
+    const [bindRaw, repRaw, jobs, v1Accounts] = await Promise.all([
+      knos.account(RPC, await k.bind(user.id)),
+      knos.account(RPC, await k.rep(user.id)),
+      knos.programAccounts(RPC, k.ids.knos_pay, knos.v2.JOB_LEN, 56, le(user.id)),
+      knos.programAccounts(RPC, V1_PAY, 48, 8, le(user.id)).catch(() => [])
+    ]);
     const bind = knos.v2.readBind(bindRaw), rep = knos.v2.readRep(repRaw);
     const held = jobs.map((f) => knos.v2.readJob(f.data)).filter((j) => j && j.state === "held" && j.payeeId === user.id);
+    const v1Held = (v1Accounts || []).map((a) => {
+      const d = a.data;
+      if (!d || d.length !== 48) return null;
+      let amt = 0n;
+      for (let i = 0; i < 8; i++) amt |= BigInt(d[i]) << BigInt(i * 8);
+      return { amount: Number(amt) };
+    }).filter((x) => x && x.amount > 0);
+    const v1Html = v1Held.length ? v1Held.map((v) => `<p class="verdict ok">The first deployment holds ${money(v.amount)} test USDC for ${esc(user.login)}.</p>
+      <p class="fine">Send what the first deployment holds to any address: <code>knos claim --v1 &lt;address&gt;</code></p>`).join("") : "";
     const bound = bind ? `<p class="verdict ok" id="due-bound">Paid at ${esc(bind.wallet)}</p><p class="fine">Bound ${when(bind.iat)}. Every task now pays this wallet.</p>`
       : `<p class="status" id="due-bound">No wallet is bound for ${esc(user.login)}.</p>`;
     const holds = held.length ? held.map((j) => `<p class="verdict ok">${money(j.amount)} ${esc(moneyName(j.mint, j.faucet))} is held for ${esc(user.login)} until ${when(j.holdUntil)}.</p>
