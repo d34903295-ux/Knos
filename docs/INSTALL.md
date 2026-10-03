@@ -270,3 +270,20 @@ repository, so a crate that uses this one cannot itself be published there yet.
 
 `knos mcp` is a stdio server: the command is `uvx` and its arguments are `knos` and `mcp`. The official MCP registry
 lists it as `io.github.drexthealpha/knos`.
+
+## GitLab CI
+
+The same check on GitLab merge requests: a job that installs Knos and runs `knos check`.
+
+```yaml
+# .gitlab-ci.yml
+knos:
+  stage: test
+  image: python:3.12-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  before_script:
+    - pip install knos
+  script:
+    - knos check
+```
