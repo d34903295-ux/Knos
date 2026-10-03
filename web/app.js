@@ -359,7 +359,9 @@ async function readAccount(ev) {
       <p class="fine">${bind ? "A wallet is bound, so it can be sent there now: comment <code>/knos settle</code> on the merged pull request." : "Bind a wallet before then and it can be sent there. After that date it goes back to the funder."}</p>`).join("")
       : `<p class="status">Nothing is held for ${esc(user.login)} right now.</p>`;
     const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
-    out.innerHTML = `${bound}${holds}<h4>The record on Solana</h4><dl class="facts" id="due-record">
+    const v1Html = v1Held.length ? v1Held.map((v) => `<p class="verdict ok">The first deployment holds ${money(v.amount)} for ${esc(user.login)}.</p>
+    <p class="fine">Send what the first deployment holds to any address: <code>knos claim --v1 &lt;address&gt;</code></p>`).join("") : "";
+    out.innerHTML = `${bound}${holds}${v1Html}<h4>The record on Solana</h4><dl class="facts" id="due-record">
       <dt>Paid by others</dt><dd><strong>${plural(rep.paid, "payment")}</strong> from <strong>${plural(rep.funders, "different funder")}</strong>, ${money(rep.total)} test USDC in all${rep.paid ? ` (${when(rep.first)} to ${when(rep.last)})` : ""}</dd>
       <dt>From the faucet</dt><dd>${plural(rep.testPaid, "payment")}, ${money(rep.testTotal)} of the faucet's free test USDC. Counted apart.</dd>
       <dt>Paid by themselves</dt><dd>${plural(rep.selfPaid, "payment")}, where the funder was the person paid. Counted apart.</dd>
