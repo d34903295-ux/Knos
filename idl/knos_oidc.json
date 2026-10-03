@@ -1,5 +1,5 @@
 {
-  "version": "0.3.11",
+  "version": "0.3.12",
   "name": "knos_oidc",
   "docs": [
     "OIDC on Solana: verifies an RS256 token from GitHub Actions or GitLab CI on chain. No admin, immutable.",
@@ -32,7 +32,8 @@
       "docs": [
         "Computes s^65537 mod n a few squarings at a time. The call that finishes the 16 squarings checks the PKCS#1 v1.5 SHA-256 encoding,",
         "that alg is RS256 and that iss is the key's issuer, decodes the payload in place and marks the account VERIFIED.",
-        "2048-bit keys: Step(8), Step(8). 4096-bit keys: Step(2), Step(3) four times, Step(2)."
+        "2048-bit keys: Step(8), Step(8). 4096-bit keys: Step(2), Step(3) three times, Step(4), Step(1): the finishing call also hashes and",
+        "decodes the whole token, and with two squarings it runs out of compute units once the token is long."
       ],
       "accounts": [
         {"name": "payer", "isMut": false, "isSigner": true, "desc": "The payer that wrote the token"},

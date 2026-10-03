@@ -1,4 +1,6 @@
-"""`knos proof ...`: the engine the Stop hook runs, by hand; and the judge prove.yml runs on GitHub."""
+"""`knos proof ...`: the engine the Stop hook runs, by hand; and what the workflows run on GitHub: the judge, a
+bounty's terms and their evidence, who is paid, and the judge's memory. Every read of GitHub goes through
+knos.judge.github."""
 
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ import typer
 
 
 def register(app: typer.Typer, out, Stop, repo_of) -> None:
-    proof = typer.Typer(add_completion=False, help="AI agent work counts only when Knos proves it")
+    proof = typer.Typer(add_completion=False, help="Compare what a change claims with what the repository and its checks show")
     app.add_typer(proof, name="proof")
 
     def _store(repo: Path):
@@ -64,11 +66,18 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
     def _say(v: dict, evidence: Path | None) -> None:
         if evidence:
             evidence.write_text(json.dumps(v, indent=1, default=str), encoding="utf-8")
-        for r in v["evidence"].get("required_by_history", []):
+        ev = v["evidence"]
+        for r in ev.get("required_by_history", []):
             out.print(f"REQUIRED by this repo's history: {r}", markup=False, emoji=False)
-        who = v["evidence"].get("payee") or {}
+        for name, state in (ev.get("checks") or {}).items():
+            out.print(f"{state:<10} {name}", markup=False, emoji=False)
+        for note in [*ev.get("facts", []), *ev.get("unverified", []), *ev.get("notes", [])]:
+            out.print(f"NOTE {note}", markup=False, emoji=False)
+        who = ev.get("payee") or {}
         if who.get("id"):
             out.print(f"paid to @{who.get('login')} (GitHub user id {who['id']}): {who['why']}", markup=False, emoji=False)
+        if who.get("hint"):
+            out.print(f"NOTE {who['hint']}", markup=False, emoji=False)
         for r in v["reasons"]:
             out.print(f"NO  {r}", markup=False, emoji=False)
         if v["checks_hash"]:
@@ -78,46 +87,103 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
             raise typer.Exit(1)
         out.print("[green]proven[/green]")
 
-    def _inputs(store, diff, body_file, checks_file, repo_name, head, wait):
-        from .. import judge
+    def _terms(path: Path | None) -> dict | None:
+        """The bounty's terms from a file that holds exactly their canonical bytes (a final newline is forgiven)."""
+        from .. import terms
+        if not path:
+            return None
+        try:
+            return terms.parse(path.read_bytes().rstrip(b"\r\n"))
+        except terms.Refused as why:
+            raise Stop(f"{path}: {why}") from None
+
+    def _lines(path: Path | None) -> list[str] | None:
+        """The changed paths in a file as `git diff --name-only` wrote it."""
+        from .. import terms
+        return terms.listed(path.read_text(encoding="utf-8", errors="replace")) if path else None
+
+    def _changed(path: Path | None, bought, repo_name: str, number) -> list[str] | None:
+        """What the pull request changed, for a bounty's scope: the --changed file, else GitHub's own list of the
+        pull request's files (a rename under both its names). None when neither can be had."""
+        from .. import judge, terms
+        files = _lines(path)
+        if files is None and bought is not None and repo_name and number:
+            files = terms.pull_files(repo_name, number, judge.github)
+        return files
+
+    def _inputs(store, diff, body_file, checks_file, repo_name, head, wait, bought=None, statuses_file=None):
+        """(store, diff, description, check runs, commit statuses). The last two are read from GitHub when no file
+        holds them; with a bounty's terms, until its checks have finished or `wait` seconds have passed."""
+        import time
+
+        from .. import judge, terms
         from . import history
         st = history.SibylStore.local(store) if store else history.NullStore()
         diff_text = diff.read_text(encoding="utf-8", errors="replace") if diff else None
         body = body_file.read_text(encoding="utf-8", errors="replace") if body_file else ""
-        runs = None
-        if checks_file:
-            got = json.loads(checks_file.read_text(encoding="utf-8"))
-            runs = got.get("check_runs", []) if isinstance(got, dict) else got
+        runs = statuses = None
+        if checks_file:      # a list, or GitHub's own answer: one that holds fewer runs than it counts was cut short
+            runs = terms.listing(json.loads(checks_file.read_text(encoding="utf-8")), "check_runs")
+            statuses = terms.listing(json.loads(statuses_file.read_text(encoding="utf-8")), "statuses") if statuses_file else \
+                ([] if bought else None)
         elif head and repo_name:
+            end = time.monotonic() + wait       # one wait for both: what a claim needs, then what the terms need
             runs = judge.check_runs(repo_name, head, wait=wait, body=body)
-        return st, diff_text, body, runs
+            if bought is not None:
+                _found, runs, statuses = terms.watch(bought, repo_name, head, judge.github, max(0.0, end - time.monotonic()))
+        return st, diff_text, body, runs, statuses
 
-    def _who(event, repo_name: str, issue: str, issue_file):
-        """(the pull request, the issue, who is paid) from the pull_request event GitHub hands the workflow; three
-        Nones without one. The issue is read from GitHub for its assignees; when GitHub does not answer, no assignment
-        is held against the pull request."""
+    def _pull(event: Path | None, repo_name: str, number: int) -> dict | None:
+        """The pull request: from the event GitHub hands the workflow (or a file holding the pull request itself),
+        else read from GitHub by its number."""
         from .. import judge
-        if not event:
-            return None, None, None
-        pull = json.loads(event.read_text(encoding="utf-8")).get("pull_request") or {}
+        if event:
+            got = json.loads(event.read_text(encoding="utf-8"))
+            return got.get("pull_request") or (got if isinstance(got.get("head"), dict) and "user" in got else {})
+        if number and repo_name:
+            try:
+                return judge.github(f"repos/{repo_name}/pulls/{number}")
+            except OSError as why:
+                raise Stop(f"GitHub did not answer for {repo_name}#{number}: {why}") from None
+        return None
+
+    def _who(event, repo_name: str, issue: str, issue_file, bought=None, number: int = 0, strict: bool = False, tip: bool = False):
+        """(the pull request, what GitHub said, who is paid); the pull request is None when there is none. With
+        --repo, GitHub is asked for what decides it: the issue and when it was assigned to whom, the comments on
+        both, and who has write access. What GitHub does not answer is treated as not said: it never names anyone.
+        `tip`: who a tip on the pull request goes to, which no issue enters."""
+        import time
+
+        from .. import closing, judge, who
+        pull = _pull(event, repo_name, number)
+        if pull is None:
+            return None, {}, None
+        facts = {"issue": None, "events": None, "pull_comments": None, "issue_comments": None}
+        permission = user = None
         message = ""
-        if (pull.get("user") or {}).get("type") == "Bot" and repo_name and (pull.get("head") or {}).get("sha"):
-            try:
-                message = judge.github(f"repos/{repo_name}/commits/{pull['head']['sha']}")["commit"]["message"]
-            except Exception:  # noqa: BLE001 - the description or the assignee may still name the person
-                message = ""
-        issue_data = None
+        issue, issue_file = ("", None) if tip else (issue, issue_file)
+        if repo_name:
+            facts = who.read(repo_name, pull.get("number"), issue, judge.github)
+            permission, user = who.permission_of(repo_name, judge.github), who.user_of(judge.github)
+            if (pull.get("user") or {}).get("type") == "Bot" and (pull.get("head") or {}).get("sha"):
+                try:    # what its head commit says is a hint to show, nothing more
+                    message = judge.github(f"repos/{repo_name}/commits/{pull['head']['sha']}")["commit"]["message"]
+                except Exception:  # noqa: BLE001
+                    message = ""
         if issue_file:
-            issue_data = json.loads(issue_file.read_text(encoding="utf-8"))
-        elif repo_name and str(issue).isdigit():
-            try:
-                issue_data = judge.github(f"repos/{repo_name}/issues/{issue}")
-            except Exception:  # noqa: BLE001
-                issue_data = None
-        return pull, issue_data, judge.payee(pull, message)
+            facts["issue"] = json.loads(issue_file.read_text(encoding="utf-8"))
+        strict, closes, edited = strict and bool(str(issue)), None, False      # no issue named: no bounty to be strict about
+        if strict and repo_name and pull.get("number"):
+            # GitHub's own list (without it, the description is read), and whether the description was edited after the merge
+            closes, edited = closing.facts(repo_name, pull["number"], judge.github)
+        facts["now"] = time.time()       # the one reading of the clock every later question about a reservation uses
+        paid = judge.payee(pull, facts["issue"], facts["events"], facts["pull_comments"], facts["issue_comments"],
+                           permission, bought, facts["now"], message, user, strict, closes, tip, edited)
+        return pull, facts, paid
 
     common = dict(
-        event=typer.Option(None, "--event", help="the pull_request event (GITHUB_EVENT_PATH): who is paid, and the issue's assignment"),
+        event=typer.Option(None, "--event", help="the pull_request event (GITHUB_EVENT_PATH), or a file holding the pull request: "
+                                                 "who is paid, and the issue's assignment"),
         issue_file=typer.Option(None, "--issue-file", help="the issue as GitHub's API gives it (else fetched)"),
         diff=typer.Option(None, "--diff", help="the pull request's unified diff from the base"),
         evidence=typer.Option(None, "--evidence", help="write the evidence JSON here"),
@@ -128,6 +194,13 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
         checks_file=typer.Option(None, "--checks-file", help="the head commit's check runs, as JSON (else fetched)"),
         head=typer.Option("", "--head", help="the head commit, to fetch its check runs from GitHub"),
         wait=typer.Option(0, "--wait", help="seconds to wait for the commit's other checks to finish"),
+        terms_file=typer.Option(None, "--terms", help="the bounty's terms, as funded (their canonical JSON): the pull request "
+                                                      "must meet them"),
+        changed=typer.Option(None, "--changed", help="file listing the pull request's changed paths, one a line, a rename "
+                                                     "under both its names (git diff --no-renames --name-only); with "
+                                                     "--terms and none given, GitHub's list of the pull request's files"),
+        statuses_file=typer.Option(None, "--statuses-file", help="the head commit's statuses, as JSON (else fetched)"),
+        number=typer.Option(0, "--pull", help="the pull request's number, to read it from GitHub when there is no --event"),
     )
 
     @proof.command("gate")
@@ -137,25 +210,225 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
              repo_name: str = common["repo_name"], agent: str = common["agent"], body_file: Path = common["body_file"],
              checks_file: Path = common["checks_file"], head: str = common["head"], wait: int = common["wait"],
              event: Path = common["event"], issue_file: Path = common["issue_file"],
+             terms_file: Path = common["terms_file"], changed: Path = common["changed"],
+             statuses_file: Path = common["statuses_file"], number: int = common["number"],
+             funded: str = typer.Option("", "--funded", help="issue numbers that carry a bounty, comma-separated: a description "
+                                                             "that mentions one without closing it is told so"),
              strict: bool = typer.Option(False, "--strict", help="at the merged commit: a claim that cannot be checked is refused")) -> None:
         """A pull request, running none of its code: the repo's rules, what its history requires, and whether the
-        description's "tests pass" is true at the head commit; for a bounty's pull request also who is paid and the
-        issue's assignment. Exit 1 unless it passes."""
+        description's "tests pass" is true at the head commit; for a bounty's pull request also its terms (--terms:
+        every funded check passed at that commit, nothing out of scope changed), who is paid and the issue's
+        assignment. Exit 1 unless it passes."""
         from .. import judge
-        st, diff_text, body, runs = _inputs(store, diff, body_file, checks_file, repo_name, head, wait)
-        pull, issue_data, paid = _who(event, repo_name, issue, issue_file)
-        _say(judge.gate(base, diff_text, st, repo_name or None, agent or None, body, runs, issue, pull, issue_data, paid,
-                        strict), evidence)
+        bought = _terms(terms_file)
+        st, diff_text, body, runs, statuses = _inputs(store, diff, body_file, checks_file, repo_name, head, wait, bought, statuses_file)
+        pull, facts, paid = _who(event, repo_name, issue, issue_file, bought, number, strict)
+        _say(judge.gate(base, diff_text, st, repo_name or None, agent or None, body, runs, issue, pull,
+                        facts.get("issue"), paid, strict, bought, statuses, _changed(changed, bought, repo_name, (pull or {}).get("number")),
+                        [int(x) for x in funded.replace(",", " ").split() if x.isdigit()], facts.get("events"), facts.get("now")),
+             evidence)
 
     @proof.command("payee")
-    def payee(event: Path = typer.Option(..., "--event", help="the pull_request event (GITHUB_EVENT_PATH)"),
-              repo_name: str = common["repo_name"]) -> None:
-        """Print the GitHub user id a pull request's bounty is paid to: its author, or the person who ran the bot
-        that opened it. Exit 1, saying why, when nobody can be named."""
-        _pull, _issue, paid = _who(event, repo_name, "", None)
-        if not paid or not paid.get("id"):
-            raise Stop((paid or {}).get("why") or "not a pull request event")
-        print(paid["id"])
+    def payee(event: Path = common["event"], repo_name: str = common["repo_name"], number: int = common["number"],
+              issue: str = typer.Option("", "--issue", help="the issue the pull request closes: its assignment decides too"),
+              issue_file: Path = common["issue_file"], terms_file: Path = common["terms_file"],
+              bound: str = typer.Option("", "--bound", help="the wallet bound to the payee's GitHub account, when you read one "
+                                                            "from the chain"),
+              strict: bool = typer.Option(False, "--strict", help="at the merged commit: the pull request must close --issue, and "
+                                                                   "what GitHub did not answer pays nobody yet"),
+              tip: bool = typer.Option(False, "--tip", help="who a `/knos tip` on this merged pull request goes to: decided on "
+                                                            "the pull request alone, whatever was said about a bounty"),
+              as_json: bool = typer.Option(False, "--json", help="print who is paid, why, and the payout address as JSON")) -> None:
+        """Print the GitHub user id a pull request's bounty is paid to: its author, or for a pull request a bot
+        opened, the person GitHub authenticates (the issue's assignee, a maintainer's `/knos pay @login`, or an
+        assignee's `/knos mine`). Exit 1, saying why and what would fix it, when nobody is paid."""
+        from .. import who
+        _pull_, facts, paid = _who(event, repo_name, issue, issue_file, _terms(terms_file), number, strict, tip)
+        if paid is None:
+            raise Stop("not a pull request: pass --event, or --repo and --pull")
+        if as_json:
+            print(json.dumps({**paid, "address": who.payout_address(paid, facts["pull_comments"], bound or None)}))
+        if not paid.get("id"):
+            raise Stop(paid["why"] + ".", paid.get("fix") or "") if not as_json else typer.Exit(1)
+        if not as_json:
+            print(paid["id"])
+
+    @proof.command("closes")
+    def closes_cmd(event: Path = common["event"], repo_name: str = common["repo_name"], number: int = common["number"]) -> None:
+        """Print the issues a pull request closes when it is merged, one number a line: GitHub's own list, and what
+        its description closes with a keyword. A bounty is paid only for a pull request that closes its issue."""
+        from .. import closing, judge
+        pull = _pull(event, repo_name, number)
+        if pull is None:
+            raise Stop("not a pull request: pass --event, or --repo and --pull")
+        listed = closing.read(repo_name, pull["number"], judge.github) if repo_name and pull.get("number") else None
+        for n in closing.closed_by(pull, listed):
+            print(n)
+
+    @proof.command("comment")
+    def comment_cmd(event: Path = typer.Option(..., "--event", help="the issue_comment or issues event (GITHUB_EVENT_PATH)"),
+                    repo_name: str = common["repo_name"],
+                    issue: str = typer.Option("", "--issue", help="for a comment on a pull request: the issue its bounty is on "
+                                                                  "(else the one issue its description closes)"),
+                    terms_file: Path = typer.Option(None, "--terms", help="that issue's bounty, as funded (its canonical JSON); "
+                                                                          "none when it has no bounty")) -> None:
+        """Answer one `/knos` comment (or a new issue's description). Prints one JSON object: the reply to post, the
+        assignees to add and remove on the issue, and `then`: what is left to do because it needs the chain (fund,
+        tip, settle or status; empty when the reply is all). Prints nothing when it holds no command."""
+        import time
+
+        from .. import closing, commands, judge, terms, who
+        got = json.loads(event.read_text(encoding="utf-8"))
+        on = got.get("issue") or {}
+        said = got.get("comment") or on
+        on_pull = "pull_request" in on
+        command = commands.parse(said.get("body") or "", on_pull)
+        name = getattr(command, "name", "")
+        pull, facts = None, {"issue": None, "events": None, "pull_comments": None, "issue_comments": None}
+        permission = user = None
+        if repo_name and on.get("number") and name not in ("", "fund", "status", "help"):
+            permission, user = who.permission_of(repo_name, judge.github), who.user_of(judge.github)
+            if not on_pull:     # take, release: the issue is in the event; who assigned whom, and when, is not
+                facts.update(issue=on, events=terms.pages(f"repos/{repo_name}/issues/{on['number']}/events", judge.github))
+            else:
+                pull = _pull(None, repo_name, on["number"])
+                if name not in ("tip", "settle"):
+                    closes = closing.closing_issues(pull.get("body") or "", repo_name)
+                    facts = who.read(repo_name, on["number"], issue or (closes[0] if len(closes) == 1 else ""), judge.github)
+        o = who.answer(command, said.get("user") or {}, pull, facts["issue"], facts["events"], facts["pull_comments"],
+                       facts["issue_comments"], permission, _terms(terms_file), time.time(), user)
+        if o is not None:
+            print(json.dumps({"command": name, "reply": o.reply, "assign": list(o.assign), "unassign": list(o.unassign), "then": o.then}))
+
+    @proof.command("terms")
+    def terms_cmd(repo_name: str = common["repo_name"],
+                  command: str = typer.Option("", "--command", help="the fund command, e.g. \"/knos fund 20 checks: test\""),
+                  body_file: Path = typer.Option(None, "--body-file", help="the comment (or the new issue's description) that holds the command"),
+                  branch: str = typer.Option("", "--branch", help="the default branch (else asked of GitHub)"),
+                  sha: str = typer.Option("", "--sha", help="the default branch's head commit (else asked of GitHub)"),
+                  accept_dir: Path = typer.Option(None, "--accept-dir", help="the issue's acceptance bundle on the default branch "
+                                                                             "(.knos/acceptance/<issue>): tests mode when it has files"),
+                  issue: str = typer.Option("", "--issue", help="the issue being funded, for the reply"),
+                  to: Path = typer.Option(None, "--out", help="write the canonical terms here, byte for byte"),
+                  as_json: bool = typer.Option(False, "--json", help="print one JSON object: terms, hash, where the checks came "
+                                                                     "from, the amount")) -> None:
+        """Fix a bounty's terms: read the fund command, ask GitHub what the repository requires (its required
+        checks, else what ran on the default branch's head), and print the canonical terms and their hash; with
+        --json also the amount and the reply to post. A `/knos tip` gets the terms of a tip, which ask for nothing.
+        Exit 1 with the reply to post when the command is neither, or the terms cannot be fixed."""
+        from .. import commands, judge, terms
+        text = body_file.read_text(encoding="utf-8", errors="replace") if body_file else command
+        fund = commands.parse(text)
+        if isinstance(fund, commands.Error):
+            raise Stop(fund.reply)
+        if not isinstance(fund, (commands.Fund, commands.Tip)):
+            raise Stop(commands.reply("malformed", "fund", why="this needs a fund command"))
+        tip = isinstance(fund, commands.Tip)
+        accept = ""
+        if not tip and accept_dir and accept_dir.is_dir() and any(p.is_file() for p in accept_dir.rglob("*")):
+            accept = judge.checks_hash(accept_dir)
+        required = runs = statuses = None
+        if not tip and fund.checks != ():       # `checks: none` asks nothing of the repository
+            if not repo_name:
+                raise Stop("Name the repository whose checks the bounty buys: --repo owner/name.")
+            try:
+                branch = branch or judge.github(f"repos/{repo_name}")["default_branch"]
+                sha = sha or judge.github(f"repos/{repo_name}/commits/{branch}")["sha"]
+            except (OSError, KeyError, TypeError) as why:
+                raise Stop(f"GitHub did not answer for {repo_name}: {why}") from None
+            required = terms.required_checks(repo_name, branch, judge.github)
+            runs, statuses = terms.head_checks(repo_name, sha, judge.github, events=True)
+        try:
+            built = terms.Built(terms.tip(), "tip", []) if tip else terms.build(fund, required, runs, statuses, accept)
+            data = terms.canonical(built.terms)
+        except terms.Refused as why:
+            raise Stop(f"Knos: {why}") from None
+        if to:
+            to.write_bytes(data)
+        if as_json:
+            days = terms.TIP_DAYS if tip else fund.days
+            said = commands.reply("understood", fund, issue=issue, terms=built.terms, source=built.source, notes=built.notes)
+            print(json.dumps({"command": fund.name, "terms": data.decode(), "hash": terms.terms_hash(data), "source": built.source,
+                              "notes": built.notes, "units": fund.units, "days": days, "work": days * 86_400,
+                              "mode": 1 if accept else 0, "reply": said}))
+            return
+        print(data.decode())
+        print(terms.terms_hash(data))
+
+    @proof.command("evidence")
+    def evidence_cmd(terms_file: Path = typer.Option(..., "--terms", help="the bounty's terms, as funded (their canonical JSON)"),
+                     repo_name: str = common["repo_name"],
+                     sha: str = typer.Option("", "--sha", help="the commit: the pull request's head"),
+                     number: int = typer.Option(0, "--pull", help="the pull request, to read its changed files from GitHub"),
+                     changed: Path = common["changed"], checks_file: Path = common["checks_file"],
+                     statuses_file: Path = common["statuses_file"], wait: int = common["wait"],
+                     to: Path = typer.Option(None, "--out", help="write the verdict here as JSON")) -> None:
+        """A bounty's terms against GitHub's record of one commit: each required check's state (passed, failed,
+        skipped, pending, absent, unreadable) and the verdict. Exit 0 only when every one passed and no changed
+        file is out of scope: that, not a description, is what a payment needs. (A bounty funded with acceptance
+        checks needs those to pass as well: `knos proof judge --terms`.)"""
+        from .. import judge, terms
+        bought = _terms(terms_file)
+        if checks_file:
+            runs = json.loads(checks_file.read_text(encoding="utf-8"))
+            statuses = json.loads(statuses_file.read_text(encoding="utf-8")) if statuses_file else []
+            found = terms.evidence(bought, runs, statuses)
+        elif repo_name and sha:
+            found, _runs, _statuses = terms.watch(bought, repo_name, sha, judge.github, wait)
+        else:
+            raise Stop("Nothing to read the checks from: pass --repo and --sha, or --checks-file.")
+        if not changed and not (number and repo_name):
+            raise Stop("Nothing says what the pull request changed: pass --changed, or --repo and --pull.")
+        files = _changed(changed, bought, repo_name, number)
+        ok, reasons = terms.accepted(bought, found, files)
+        if to:
+            to.write_text(json.dumps({"terms_hash": terms.terms_hash(bought), "mode": 1 if bought["mode"] == "tests" else 0,
+                                      "accept": bought["accept"], "checks": found, "accepted": ok, "reasons": reasons},
+                                     indent=1), encoding="utf-8")
+        for name, state in found.items():
+            out.print(f"{state:<10} {name}", markup=False, emoji=False)
+        if bought["mode"] == "tests":
+            out.print("this bounty also needs its acceptance checks to pass: knos proof judge --terms", markup=False)
+        elif not bought["checks"]:
+            out.print("no check is required: the merge alone is the acceptance", markup=False)
+        for r in reasons:
+            out.print(f"NO  {r}", markup=False, emoji=False)
+        if not ok:
+            out.print("[red]not accepted[/red]")
+            raise typer.Exit(1)
+        out.print("[green]accepted[/green]")
+
+    memory = typer.Typer(add_completion=False, help="the judge's memory between runs: the repository's knos-memory issue")
+    proof.add_typer(memory, name="memory")
+
+    @memory.command("pull")
+    def memory_pull(repo_name: str = typer.Option(..., "--repo", help="owner/name"),
+                    store: Path = typer.Option(..., "--store", help="the directory of the judge's Sibyl store")) -> None:
+        """Load what earlier runs learned, from the repository's knos-memory issue into the judge's Sibyl store."""
+        from .. import judge
+        from . import history
+        from . import memory as lessons
+        n = lessons.pull(repo_name, history.SibylStore.local(store), judge.github)
+        if n is None:
+            raise Stop(f"GitHub did not answer for {repo_name}'s knos-memory issue: this run remembers nothing.")
+        out.print(f"Loaded {n} lesson(s) from {repo_name}'s knos-memory issue.", markup=False)
+
+    @memory.command("push")
+    def memory_push(repo_name: str = typer.Option(..., "--repo", help="owner/name"),
+                    store: Path = typer.Option(..., "--store", help="the directory of the judge's Sibyl store"),
+                    run_id: str = typer.Option("", "--run", help="this run's id, named in the comment")) -> None:
+        """Post what this run learned to the repository's knos-memory issue (opened if there is none). Needs a token
+        that may write issues: a run in the repository's own context."""
+        from .. import judge
+        from . import history
+        from . import memory as lessons
+        try:
+            n = lessons.push(repo_name, history.SibylStore.local(store), judge.github, judge.github, run_id)
+        except (OSError, KeyError, TypeError) as why:
+            raise Stop(f"GitHub did not take the lessons: {why}") from None
+        if n is None:
+            raise Stop(f"GitHub did not answer for {repo_name}'s knos-memory issue: nothing was posted.")
+        out.print(f"Posted {n} new lesson(s) to {repo_name}'s knos-memory issue." if n else "Nothing new to remember.", markup=False)
 
     @proof.command("judge")
     def judge_cmd(base: Path = typer.Option(..., "--base", help="the base branch checkout"),
@@ -168,20 +441,23 @@ def register(app: typer.Typer, out, Stop, repo_of) -> None:
                   repo_name: str = common["repo_name"], agent: str = common["agent"],
                   body_file: Path = common["body_file"], checks_file: Path = common["checks_file"],
                   head: str = common["head"], wait: int = common["wait"],
-                  event: Path = common["event"], issue_file: Path = common["issue_file"]) -> None:
+                  event: Path = common["event"], issue_file: Path = common["issue_file"],
+                  terms_file: Path = common["terms_file"], statuses_file: Path = common["statuses_file"],
+                  number: int = common["number"],
+                  strict: bool = typer.Option(False, "--strict", help="at the merged commit: a claim that cannot be checked is refused")) -> None:
         """Tests mode: the gate, then the funder's acceptance checks in a sandbox (fail on the base, pass on the pull
-        request). Exit 1 unless it passes."""
+        request). With --terms the pull request must meet them too, and the acceptance checks on the base must be
+        the ones that were funded. Exit 1 unless it passes."""
         from .. import judge
         from . import engine
         cfg = dict(engine.config(base))
         cfg["issue"] = issue
-        names = None
-        if changed:
-            names = [x.strip() for x in changed.read_text(encoding="utf-8").splitlines() if x.strip()]
-        st, diff_text, body, runs = _inputs(store, diff, body_file, checks_file, repo_name, head, wait)
-        pull, issue_data, paid = _who(event, repo_name, issue, issue_file)
-        _say(judge.judge_with_rules(base, pr, cfg, names, diff_text, st, repo_name or None, agent or None, body, runs,
-                                    setup or None, sandbox, pull, issue_data, paid), evidence)
+        bought = _terms(terms_file)
+        st, diff_text, body, runs, statuses = _inputs(store, diff, body_file, checks_file, repo_name, head, wait, bought, statuses_file)
+        pull, facts, paid = _who(event, repo_name, issue, issue_file, bought, number, strict)
+        _say(judge.judge_with_rules(base, pr, cfg, _lines(changed), diff_text, st, repo_name or None, agent or None, body,
+                                    runs, setup or None, sandbox, pull, facts.get("issue"), paid, strict, bought, statuses,
+                                    facts.get("events"), facts.get("now")), evidence)
 
     @proof.command("observe")
     def observe(sha: str = typer.Argument(...), check: str = typer.Argument(..., help="e.g. ci"),

@@ -1,6 +1,14 @@
 {
- "note": "GitHub account ids that are Knos's own (the maintainer and the accounts its live tests run as). scripts/network_stats.py never counts their activity as outside use.",
+ "note": "What is Knos's own: GitHub account ids (the maintainer and the accounts its live tests run as) and wallets (a wallet has no GitHub id: Knos's own devnet keys, i.e. the rehearsal buyer, the CLI and deploy payers, the relay key, and the wallets the maintainer bound). scripts/network_stats.py never counts their activity as outside use.",
  "ids": [
   142920951
+ ],
+ "wallets": [
+  "EZi57B4aT661Nwf9oZyPN5ronZMMgtgGUfe68aGff4Gf",
+  "3AwCofxMiRBChGA4BWdEqGKxgREErrrRYf3fqjhP7HzM",
+  "9ig9AXfoNrd5uPhdSFGujPoVsrxze5CGVFM6uusgQydG",
+  "PrHq3RscVtGwYsEinAy6buMFwytn8xZGPgj8ZuNwS6h",
+  "EwSxyJFNQkNN9qtss4Qd7DTvrNYb62vgvhdwqgfErXDz",
+  "9a6RmArU8cfKGqWRfXU2i8xGXsvVFiNs97ZMVuYyozcW"
  ]
 }

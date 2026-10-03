@@ -2,7 +2,7 @@
 Actions or GitLab CI on chain. Pure instruction builders and account readers; no network.
 
     ixs = write_ixs(payer, tid, jwt)                 # the token into its account (several chunks)
-    for sq in step_plan(bits): step_ix(payer, tid, key, sq)   # 2048-bit: [8, 8]; 4096-bit: [2, 3, 3, 3, 3, 2]
+    for sq in step_plan(bits): step_ix(payer, tid, key, sq)   # 2048-bit: [8, 8]; 4096-bit: [2, 3, 3, 3, 4, 1]
     read_token(account_data).payload                 # the verified claims, once the last step has run
 """
 from __future__ import annotations
@@ -59,7 +59,16 @@ def key_params(n: int) -> tuple[int, bytes]:
 
 
 def step_plan(bits: int) -> list[int]:
-    return [8, 8] if bits == 2048 else [2, 3, 3, 3, 3, 2]
+    """Squarings per Step transaction, 16 in all, so that every transaction stays under the 1,400,000 compute units
+    a transaction can have, for a token of any size up to MAX_JWT. Measured in tests/test_oidc_chain.py.
+
+    2048-bit: [8, 8]. 4096-bit: [2, 3, 3, 3, 4, 1]. The first call also puts the signature in Montgomery form, so it
+    has room for two squarings; a middle call for four. The call that finishes also hashes the token, decodes its
+    payload and reads its claims, work that grows with the token, so it gets one squaring. This function used to
+    return [2, 3, 3, 3, 3, 2]: with two squarings the last call ran out of compute units once a GitLab token passed
+    about 5,000 bytes (a few hundred bytes earlier or later for claims of another shape).
+    """
+    return [8, 8] if bits == 2048 else [2, 3, 3, 3, 4, 1]
 
 
 def write_ixs(payer: Pubkey, tid: bytes, jwt: str | bytes, program: Pubkey = OIDC_ID) -> list[Instruction]:

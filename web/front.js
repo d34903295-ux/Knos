@@ -4,9 +4,10 @@
 
 const $ = (id) => document.getElementById(id);
 const API = "https://api.github.com";
-// Knos's reusable workflows, pinned by full commit sha: a bounty records that sha on chain when it is funded, and
-// knos-pay refuses a token from any other commit. The Pages build (network.yml) writes the commit it was built from
-// in place of the placeholder, so the site always hands out the workflows of its own commit.
+// The commit the templates below name is the example's own (scripts/front_workflow.py writes them from examples/).
+// The Pages build stamps its own commit into these two constants for templates that still use them; a template that
+// names its workflows in drexthealpha/knos-workflows at a commit uses neither, and the page never hands out a file
+// whose commit is not a full one (see pinned).
 export const KNOS_SHA = "KNOS_COMMIT_SHA";
 export const KNOS_RELAY_SHA = "KNOS_COMMIT_SHA";
 
@@ -104,136 +105,174 @@ export function parseRepo(s) {
 }
 
 // The caller workflow: exactly examples/knos-workflow.yml (tests/test_ghrelay.py checks they match).
-export const WORKFLOW = `# .github/workflows/knos.yml - Knos on GitHub, with no secret, wallet or faucet in this repo.
+export const WORKFLOW = `# .github/workflows/knos.yml: Knos in this repository. This one file is the whole payment flow: a comment funds an
+# issue, and the pull request that closes it is paid when it is merged. It needs no secret, and nothing in this
+# repository holds a key or money.
 #
-# "Protect this repo" (https://drexthealpha.github.io/Knos/) prefills this file. Then:
-#   1. A maintainer comments on issue N (or writes the same line in a new issue's description):
-#          /knos bounty <amount>
-#      fund.yml asks GitHub for a token that says so; relay.yml posts it; anyone (Knos's always-on worker does) carries
-#      it to Solana, where knos-oidc checks GitHub's signature and knos-pay opens the bounty. Knos pays the gas.
-#   2. Someone opens a pull request whose body says "Fixes #N". No wallet, no address. prove.yml's check job runs
-#      on it: the repo's own rules, and whether a "tests pass" in its description is true at its head commit.
-#   3. A maintainer merges it. prove.yml runs that same check once more at the merged head and, only if it holds,
-#      asks GitHub for a token that says "pull request by GitHub user U closing issue N was merged"; on Solana the
-#      bounty is held for U's GitHub account and released an hour later (until then /knos veto on the issue takes
-#      it back; "/knos bounty <amount> review 0" pays at once). A pull request an agent opened under a bot account
-#      pays the person who ran it. U claims it whenever they like, to any address: knos claim <address>, or
-#      https://drexthealpha.github.io/Knos/#claim.
-#      An issue that is assigned to someone pays only their pull request; an unassigned one is open to anyone.
-#   Optional, pay without waiting for a merge: put acceptance checks for issue N in .knos/acceptance/N/ on the default
-#   branch before funding. prove.yml then runs them against each pull request in a sandbox, in a job with no token
-#   and no secret, and only if they pass does a second job, which runs no pull request code, mint the token. That
-#   payment waits a review window (default 24 hours) in which /knos veto takes it back.
+# What starts it, and what it then does:
 #
-# Security model:
-#   - pull_request_target runs THIS file from the base branch, so a pull request cannot edit what runs here. This file
-#     checks out nothing and reads the pull request body only through environment variables.
-#   - Knos's workflows are referenced by full commit sha. A bounty pins that sha on chain when it is funded, and
-#     knos-pay refuses a token from any other workflow or any other commit of these. The judge prove.yml runs is
-#     the code at that same commit; this file cannot choose another.
-#   - /knos bounty and /knos veto count only from OWNER, MEMBER or COLLABORATOR (fund.yml).
-#   - Tokens posted as comments name one action each and are accepted for at most an hour (relay.yml).
-#   - To make the Knos check required before merge: Settings > Rules > New branch ruleset > Require status checks >
-#     add "prove / check" (the Protect page links there).
+#   A new comment (\`issue_comment\`).
+#       A comment with a line that starts with /knos is a command; any other comment starts no job. The command job
+#       runs it and always answers with a comment. \`/knos fund 20\` on an issue puts 20 test USDC in escrow for it;
+#       \`/knos help\` lists the rest. Commands are read on issues and on pull requests, from anyone who can comment.
+#       Who may give which command is decided by the command itself and, where money moves, by the escrow on
+#       Solana, which goes by GitHub's own signature of who commented.
+#   A new issue (\`issues\`).
+#       An issue whose description has a line \`/knos fund <amount>\` is funded as it is opened.
+#   A push (\`push\`).
+#       Merging a pull request pushes to the default branch. The settle job finds the pull requests that push merged.
+#       For each one that closes a funded issue it checks the bounty's terms at the merged commit (the checks the
+#       funder named must have passed there) and, only if they hold, asks GitHub for a signed statement that pays
+#       the pull request's author. Pushes to other branches, and tags, start no job.
+#       GitHub runs this file as it is at the pushed commit. A push made with a workflow's own token starts no run
+#       (GitHub's rule), and a commit message with [skip ci] starts none either. For those, \`/knos settle\` on the
+#       merged pull request does the same work.
+#   A run started by hand (\`workflow_dispatch\`).
+#       Actions > knos > Run workflow, with a merged pull request's number: tries its payment again.
+#   The check has finished (\`workflow_run\`).
+#       Only with the second, optional file, knos-check.yml (the check on every pull request). When that check ends,
+#       GitHub runs this file's copy on the default branch, never the pull request's. The review job repeats the
+#       check and, from here, may say the result in one comment on the pull request and remember what it learned
+#       (in an issue labelled knos-memory). For an issue funded with acceptance checks (.knos/acceptance/<issue>/)
+#       a job that cannot ask for a signed statement runs them against the pull request in a sandbox; only if they
+#       pass does another job, which runs none of the pull request's code, ask for the statement that pays.
+#       A first-time contributor's check waits for a maintainer's approval, and nothing here runs before it.
+#
+# What it can do in this repository: read the code, the checks and the workflow runs; write on issues and pull
+# requests (it comments, assigns an issue to the person who takes it, and keeps its notes in an issue labelled
+# knos-memory); ask GitHub for signed statements about what happened here (id-token). What it cannot do: change
+# code, branches, tags, releases or settings. It has no write access to the repository's contents.
+#
+# Why it is safe to install. It does not use \`pull_request_target\`. No job that can ask for a signed statement
+# checks out or runs anything from a pull request, or anything else from this repository: those jobs install Knos
+# and read GitHub's own records. The one job that runs a pull request's code (the acceptance checks, in a sandbox)
+# has a token that can only read this repository's contents, no secret, and no way to ask for a signed statement.
+#
+# No secret is needed. The signed statements are posted as comments, and Knos's public relay carries them to Solana
+# and pays the transaction fees. They are public on purpose: each names one action and the escrow takes it once.
+# Optional: with a repository secret KNOS_RELAY_KEY (a Solana key that holds a little SOL for fees, never a bounty's
+# money) the jobs carry their own statements and do not wait for the relay.
+#
+# The Knos workflows are named by a full commit. The escrow records that commit when a bounty is funded and takes
+# the pay token only from the same commit. They accept no inputs, so this file cannot change what they do:
+# editing the conditions below only changes when they run. Keep the three names that start with "knos": by them
+# Knos tells its own jobs from the checks a bounty can require.
 name: knos
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, edited, closed]
   issue_comment:
     types: [created]
   issues:
     types: [opened]
+  push:
+    branches: ["**"]        # branches, not tags; the settle job's condition keeps the default branch only
+  workflow_dispatch:
+    inputs:
+      pull:
+        description: Number of the merged pull request whose payment to try again
+        required: true
+        type: number
+  workflow_run:
+    workflows: ["knos check"]
+    types: [completed]
 
 permissions: {}
 
 jobs:
-  # ---- /knos bounty <amount>, /knos veto on an issue ---------------------------------------------------------------
-  fund:
+  # ---- a /knos comment, or a new issue that funds itself -------------------------------------------------------------
+  # (startsWith and contains ignore case, so /Knos counts; fromJSON('"\\n/knos"') is "/knos" at the start of a later line)
+  command:
+    name: knos command
     if: >-
-      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
-       (startsWith(github.event.comment.body, '/knos bounty ') || startsWith(github.event.comment.body, '/knos veto'))) ||
-      (github.event_name == 'issues' && contains(github.event.issue.body, '/knos bounty '))
+      (github.event_name == 'issue_comment' &&
+       (startsWith(github.event.comment.body, '/knos') || contains(github.event.comment.body, fromJSON('"\\n/knos"')))) ||
+      (github.event_name == 'issues' &&
+       (contains(github.event.issue.body, '/knos fund') || contains(github.event.issue.body, '/knos bounty')))
     permissions:
       contents: read
-      id-token: write
-    uses: drexthealpha/Knos/.github/workflows/fund.yml@${KNOS_SHA}
-
-  fund-relay:
-    needs: fund
-    if: needs.fund.outputs.issue != ''
-    permissions:
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_RELAY_SHA}
-    with:
-      kind: \${{ needs.fund.outputs.kind }}
-      number: \${{ fromJSON(needs.fund.outputs.issue) }}
-
-  # ---- a pull request that says "Fixes #N" -------------------------------------------------------------------------
-  job:
-    if: github.event_name == 'pull_request_target'
-    runs-on: ubuntu-latest
-    outputs:
-      issue: \${{ steps.id.outputs.issue }}
-    steps:
-      - id: id
-        env:
-          BODY: \${{ github.event.pull_request.body }}
-        run: |
-          issue=$(printf '%s\\n' "$BODY" | grep -oiE '\\b(fixes|closes|resolves)[[:space:]]+#[0-9]+' | head -1 | grep -oE '[0-9]+$' || true)
-          echo "issue=$issue" >> "$GITHUB_OUTPUT"
-          echo "issue=#$issue"
-
-  prove:
-    needs: job
-    if: needs.job.outputs.issue != ''
-    permissions:
-      contents: read
       checks: read
-      issues: read
+      statuses: read
+      actions: read
       id-token: write
-    uses: drexthealpha/Knos/.github/workflows/prove.yml@${KNOS_SHA}
-    with:
-      issue: \${{ needs.job.outputs.issue }}
+    uses: drexthealpha/knos-workflows/.github/workflows/fund.yml@def6ac689479af2225c1b022ed078c2388b87800
+    secrets:
+      KNOS_RELAY_KEY: \${{ secrets.KNOS_RELAY_KEY }}       # optional: when the repository has none, this passes nothing
 
-  prove-relay:
-    needs: prove
-    if: needs.prove.outputs.passed == 'true'
+  # ---- a merge; a run started by hand; /knos settle or a funded /knos tip on a pull request ---------------------------
+  settle:
+    name: knos settle
+    needs: command    # after the command, when there was one: it says when a payment follows (a tip is funded first)
+    if: >-
+      !cancelled() && (
+        (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'issue_comment' && needs.command.outputs.settle != ''))
     permissions:
+      contents: read
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_RELAY_SHA}
-    with:
-      kind: proof
-      number: \${{ github.event.pull_request.number }}
+      checks: read
+      statuses: read
+      actions: read
+      id-token: write
+    uses: drexthealpha/knos-workflows/.github/workflows/prove.yml@def6ac689479af2225c1b022ed078c2388b87800
+    secrets:
+      KNOS_RELAY_KEY: \${{ secrets.KNOS_RELAY_KEY }}       # optional, as above
 
-  prove-refused:
-    needs: [job, prove]
-    if: always() && needs.job.outputs.issue != '' && needs.prove.result == 'failure'
+  # ---- the check on a pull request has finished (only with knos-check.yml installed) ----------------------------------
+  # The same permissions as settle: GitHub starts a called workflow only when the calling job grants what every job
+  # in it asks for, and the last job of a review signs when the acceptance checks passed.
+  review:
+    name: knos review
+    if: >-
+      github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' &&
+      (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure')
     permissions:
+      contents: read
       issues: write
       pull-requests: write
-    uses: drexthealpha/Knos/.github/workflows/relay.yml@${KNOS_RELAY_SHA}
-    with:
-      kind: refused
-      number: \${{ github.event.pull_request.number }}
+      checks: read
+      statuses: read
+      actions: read
+      id-token: write
+    uses: drexthealpha/knos-workflows/.github/workflows/prove.yml@def6ac689479af2225c1b022ed078c2388b87800
+    secrets:
+      KNOS_RELAY_KEY: \${{ secrets.KNOS_RELAY_KEY }}       # optional, as above
 `;
 
 // The free check alone: exactly examples/knos-check.yml.
-export const CHECK_WORKFLOW = `# .github/workflows/knos-check.yml - the free Knos check on every pull request. No bounty, no money, no chain.
+export const CHECK_WORKFLOW = `# .github/workflows/knos-check.yml: the Knos check on every pull request. Optional, and it needs no secret: it only
+# reads. Paying for merged work is the other file, knos.yml, which works with or without this one.
 #
-# When a pull request's description says its tests pass or CI is green, Knos compares that with GitHub's own record of
-# the head commit and fails the status "check / claims" when a check failed. It also applies this repository's
-# CONTRIBUTING rules and remembers what was caught before. It runs none of the pull request's code.
+# What starts it, and what it then does:
 #
-# Security: pull_request_target runs THIS file from the base branch, so a pull request cannot edit what runs here; the
-# job has contents: read and checks: read and nothing else; the Knos workflow is referenced by full commit sha.
-# To require it before merge: Settings > Rules > New branch ruleset > Require status checks > add "check / claims".
+#   A pull request is opened, gets new commits, is reopened, or its title or description is edited (\`pull_request\`).
+#       When the description says the tests pass or CI is green, Knos compares that with GitHub's own record of the
+#       head commit and fails the status "check / claims" when a check failed. It also applies this repository's
+#       CONTRIBUTING rules, and for a pull request that closes a funded issue it says what the payment still needs.
+#       It runs none of the pull request's code. The result is the status and the job's summary.
+#
+# What it can do in this repository: read the code, the pull request, the issue it closes, and the checks and
+# workflow runs of its commit. What it cannot do: write anything. Every permission below is read. For a pull
+# request from a fork GitHub gives the run a token that can only read, no secret and no id-token whatever a file asks.
+#
+# How GitHub runs it:
+#   - The first run for a first-time contributor's pull request waits until a maintainer approves it, on the pull
+#     request's page.
+#   - GitHub runs this file as the pull request has it, so a pull request can change the file for its own run. That
+#     is why this check is advice and nothing about money depends on it: knos.yml checks again at the merge, from
+#     the default branch.
+#   - Keep the name "knos check". knos.yml waits for a workflow of that name, to repeat the check where it may
+#     comment on the pull request.
+#
+# To require the check before a merge: Settings > Rules > New branch ruleset > Require status checks > add
+# "check / claims".
 name: knos check
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, edited]
 
 permissions: {}
@@ -242,8 +281,12 @@ jobs:
   check:
     permissions:
       contents: read
+      pull-requests: read
+      issues: read
       checks: read
-    uses: drexthealpha/Knos/.github/workflows/check.yml@${KNOS_SHA}
+      statuses: read
+      actions: read
+    uses: drexthealpha/knos-workflows/.github/workflows/check.yml@def6ac689479af2225c1b022ed078c2388b87800
 `;
 
 export function checkUrl(owner, repo, branch) {
@@ -255,43 +298,102 @@ export function protectUrl(owner, repo, branch) {
 }
 
 // GitHub has no URL to prefill a ruleset's required checks: this opens a new active branch ruleset; the one extra
-// step is "Require status checks to pass" > add "prove / check" > Create.
+// step is "Require status checks to pass" > add "check / claims" (the check knos-check.yml reports) > Create.
 export function rulesetUrl(owner, repo) {
   return `https://github.com/${owner}/${repo}/settings/rules/new?target=branch&enforcement=active`;
 }
 
-function protectRepo(ev) {
+// The reusable workflows a file calls, read from the file itself (never typed here): [{ repo, file, ref }].
+export function pinsOf(text) {
+  return [...String(text).matchAll(/^[ \t]*uses:[ \t]*([\w.-]+\/[\w.-]+)\/\.github\/workflows\/([\w.-]+)@(\S+)[ \t]*$/gm)]
+    .map((m) => ({ repo: m[1], file: m[2], ref: m[3] }));
+}
+
+// A file may be handed out only when every workflow it calls is named by a full commit: a branch, a tag or the
+// placeholder before a release would run code nobody chose, or nothing at all.
+export const pinned = (text) => { const p = pinsOf(text); return p.length > 0 && p.every((x) => /^[0-9a-f]{40}$/.test(x.ref)); };
+
+// What the two files call, said from the files themselves.
+export function workflowFacts() {
+  const el = $("workflow-facts");
+  if (!el) return;
+  const said = (file, text) => {
+    const pins = pinsOf(text), refs = [...new Set(pins.map((p) => `${p.repo}@${p.ref}`))];
+    const calls = pins.map((p) => `<code>${esc(p.file)}</code>`).join(" and ");
+    const at = refs.map((r) => { const [repo, ref] = r.split("@"); return /^[0-9a-f]{40}$/.test(ref)
+      ? `${esc(repo)} at commit <a href="https://github.com/${esc(repo)}/commit/${ref}"><code>${ref.slice(0, 7)}</code></a>`
+      : `${esc(repo)} at <code>${esc(ref)}</code>, which is a placeholder: no release has named the commit yet`; }).join("; ");
+    return `<code>${file}</code> calls ${calls} of ${at}`;
+  };
+  el.innerHTML = `<p class="fine">${said("knos.yml", WORKFLOW)}; ${said("knos-check.yml", CHECK_WORKFLOW)}. A bounty records that
+    commit when it is funded, and the escrow takes the pay token only from the same commit.</p>`;
+}
+
+// The files themselves, to read or to copy where a prefilled link is not wanted.
+const copyBox = (ready) => `<details id="protect-copy"><summary class="fine">${ready ? "Copy the files instead" : "Read the files"}</summary>
+  <p class="fine"><code>.github/workflows/knos.yml</code></p><pre>${esc(WORKFLOW)}</pre>
+  <p class="fine"><code>.github/workflows/knos-check.yml</code> (optional)</p><pre>${esc(CHECK_WORKFLOW)}</pre></details>`;
+
+export function protectRepo(ev) {
   ev?.preventDefault();
   const m = /^(?:https:\/\/github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(($("protect-repo")?.value || "").trim());
   const out = $("protect-result");
-  if (!m) { out.textContent = "Enter owner/repo"; return; }
+  if (!m) { out.innerHTML = `<p class="status bad">Enter the repository as owner/repo.</p>`; return; }
   const [, o, r] = m;
-  const branch = $("protect-branch")?.value || "main";
-  out.innerHTML = `<a class="button" id="protect-open" href="${esc(protectUrl(o, r, branch))}" target="_blank" rel="noopener">Check and pay: commit knos.yml to ${esc(o)}/${esc(r)}</a>
-    <a class="button quiet" id="protect-check" href="${esc(checkUrl(o, r, branch))}" target="_blank" rel="noopener">Check only, no money: commit knos-check.yml</a>
-    <p class="fine">Both check every pull request's "tests pass" against GitHub's record and run none of its code. With the
-      first, fund an issue by commenting <code>/knos bounty 20</code> on it (<a href="#bounty">or open a funded issue</a>).
-      Optional: <a id="protect-rules" href="${esc(rulesetUrl(o, r))}" target="_blank" rel="noopener">make the Knos check required</a>
-      (on GitHub: Require status checks &gt; add "prove / check", or "check / claims" for the check alone).</p>`;
+  const branch = $("protect-branch")?.value.trim() || "main";
+  if (!pinned(WORKFLOW) || !pinned(CHECK_WORKFLOW)) {
+    out.innerHTML = `<p class="status bad">This copy of the page has no published workflow commit yet. The files below name a placeholder where
+      the commit goes, so GitHub would refuse them, and the links that prefill them are off until a release names the commit.</p>${copyBox(false)}`;
+    return;
+  }
+  out.innerHTML = `<a class="button" id="protect-open" href="${esc(protectUrl(o, r, branch))}" target="_blank" rel="noopener">1. Commit knos.yml to ${esc(o)}/${esc(r)}</a>
+    <a class="button quiet" id="protect-check" href="${esc(checkUrl(o, r, branch))}" target="_blank" rel="noopener">2. Optional: commit knos-check.yml</a>
+    <p class="fine">GitHub opens its "new file" page with the file filled in and asks you to commit it to <code>${esc(branch)}</code>.
+      The first file is the whole payment flow. The second checks every pull request's "tests pass" against GitHub's record;
+      it moves no money. To require that check before a merge:
+      <a id="protect-rules" href="${esc(rulesetUrl(o, r))}" target="_blank" rel="noopener">open a new ruleset</a>,
+      then "Require status checks to pass" and add <code>check / claims</code>.</p>${copyBox(true)}`;
 }
 
 // ---- UI ------------------------------------------------------------------------------------------------------------
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+export const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const CI_TEXT = { passed: "passed", failed: "FAILED", pending: "still running", "no-ci": "no CI ran", other: "no clear result (cancelled or waiting)" };
 
-function agentRecord(index, agent) {
+// One agent's counts in index.json. Two counts, each under the name of what it counts (scripts/agent_pr_index.py):
+// any_check_failed (a failed check of any kind, a deploy preview or a label gate included) and
+// test_or_build_check_failed (a failed check that is, by its name, a test or a build). An index published before both
+// had names (claimed_green, actually_failed, by_repo) carries only the first; it is read as that.
+export function agentCounts(a) {
+  if (a.any_check_failed) {
+    const r = a.first_pr_per_repo;
+    return { prs: a.prs, any: a.any_check_failed.prs, tests: a.test_or_build_check_failed?.prs ?? null,
+      repos: r?.repos || 0, repoAny: r?.any_check_failed?.repos ?? 0, repoTests: r?.test_or_build_check_failed?.repos ?? null };
+  }
+  const r = a.by_repo;
+  return { prs: a.claimed_green, any: a.actually_failed, tests: null, repos: r?.repos || 0, repoAny: r?.failed ?? 0, repoTests: null };
+}
+
+// k of n as a percentage and its 95% Wilson interval, rounded once from the counts (the file's own `share` and `ci95`
+// are already rounded to four places; rounding those again can land a tenth off).
+const share = (k, n) => `${((100 * k) / n).toFixed(1)}%`;
+function interval(k, n) {
+  const z = 1.96, p = k / n, d = 1 + (z * z) / n;
+  const mid = (p + (z * z) / (2 * n)) / d, half = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d;
+  return `${(100 * Math.max(0, mid - half)).toFixed(1)}%–${(100 * Math.min(1, mid + half)).toFixed(1)}%`;
+}
+
+export function agentRecord(index, agent) {
   if (!index) return `<p class="fine">Agent PR Index not loaded here (it is built with the site).</p>`;
   const a = agent && index.agents?.[agent];
   if (!a) return `<p class="fine">No record for ${agent ? esc(agent) : "this author"} in the Agent PR Index (${esc(index.date || "")}).</p>`;
-  const pct = (x) => `${(x * 100).toFixed(1)}%`;
-  const ci = (c) => (c ? `, 95% interval ${pct(c[0])}–${pct(c[1])}` : "");
-  const all = `Counting every such pull request: ${a.actually_failed} of ${a.claimed_green}${a.share == null ? "" : ` (${pct(a.share)})`}.`;
-  const r = a.by_repo;
-  const lead = r && r.repos
-    ? `in <strong>${r.repos}</strong> repositories, its first pull request that said tests pass had a failing check in
-       <strong>${r.failed}</strong> (<strong>${pct(r.share)}</strong>${ci(r.ci95)}). ${all}`
-    : `said tests pass on <strong>${a.claimed_green}</strong> pull requests with finished CI; a check had failed on
-       <strong>${a.actually_failed}</strong> (<strong>${a.share == null ? "n/a" : pct(a.share)}</strong>${ci(a.ci95)}).`;
+  const c = agentCounts(a);
+  const tests = (k, n, what) => (k == null || !n ? "" : ` In <strong>${k}</strong> of the ${n} ${what} (${share(k, n)}) a failed check was a test or a build, by its name.`);
+  const all = c.prs ? `Counting every such pull request: ${c.any} of ${c.prs} (${share(c.any, c.prs)}).` : "";
+  const lead = c.repos
+    ? `in <strong>${c.repos}</strong> repositories, its first pull request that said tests pass had a failing check of any kind in
+       <strong>${c.repoAny}</strong> (<strong>${share(c.repoAny, c.repos)}</strong>, 95% interval ${interval(c.repoAny, c.repos)}).${tests(c.repoTests, c.repos, "repositories")} ${all}`
+    : `said tests pass on <strong>${c.prs}</strong> pull requests with finished CI; a check of any kind had failed on
+       <strong>${c.any}</strong>${c.prs ? ` (<strong>${share(c.any, c.prs)}</strong>, 95% interval ${interval(c.any, c.prs)})` : ""}.${tests(c.tests, c.prs, "pull requests")}`;
   return `<p><strong>${esc(agent)}</strong> in the Agent PR Index (${esc(index.date)}): ${lead}${index.excluded_self_repo
     ? ` Pull requests on the author's own repositories are left out (${index.excluded_self_repo}).` : ""}</p>`;
 }
@@ -351,13 +453,11 @@ async function check(ev) {
           ? `: ${[...new Set(ci.failed)].slice(0, 8).map(esc).join(", ")}` : ""}</dd>
       </dl>
       ${agentRecord(index, agent)}
-      <a class="button" id="protect" href="${esc(protectUrl(repo.owner.login, repo.name, repo.default_branch))}" target="_blank" rel="noopener">Protect ${esc(repo.full_name)}</a>
-      <a class="button" href="${esc(rulesetUrl(repo.owner.login, repo.name))}" target="_blank" rel="noopener">Make it required</a>
-      <p class="fine">Adds one workflow file; GitHub asks you to commit it. From then on, a pull request that closes a
-        funded issue gets a Knos check that reads its description the way this page just did, and a bounty is paid
-        only when GitHub's own signature, checked by Solana, proves the pull request was merged (or passed the
-        funder's checks). "Make it required" opens GitHub's ruleset page: Require status checks &gt; add
-        "prove / check". 2.5% fee, only when someone is paid.</p>`;
+      <a class="button" id="check-protect" href="#protect=${encodeURIComponent(`${repo.full_name}@${repo.default_branch}`)}">Protect ${esc(repo.full_name)}</a>
+      <p class="fine">One workflow file makes a funded issue's payment run on this repository: the merged pull request
+        is paid when the funder's checks passed at the merged commit, as the workflow reads them from GitHub, and Solana has
+        checked GitHub's signature of that workflow run. An optional second
+        file runs this same check on every pull request. Fee: 2.5%, only when someone is paid.</p>`;
   } catch (e) {
     out.innerHTML = e instanceof RateLimited
       ? `<p class="status bad">GitHub's free limit for this network is used up (60 reads an hour without login).
@@ -371,5 +471,6 @@ if (typeof document !== "undefined" && $("pr-form")) {
   $("pr-form").addEventListener("submit", check);
   $("pr-url").addEventListener("paste", () => setTimeout(() => check(), 0));
   $("protect-form")?.addEventListener("submit", protectRepo);
+  workflowFacts();
   loadIndex();
 }

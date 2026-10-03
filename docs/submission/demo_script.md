@@ -1,49 +1,75 @@
-# Technical walkthrough (under three minutes)
+# Demo (under three minutes, all screen)
 
-Screen recording with narration. "The live run" at the end says where to see the run shown.
+One buyer, one task, a refusal, a payment, a second task; then how it works and what is not proven. Every scene is
+to be a screen recording of the real thing on Solana devnet, in test USDC, with nothing staged, so that each
+transaction shown can be found afterwards on the site's Numbers page (https://drexthealpha.github.io/Knos/#network),
+which is read from the programs' own logs. A number that only the release run can give is a slot, `[[stat: name]]`.
 
-## 1. An agent finds paid work, does it, and its operator is paid (0:00)
+Caption under the first scene, no narration: "Built during the hackathon: everything shown. Older work is listed in
+docs/DISCLOSURE.md."
 
-1. On a GitHub issue, a maintainer comments `/knos bounty 20`. Within a minute the Knos comment answers with the
-   escrow's address. On the site: 20.00 USDC, open.
-2. In a terminal, a coding agent with `knos mcp` is asked to find paid work. It calls `knos_bounties`, sees the
-   issue, writes the fix and opens a pull request that says "Fixes #N".
-3. The `prove / check` status appears on the pull request: the repo's rules, and whether its "tests pass" is true.
-   Show a second pull request that claims passing tests while its CI failed: refused, with the reason.
-4. Merge the good one. Knos runs the check again at the merged commit, then GitHub signs. The Knos comment: the
-   bounty is held for the author's GitHub account.
-5. `knos claim <address>` in the terminal. The balance arrives.
+## 1. A buyer funds a task, with terms (0:00, 25 seconds)
 
-## 2. What happens on chain (1:20)
+**On screen.** A GitHub issue in the buyer's repository. She types `/knos fund 20 checks: test` and sends it. Knos's
+reply appears under it: the amount, the terms in plain sentences, the deadline. Then the site: the bounty, open,
+with its terms and the funding transaction.
 
-- A GitHub Actions token is about 2,100 bytes. `knos-oidc` takes it in 3 writes, then checks the RSA-2048 signature
-  in Montgomery form in 2 transactions of under 1M compute units each. Solana's limit is 1.4M per transaction, which
-  is why the arithmetic is split and why this fits at all.
-- The token account is now a fact any program can read. `knos-pay` reads the claims GitHub signed: the repository,
-  the workflow file and its commit, the account to pay, the head commit. It checks them against the bounty and
-  credits that GitHub id.
-- Show the program-data accounts: no upgrade authority. Show `pins.rs`: GitHub's key hashes as constants, and the
-  rotate workflow's commit.
+**Narration.** This maintainer wants one issue fixed and will pay for it. One comment funds it, and names the check
+that must pass. The reply says what she has bought: paid when a pull request that closes this issue is merged, if
+`test` passed at its last commit. Those terms are now on chain, and nothing in the program changes them.
 
-## 3. Why these choices, and what they cost (2:05)
+## 2. A submission that fails the terms is refused (0:25, 25 seconds)
 
-- **No admin, immutable.** A proof that an operator could forge is not a proof. The cost: a bug cannot be patched
-  and a trusted key cannot be revoked. So it is on devnet, and the mainnet version expires keys.
-- **Pay a GitHub id, claim later.** The worker needs nothing to start. The claim is a token only they can get
-  GitHub to sign.
-- **A merge plus a check, and tests as an option.** Agents game tests. A maintainer's merge is a decision; the check
-  keeps a false "tests pass" from being paid. When a funder wants tests alone, they run in a sandbox and the payment
-  is held for a veto window.
-- **Why Solana.** Two cheap transactions verify an RSA signature; fees for a whole bounty are a fraction of a cent.
-- **Composability.** `examples/oidc_gate` is a second program reading a verified token through a crate with no
-  dependency: 21,632 compute units.
+**On screen.** A pull request for the issue whose check `test` is red. She merges it anyway. The workflow runs on
+the push. Knos's comment on the pull request: not paid, and the reason, the required check `test` failed at this
+commit. On the site the bounty is still open.
 
-Built in this hackathon: everything shown. Before it: an unrelated memory tool, not in this repository.
+**Narration.** Here is a pull request that does not meet the terms. Its test failed. She merges it all the same,
+and nothing is paid. The comment says exactly why: the check she named failed at the merged commit. The money has
+not moved, and the bounty is still open for a pull request that passes.
 
-## The live run
+## 3. A valid one is merged, and paid (0:50, 37 seconds)
 
-Nothing here is staged. Every payment the escrow has made is on the site's Numbers page
-(https://drexthealpha.github.io/Knos/#network), read from the program's own logs on devnet, with Knos's own accounts
-counted apart from outside ones. Each row links the transaction; the pull request it paid for carries the Knos
-comment with the same transaction. `python scripts/claims_check.py` fails if the programs are not immutable or if no
-payment has ever been made.
+**On screen.** A second pull request for the same issue: `test` is green. Its author has commented
+`/knos address <address>`. She merges it. Knos's comment follows with the payment's transaction. Then the explorer:
+that transaction, the transfer to the author's wallet and the fee. Then the token GitHub signed, decoded:
+`repository_id`, `job_workflow_ref`, `job_workflow_sha`, `event_name`, `run_attempt`, and the `aud` line that names
+the repository, the issue, the payee, the head commit and the hash of the terms.
+
+**Narration.** This one passes. She merges it, and that is the last thing anyone does. Her repository's workflow
+reads GitHub's record of the merged commit and asks GitHub to sign what it found. A Solana program checks that
+signature and pays the author's wallet: 110 seconds from merge to paid, at the
+median. This is the token. GitHub signed which repository it ran in, which workflow file at which commit, and what
+it asked for. The program checked each of those against the bounty.
+
+## 4. The same buyer funds the next task (1:27, 14 seconds)
+
+**On screen.** Another issue in the same repository. She types `/knos fund 20`. Knos's reply. The site: two bounties
+from this repository, one paid, one open.
+
+**Narration.** And she does it again. Same comment, next issue. A buyer who comes back is the number this product
+lives on, and on devnet it cannot be measured in real money yet.
+
+## 5. How it works (1:41, 43 seconds)
+
+**On screen.** The explorer: the two transactions that verify the token, with their compute units. Then
+`programs-v2/knos_oidc/src/pins.rs`: GitHub's four key hashes, the rotate workflow's commit, the account and the two
+repositories an attestation must come from. Then the bounty's account next to the funding transaction's log line
+`knos2:terms`, and the same hash inside the token's `aud`.
+
+**Narration.** Three choices carry this. First, GitHub's RSA signature is verified on chain, in two transactions,
+because one cannot hold the arithmetic. Second, the keys. The program starts from GitHub's four keys. A new key
+needs GitHub's own signature, from a workflow at a fixed commit run in my own repositories. Then it waits a day and
+needs a guardian's approval. Every key expires after 30 days unless attested again, and the guardian can revoke
+one. The guardian cannot add a key or move money. Third, the terms. Their hash is stored at funding, and a pay
+token that carries another hash pays nothing.
+
+## 6. What is not proven (2:24, 31 seconds)
+
+**On screen.** `knos mainnet-check` in a terminal: every gate with its evidence, and the one that fails, no outside
+review. Then docs/SECURITY.md, "Known limits".
+
+**Narration.** What this does not show. It is devnet and test money. No outside review has been done, and until one
+is, I can change these programs, through a multisig, after a public 48-hour delay. No outside buyer has funded a
+task. And GitHub signs that the workflow ran, not what it read: what that signature backs is only as honest as the
+funder's own repository, which is why it can only ever move that funder's money.

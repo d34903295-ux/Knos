@@ -22,6 +22,7 @@ REPO, OWNER, AUTHOR, MAINTAINER, OTHER = 987654321, 424242, 1234567, 555000, 765
 WF_REPO, WF_SHA, HEAD = "drexthealpha/Knos", "c" * 40, "a" * 40
 USDC = 1_000_000
 FUZZ_N = int(os.environ.get("KNOS_FUZZ_N", "600"))   # read at import: conftest clears KNOS_* per test
+FUZZ_SEED = int(os.environ.get("KNOS_FUZZ_SEED", "310"))   # the suite walks one fixed path; program.yml gives each walk its own
 _ISSUE = [100]
 
 
@@ -361,11 +362,13 @@ def test_terms_are_bounded_and_the_real_money_build_has_no_faucet(chain):
 
 
 def test_a_random_walk_never_loses_or_creates_money():
-    """Random steps (600 by default; KNOS_FUZZ_N=10000 nightly) over every instruction, valid and invalid. After each step, for each mint:
-    vault balance == open and proven job amounts + everything due. At the end: funded == claimed + fees + refunded + vault."""
+    """Random steps (600 by default; program.yml runs four walks of 2,500, each from its own KNOS_FUZZ_SEED) over every
+    instruction, valid and invalid. After each step, for each mint: vault balance == open and proven job amounts +
+    everything due. At the end: funded == claimed + fees + refunded + vault. A failure names its seed and step, so
+    KNOS_FUZZ_SEED=<seed> KNOS_FUZZ_N=<n> walks the same path again."""
     c = Chain()
     assert c.register(oidc.GITHUB, modulus(signing_key()))
-    rng = random.Random(310)
+    rng = random.Random(FUZZ_SEED)
     usdc = c.new_mint()
     funder = c.fund(10_000)
     ftok = c.token_account(funder.pubkey(), usdc)
@@ -381,8 +384,10 @@ def test_a_random_walk_never_loses_or_creates_money():
     counts: dict[str, int] = {}
     nxt = 1
     steps = FUZZ_N
-    for _ in range(steps):
+    print(f"\nrandom walk from seed {FUZZ_SEED}")      # first, so that a failure of any kind shows which walk it was
+    for step in range(steps):
         op = rng.choice(["fund", "pay", "pay", "settle", "veto", "refund", "claim", "warp", "bad_pay"])
+        where = f"seed {FUZZ_SEED}, step {step} ({op})"
         if op == "fund":
             amount = rng.choice([0, 1, 5, 50, 500]) * USDC
             mode = rng.choice([pay.MERGE, pay.TESTS]); review = rng.choice([0, 300])
@@ -395,7 +400,7 @@ def test_a_random_walk_never_loses_or_creates_money():
                        **({"job_workflow_sha": "e" * 40} if op == "bad_pay" else {}))
             ok = c.send([pay.pay_ix(c.payer.pubkey(), tok, pay.job_pda(REPO, n, funder.pubkey()), u, usdc, funder.pubkey())])
             if op == "bad_pay":
-                assert not ok
+                assert not ok, f"{where}: a proof from another workflow commit was paid"
             elif ok:
                 if j["review"] > 0:
                     j["state"] = "proven"; j["author"] = u
@@ -422,10 +427,10 @@ def test_a_random_walk_never_loses_or_creates_money():
             c.warp(rng.choice([1, 120, 400, 2000]))
         counts[op] = counts.get(op, 0) + 1
         owed = sum(j["amount"] for j in jobs.values()) + sum(due.values())
-        assert c.balance(pay.vault_pda(usdc)) == owed, f"after {op}: vault {c.balance(pay.vault_pda(usdc))} != owed {owed}"
+        assert c.balance(pay.vault_pda(usdc)) == owed, f"{where}: vault {c.balance(pay.vault_pda(usdc))} != owed {owed}"
         for u in users:
-            assert pay.read_due(c.data(pay.due_pda(u, usdc))) == due.get(u, 0)
-    assert funded == claimed + fees + refunded + c.balance(pay.vault_pda(usdc))
-    assert c.balance(pay.ata(pay.FEE_OWNER, usdc)) == fees
-    assert sum(c.balance(pay.ata(w, usdc)) for w in wallets.values()) == claimed
-    print(f"\nrandom walk: {steps} steps {counts}; funded {funded / USDC:.2f}, claimed {claimed / USDC:.2f}, fees {fees / USDC:.2f}, refunded {refunded / USDC:.2f}, 0 violations")
+            assert pay.read_due(c.data(pay.due_pda(u, usdc))) == due.get(u, 0), where
+    assert funded == claimed + fees + refunded + c.balance(pay.vault_pda(usdc)), f"seed {FUZZ_SEED}"
+    assert c.balance(pay.ata(pay.FEE_OWNER, usdc)) == fees, f"seed {FUZZ_SEED}"
+    assert sum(c.balance(pay.ata(w, usdc)) for w in wallets.values()) == claimed, f"seed {FUZZ_SEED}"
+    print(f"random walk: seed {FUZZ_SEED}, {steps} steps {counts}; funded {funded / USDC:.2f}, claimed {claimed / USDC:.2f}, fees {fees / USDC:.2f}, refunded {refunded / USDC:.2f}, 0 violations")

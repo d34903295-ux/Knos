@@ -1,10 +1,12 @@
 //! The reader against a real token account: a GitHub-shaped token that the test build of knos-oidc verified in
 //! LiteSVM, saved as it stood (scripts/interface_fixture.py). What must be found in it is in verified_token.json,
-//! read here with serde_json, so the crate's own JSON reader is checked against another one.
-use knos_oidc_interface::{fields, verified, Error, Token, ID, ID_STR, ISSUERS, ISSUER_GITHUB, LATE, T_JWT, T_PLEN, T_POFF, T_STAGE, VERIFIED};
+//! read here with serde_json, so the crate's own JSON reader is checked against another one. A second fixture is the
+//! same token from the same payer, verified by the test build of the second deployment.
+use knos_oidc_interface::{fields, v2, verified, Error, Token, ID, ID_STR, ISSUERS, ISSUER_GITHUB, LATE, T_JWT, T_KEY, T_PAYER, T_PLEN, T_POFF, T_STAGE, VERIFIED};
 use serde_json::Value;
 
 const ACCOUNT: &[u8] = include_bytes!("fixtures/verified_token.bin");
+const ACCOUNT_V2: &[u8] = include_bytes!("fixtures/verified_token_v2.bin");
 
 fn want() -> Value { serde_json::from_str(include_str!("fixtures/verified_token.json")).unwrap() }
 fn now() -> i64 { want()["now"].as_i64().unwrap() }
@@ -95,4 +97,24 @@ fn truncated_data_is_refused() {
     assert!(Token::read(&ID, &ACCOUNT[..end], now()).is_ok());
     // a payload cut short on its own is not a JSON object
     assert_eq!(fields(&v.payload[..v.payload.len() - 1], [b"aud"]).unwrap_err(), Error::Json);
+}
+
+#[test]
+fn the_second_deployment_writes_the_same_account_for_the_same_token() {
+    let w: Value = serde_json::from_str(include_str!("fixtures/verified_token_v2.json")).unwrap();
+    assert_eq!(w["owner"], v2::ID_STR);
+    let (first, second) = (Token::read(&ID, ACCOUNT, now()).unwrap(), v2::read(&v2::ID, ACCOUNT_V2, now()).unwrap());
+    assert_eq!((second.issuer(), second.exp(), second.payload()), (first.issuer(), first.exp(), first.payload()));
+    assert_eq!(serde_json::from_slice::<Value>(second.payload()).unwrap(), w["claims"]);
+    assert_eq!(w["claims"], want()["claims"]);
+    assert!(second.audience().unwrap().is("oidc-gate:release") && second.claim_u64("repository_id") == Some(424242001));
+    // every byte is the same but the address of the key account, which is derived from the program's address
+    assert_eq!(ACCOUNT_V2.len(), ACCOUNT.len());
+    assert_eq!(ACCOUNT_V2[..T_KEY], ACCOUNT[..T_KEY]);
+    assert_eq!(ACCOUNT_V2[T_PAYER..], ACCOUNT[T_PAYER..]);
+    assert_ne!(ACCOUNT_V2[T_KEY..T_PAYER], ACCOUNT[T_KEY..T_PAYER]);
+    // neither reader takes the other deployment's account, whatever its bytes say
+    assert_eq!(v2::read(&ID, ACCOUNT_V2, now()).unwrap_err(), Error::NotOidc);
+    assert_eq!(Token::read(&v2::ID, ACCOUNT_V2, now()).unwrap_err(), Error::NotOidc);
+    assert_eq!(v2::read(&v2::ID, ACCOUNT_V2, w["exp"].as_i64().unwrap() + LATE).unwrap_err(), Error::Stale);
 }

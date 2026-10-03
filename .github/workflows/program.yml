@@ -1,28 +1,43 @@
 name: program
 
-# The two Solana programs, built and tested from source in Actions:
+# The Solana programs, built and tested from source in Actions. Two deployments, side by side: the first (programs/,
+# built by scripts/build_programs.sh) and the second (programs-v2/, built by scripts/build_programs_v2.sh). The test
+# binaries of the second carry _v2_ in their names.
 #
-#   build-test      cargo build-sbf (pinned, cached agave) for knos-oidc, knos-pay and the example consumer; the test
-#                   binaries replace tests/fixtures, so the LiteSVM tests run against THIS commit's source; then the
-#                   Wycheproof RSA vectors (cargo test), the differential test against OpenSSL, the attack tests, and
-#                   10,000 random steps over every knos-pay instruction (no money lost or created, nothing stuck).
+#   build-test      one job per deployment, at the same time. cargo test (the Wycheproof RSA vectors against the
+#                   verifier's own arithmetic, and the programs' unit tests), then cargo build-sbf (pinned, cached
+#                   agave) for knos-oidc, knos-pay and, with the first deployment, the example consumer. The
+#                   deployment's committed test binaries are removed before the build, so the LiteSVM tests can only
+#                   load what THIS commit's source built: the differential test against OpenSSL, the attack tests,
+#                   and the fixture check (the interface crate's fixture is what the program writes).
+#   fuzz            10,000 random steps over every knos-pay instruction of each deployment (no money lost or created,
+#                   nothing stuck), as four walks of 2,500 at the same time, each from its own seed. A failure prints
+#                   its seed and step.
 #   interface       the dependency-free crate other programs use to read a verified token, and the IDLs.
-#   cargo-audit     RustSec advisories against the lockfile. No ignores.
+#   cargo-audit     RustSec advisories against each deployment's lockfile. No ignores.
 #   verified-build  `solana-verify build` (pinned docker image) for each program: the reproducible binary. These
-#                   artifacts are what gets deployed, once, and then made immutable; `knos mainnet-check` compares
-#                   the on-chain bytes with them.
+#                   artifacts are what gets deployed; `knos mainnet-check` compares the on-chain bytes with them.
+#                   Only on main, on the nightly run and when started by hand: it compiles everything in a container
+#                   with no cache (a reproducible build must not start from one), which no branch push has to wait for.
 #
-# Nothing here deploys. The programs have no upgrade authority, so there is nothing for CI to upgrade.
+# Time. A push to a branch waits for build-test, fuzz, interface and cargo-audit. No job needs another, so they all
+# run side by side and the wait is the longest single job: a second deployment is a second job beside the first, not
+# more steps in it. Every Rust build starts from a cache (Swatinem/rust-cache: the registry and the compiled
+# dependencies, saved by runs on main; a program's own crates are always compiled). On a cold cache, the first run
+# after a lockfile changes, the dependencies are compiled once and that run is slower. A newer push to a branch
+# cancels the run of the push before it; on main every run finishes.
+#
+# Nothing here deploys.
 on:
   workflow_dispatch:
   push:
-    paths: ["programs/**", "crates/**", "idl/**", "examples/oidc_gate/**", "src/knos/settle/**", "tests/_settle.py", "tests/test_oidc_*.py", "tests/test_pay_chain.py", "scripts/build_programs.sh", ".github/workflows/program.yml"]
+    paths: ["programs/**", "programs-v2/**", "crates/**", "idl/**", "examples/oidc_gate/**", "src/knos/settle/**", "tests/_*.py", "tests/test_oidc*.py", "tests/test_pay*.py", "tests/test_settle*.py", "scripts/build_programs*.sh", "scripts/interface_fixture.py", ".github/workflows/program.yml"]
   schedule:
     - cron: "41 3 * * *"
 
 concurrency:
   group: program-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -34,59 +49,151 @@ env:
 
 jobs:
   build-test:
+    name: build-test (${{ matrix.deployment }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One entry per deployment. workspace, also: its cargo workspaces (what the cache holds). cargo-test: where
+          # `cargo test` runs. build: the script that builds its programs and test binaries. tests: its LiteSVM tests,
+          # as pytest takes them. suffix: of its artifacts (the first deployment's keep the names they had).
+          - deployment: first
+            workspace: programs
+            also: examples/oidc_gate
+            cargo-test: programs/knos_oidc
+            build: scripts/build_programs.sh
+            tests: tests/test_oidc_chain.py tests/test_pay_chain.py tests/test_settle_relay.py tests/test_oidc_gate.py
+            suffix: ""
+          - deployment: second
+            workspace: programs-v2
+            also: ""
+            cargo-test: programs-v2
+            build: scripts/build_programs_v2.sh
+            tests: tests/test_oidc2_*.py tests/test_pay2_*.py
+            suffix: "-v2"
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      DEPLOYMENT: ${{ matrix.deployment }}
+      CARGO_TEST: ${{ matrix.cargo-test }}
+      BUILD: ${{ matrix.build }}
+      TESTS: ${{ matrix.tests }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.local/share/solana/install
             ~/.cache/solana
           key: agave-${{ env.SOLANA_VERSION }}-${{ runner.os }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      # The registry and the compiled dependencies of this deployment's workspaces. The key carries the agave version
+      # because the action reads the runner's rustc, and the programs are compiled by agave's.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            programs/target
-            examples/oidc_gate/target
-          key: cargo-sbf-${{ hashFiles('programs/Cargo.lock', 'examples/oidc_gate/Cargo.lock') }}
-          restore-keys: cargo-sbf-
+          workspaces: |
+            ${{ matrix.workspace }}
+            ${{ matrix.also }}
+          shared-key: programs-${{ matrix.deployment }}-agave-${{ env.SOLANA_VERSION }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: agave (pinned, cached)
         run: |
-          [ -x "$HOME/.local/share/solana/install/active_release/bin/solana" ] || sh -c "$(curl -sSfL https://release.anza.xyz/$SOLANA_VERSION/install)"
+          [ -x "$HOME/.local/share/solana/install/active_release/bin/solana" ] || sh -c "$(curl -sSfL "https://release.anza.xyz/$SOLANA_VERSION/install")"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      - name: Wycheproof RSA vectors against the verifier's own arithmetic (2048- and 4096-bit)
-        run: cd programs/knos_oidc && cargo test --release -- --nocapture
-      - name: cargo build-sbf (both programs, the example, and the test binaries)
-        run: bash scripts/build_programs.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: cargo test (the Wycheproof RSA vectors against the verifier's own arithmetic, 2048- and 4096-bit; unit tests)
+        run: cd "$CARGO_TEST" && cargo test --release -- --nocapture
+      - name: cargo build-sbf (the programs and their test binaries, in place of the committed ones)
+        run: |
+          # This deployment's committed test binaries go first: a test can then only load a binary this commit built,
+          # and one that the build script does not build is missing, not stale.
+          if [ "$DEPLOYMENT" = second ]; then find tests/fixtures -name '*_v2_*.so' -delete; else find tests/fixtures -name '*.so' ! -name '*_v2_*' -delete; fi
+          bash "$BUILD"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: programs
+          name: programs${{ matrix.suffix }}
           path: |
-            programs/target/deploy/knos_oidc.so
-            programs/target/deploy/knos_pay.so
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+            ${{ matrix.workspace }}/target/deploy/knos_oidc.so
+            ${{ matrix.workspace }}/target/deploy/knos_pay.so
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: test-fixtures
+          name: test-fixtures${{ matrix.suffix }}
           path: tests/fixtures/*.so
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
       - run: uv pip install --system -e ".[dev]"
       - name: the programs in LiteSVM (prints the compute units of each verification step)
-        run: pytest -q -s tests/test_oidc_chain.py tests/test_pay_chain.py tests/test_settle_relay.py tests/test_oidc_gate.py
-      - name: fuzz, 10,000 steps
-        run: KNOS_FUZZ_SEED=$GITHUB_RUN_ID pytest -q -s tests/test_pay_chain.py -k random_walk
-        env:
-          KNOS_FUZZ_N: "10000"
+        run: |
+          # shellcheck disable=SC2086  # a list of files or of patterns: pytest fails on a pattern that matches no file
+          pytest -q -s $TESTS
+      - name: the fixture check (the interface crate's fixture is what this build of the program writes)
+        run: python scripts/interface_fixture.py --check
       - name: the pinned issuer keys are still the issuers' (a key they added since must come in through the rotate workflow)
+        if: matrix.deployment == 'first'
         run: python scripts/oidc_pins.py
+
+  # 10,000 random steps a run for each deployment, as four walks of 2,500 side by side (one walk of 10,000 takes longer
+  # than everything else here together). Each walk has its own seed, so a run covers four paths and no two runs the
+  # same ones; a failure prints the seed and the step, and KNOS_FUZZ_SEED=<seed> KNOS_FUZZ_N=2500 walks it again
+  # anywhere.
+  fuzz:
+    name: fuzz (${{ matrix.deployment }}, walk ${{ matrix.walk }} of 4)
+    strategy:
+      fail-fast: false
+      matrix:
+        deployment: [first, second]
+        walk: [1, 2, 3, 4]
+        include:
+          - {deployment: first, workspace: programs, also: examples/oidc_gate, build: scripts/build_programs.sh, tests: tests/test_pay_chain.py}
+          - {deployment: second, workspace: programs-v2, also: "", build: scripts/build_programs_v2.sh, tests: "tests/test_pay2_*.py"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEPLOYMENT: ${{ matrix.deployment }}
+      BUILD: ${{ matrix.build }}
+      TESTS: ${{ matrix.tests }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.local/share/solana/install
+            ~/.cache/solana
+          key: agave-${{ env.SOLANA_VERSION }}-${{ runner.os }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            ${{ matrix.workspace }}
+            ${{ matrix.also }}
+          shared-key: programs-${{ matrix.deployment }}-agave-${{ env.SOLANA_VERSION }}
+          save-if: false   # build-test saves each deployment's cache; the walks only read it
+      - name: agave (pinned, cached)
+        run: |
+          [ -x "$HOME/.local/share/solana/install/active_release/bin/solana" ] || sh -c "$(curl -sSfL "https://release.anza.xyz/$SOLANA_VERSION/install")"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: cargo build-sbf (this commit's test binaries, in place of the committed ones)
+        run: |
+          if [ "$DEPLOYMENT" = second ]; then find tests/fixtures -name '*_v2_*.so' -delete; else find tests/fixtures -name '*.so' ! -name '*_v2_*' -delete; fi
+          bash "$BUILD"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - run: uv pip install --system -e ".[dev]"
+      - name: 2,500 random steps from this walk's seed
+        run: |
+          # shellcheck disable=SC2086  # a file or a pattern: pytest fails on a pattern that matches no file, and on no test
+          pytest -q -s $TESTS -k random_walk
+        env:
+          KNOS_FUZZ_N: "2500"
+          KNOS_FUZZ_SEED: ${{ github.run_id }}${{ github.run_attempt }}${{ matrix.walk }}
 
   # The crate another team's program depends on to read a verified token: no dependency, tested on the host against
   # a real verified token account (the fixture is regenerated and compared), and under clippy.
@@ -94,16 +201,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: crates/knos-oidc-interface
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo test (default and all features)
         run: |
           cd crates/knos-oidc-interface
           cargo test --locked
           cargo test --locked --all-features
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - run: uv pip install --system -e ".[dev]"
       - name: the fixture is what the real program writes, and the IDLs match the clients
         run: |
@@ -114,26 +225,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
           tool: cargo-audit
-      - name: cargo audit (the workspace's one lockfile covers both programs; any vulnerability fails the job)
+      - name: cargo audit (each deployment's one lockfile covers both of its programs; any vulnerability fails the job)
         run: |
-          cd programs && cargo audit
+          (cd programs && cargo audit)
+          (cd programs-v2 && cargo audit)
 
   verified-build:
     # The deployed binaries are THESE: `solana-verify build` in a pinned docker image, so `solana-verify
     # verify-from-repo` reproduces them byte for byte. cargo build-sbf on the runner differs (toolchain paths are
     # embedded), which is why build-test's binaries are only tested, never deployed.
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
+    name: verified-build (${{ matrix.workspace }}, ${{ matrix.program }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
+      fail-fast: false
       matrix:
+        workspace: [programs, programs-v2]
         program: [knos_oidc, knos_pay]
+    env:
+      WORKSPACE: ${{ matrix.workspace }}
+      PROGRAM: ${{ matrix.program }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cargo/bin/solana-verify
           key: solana-verify-0.4
@@ -143,10 +262,11 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: solana-verify build (docker)
         run: |
-          solana-verify build "$GITHUB_WORKSPACE/programs" --library-name ${{ matrix.program }} --base-image "$VERIFY_IMAGE"
-          echo "executable hash: $(solana-verify get-executable-hash programs/target/deploy/${{ matrix.program }}.so)"
-          sha256sum programs/target/deploy/${{ matrix.program }}.so
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          solana-verify build "$GITHUB_WORKSPACE/$WORKSPACE" --library-name "$PROGRAM" --base-image "$VERIFY_IMAGE"
+          echo "executable hash: $(solana-verify get-executable-hash "$WORKSPACE/target/deploy/$PROGRAM.so")"
+          sha256sum "$WORKSPACE/target/deploy/$PROGRAM.so"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ${{ matrix.program }}-verified.so
-          path: programs/target/deploy/${{ matrix.program }}.so
+          # the first deployment's artifacts keep their names: `knos mainnet-check` downloads <program>-verified.so
+          name: ${{ matrix.program }}${{ matrix.workspace == 'programs-v2' && '-v2' || '' }}-verified.so
+          path: ${{ matrix.workspace }}/target/deploy/${{ matrix.program }}.so

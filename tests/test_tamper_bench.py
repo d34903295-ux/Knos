@@ -1,9 +1,10 @@
-"""The tamper benchmark (scripts/tamper_bench.py) and the judge's pieces: protected paths, overlay, sentinel,
-fail-to-pass and the checks hash."""
+"""The tamper benchmark (scripts/tamper_bench.py) on its three sample repositories, and the judge's pieces: protected
+paths, overlay, sentinel, fail-to-pass and the checks hash."""
 
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import time
 from pathlib import Path
@@ -18,6 +19,7 @@ pytestmark = pytest.mark.skipif(__import__("sys").platform == "darwin",
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE = ROOT / "tests" / "bench_tamper" / "sample"
+DOC = ROOT / "docs" / "TAMPER.md"
 
 
 def _bench():
@@ -31,7 +33,7 @@ def test_the_benchmark_runs_fast_and_only_the_two_stated_limits_fool_an_in_proce
     t = time.monotonic()
     bench = _bench()
     control, rows = bench.run()
-    text = bench.render(control, rows)
+    text = bench.render({"python": (control, rows)})
     assert time.monotonic() - t < 90
     assert len(rows) == 21
     assert control["ci"] and control["knos"], control
@@ -42,6 +44,57 @@ def test_the_benchmark_runs_fast_and_only_the_two_stated_limits_fool_an_in_proce
     if bench.BLACKBOX:                      # the check that never loads the pull request's code is fooled by none
         assert control["box"] and not any(r["box"] for r in rows), [r["name"] for r in rows if r["box"]]
         assert "Knos, black box: fooled 0/21" in text
+        assert _knos_columns(bench.section(bench.SAMPLES["python"], control, rows)) == _knos_columns(_doc_section("Python, pytest"))
+
+
+def _doc_section(title: str) -> list[str]:
+    """The lines of one repository's section in the committed docs/TAMPER.md."""
+    doc = DOC.read_text(encoding="utf-8")
+    return doc.split(f"## {title}\n", 1)[1].split("\n## ", 1)[0].splitlines()
+
+
+def _knos_columns(lines: list[str]) -> list[tuple]:
+    """(number, attack, Knos tests, Knos black box, Knos's reason) of each row of a section: what Knos decided. The CI
+    column is left out: what plain CI lets through depends on the version of the language's test runner."""
+    rows = [[c.strip() for c in ln.strip().strip("|").split(" | ")] for ln in lines if ln.startswith("| ") and ln[2].isdigit()]
+    return [(r[0], r[1], r[3], r[4], r[5]) for r in rows]
+
+
+# One repository is one data point. The same 21 ideas against the same project in two more languages, on the judge's
+# own platform (prove.yml's judge runs on Linux): what each fools is exactly what docs/TAMPER.md says.
+@pytest.mark.skipif(os.name == "nt", reason="prove.yml's judge runs on ubuntu-latest")
+@pytest.mark.parametrize("key,ci_fooled,gap", [("node", 20, 1), ("ruby", 19, 0)])
+def test_the_same_attacks_on_a_repository_in_another_language(key, ci_fooled, gap):
+    bench = _bench()
+    sample = bench.SAMPLES[key]
+    if not bench.available(sample):
+        pytest.skip(f"needs {' and '.join(sample.needs)}")
+    control, rows = bench.run(key)
+    assert len(rows) == 21 and len({r["name"] for r in rows}) == 21
+    assert control["ci"] and control["knos"] and control["box"], control       # the honest fix passes all three judges
+    assert not any(r["box"] for r in rows), [r["name"] for r in rows if r["box"]]            # the black box: none
+    fooled = [r for r in rows if r["knos"]]
+    assert all(r["out_of_scope"] or r["gap"] for r in fooled), [r["name"] for r in fooled]
+    assert sum(r["out_of_scope"] for r in fooled) == 2 and sum(r["gap"] for r in fooled) == gap
+    assert all(r["ci"] for r in fooled)                # what fools the judge would have gone through CI as well
+    # the committed report is this run, row for row, in everything Knos decided; the report's CI column is what the
+    # versions it names let through (another node or minitest can differ by an attack or two)
+    assert _knos_columns(bench.section(sample, control, rows)) == _knos_columns(_doc_section(sample.title))
+    assert sum(r["ci"] for r in rows) >= 17
+    assert f"| {sample.title} | 21 | {ci_fooled} | {len(fooled)} | 0 |" in DOC.read_text(encoding="utf-8")
+
+
+def test_the_report_adds_the_repositories_up():
+    """The summary table of docs/TAMPER.md is the sum of its sections (each section is checked against a run above)."""
+    import re
+    doc = DOC.read_text(encoding="utf-8")
+    rows = re.findall(r"^\| (?!\*\*all)([^|#]+?) \| (\d+) \| (\d+) \| (\d+) \| (\d+) \|$", doc, re.M)
+    assert [r[0] for r in rows] == [s.title for s in _bench().SAMPLES.values()]
+    for title, n, ci, kn, bx in rows:
+        assert f"## {title}\n" in doc and f"**CI green fooled {ci}/{n}. Knos, tests: fooled {kn}/{n}. Knos, black box: fooled {bx}/{n}.**" in doc
+    sums = [sum(int(r[i]) for r in rows) for i in (1, 2, 3, 4)]
+    assert "| **all** | " + " | ".join(f"**{x}**" for x in sums) + " |" in doc
+    assert f"Of the {sums[2]} that fool an in-process test run" in doc
 
 
 @pytest.fixture()

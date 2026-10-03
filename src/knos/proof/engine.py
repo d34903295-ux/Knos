@@ -2,7 +2,10 @@
 
     claim kind -> check        tests -> tests, ci -> ci, pypi -> pypi, urls -> urls, deleted -> deleted,
                                author -> author, release -> author (+ whatever history requires: usually ci)
-    .knos/proof.toml           tests / install / author, and [[check]] name, run, when (a regex on the claim)
+    .knos/proof.toml           tests / install / author, and [[check]] name, run, when (a regex on the claim).
+                               A `run` whose first word is `python` or `python3` runs with the interpreter Knos is
+                               running under, on every platform (checks.with_python): never PATH's, which on Windows
+                               is the Microsoft Store alias.
     history.required(...)      checks earlier false "done"s in this repo made required (knos.proof.history)
     repo-rules, rule:<id>      the PR (base to working tree, and its commits) against CONTRIBUTING.md and the rules past
                                rejections taught (history.lint_pr). Run FIRST: a violation fails the verdict citing

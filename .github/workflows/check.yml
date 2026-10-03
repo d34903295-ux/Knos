@@ -1,108 +1,69 @@
-name: knos check
+name: knos check (reusable workflow)
 
-# A reusable workflow: the free check, for every pull request, with no bounty and no money involved. A repository calls
-# it from a `pull_request_target` workflow (template: examples/knos-check.yml), pinned to a full commit sha.
+# A reusable workflow: the check on every pull request, with no bounty needed and no money moved. A repository calls
+# it from its own knos-check.yml (examples/knos-check.yml), on `pull_request`. One job: install knos, run one command.
+# The command holds the logic and is tested without GitHub:
 #
-# It runs `knos proof gate`, which runs none of the pull request's code:
-#   - the description's own claims: a "tests pass" or "CI is green" is compared with GitHub's record of the head
-#     commit's finished checks, and refused when one failed;
-#   - the repository's own rules (CONTRIBUTING.md);
-#   - what this repository's history made required: a rule broken or a false claim caught before is remembered in
-#     Sibyl's local store, carried in this repository's Actions cache, and held against the next pull request.
+#     knos check --event "$GITHUB_EVENT_PATH" --repo "$GITHUB_REPOSITORY"
 #
-# contents: read and checks: read only. No id-token, no secret, no wallet, nothing on any chain. The result is the
-# status "check / claims" on the pull request; a branch ruleset can require it. To also pay for merged work, use
-# examples/knos-workflow.yml instead (it includes this check).
+# It checks out nothing and runs none of the pull request's code. It reads the pull request through GitHub's API and
+# holds it against:
+#   - its own words: a "tests pass" or "CI is green" in the description is compared with GitHub's record of the head
+#     commit's checks;
+#   - the repository's rules (CONTRIBUTING.md), read from the base commit, so a pull request cannot edit what it is
+#     held to; and what earlier pull requests taught, read from the issue labelled knos-memory;
+#   - when it closes a funded issue, the bounty's terms: what its author still needs for the payment.
+# The result is the job's own conclusion (the status "check / claims" on the pull request) and its summary. The check
+# is advice: nothing about money depends on it, and prove.yml checks again at the merge.
+#
+# How GitHub runs this, which the design rests on:
+#   - `pull_request` runs with a token that can only read when the pull request comes from a fork, and passes it no
+#     secret and no id-token. This job asks for nothing more in any case: every permission below is read.
+#   - `pull_request` runs the workflow files as the pull request has them, so a pull request can change the calling
+#     file for its own run. That is why this check is advice, and why what must not be bent runs elsewhere: the
+#     review (prove.yml, on `workflow_run`) and the merge (prove.yml, on `push`) run the default branch's files.
+#   - The first run for a first-time contributor's pull request waits until a maintainer approves it (GitHub's
+#     default for pull requests from forks).
+#   - A reusable workflow called from another repository sees the caller's event: `github.event`, the file at
+#     $GITHUB_EVENT_PATH, `github.repository` and the job's token are all the calling repository's.
+#   - It takes no inputs and no secret: nothing a caller passes can change which code runs here.
+#
+# The install steps are fund.yml's. This job neither restores nor saves an Actions cache.
 on:
-  workflow_call:
-    outputs:
-      passed:
-        description: "true when the pull request's claims and the repository's rules hold"
-        value: ${{ jobs.claims.outputs.passed }}
+  workflow_call: {}
 
 permissions: {}
 
 jobs:
   claims:
-    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # the newest run for a pull request replaces an older one still going: its head or its description has changed
+    concurrency:
+      group: knos-check-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    cache-mode: read
     permissions:
-      contents: read
-      checks: read
-    outputs:
-      passed: ${{ steps.gate.outputs.passed }}
+      contents: read          # CONTRIBUTING.md of the base commit, read through GitHub's API (there is no checkout)
+      pull-requests: read
+      issues: read            # the issue it closes, and the knos-memory issue
+      checks: read            # GitHub's record of the head commit
+      statuses: read
+      actions: read
     steps:
-      - name: checkout the base
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: uv, with no cache
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: base
-          fetch-depth: 0
-          persist-credentials: false
-      - name: the pull request's diff and description (nothing in it is run)
-        env:
-          HEAD: ${{ github.event.pull_request.head.sha }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          NUM: ${{ github.event.pull_request.number }}
-          BODY: ${{ github.event.pull_request.body }}
-        run: |
-          case "$HEAD" in *[!0-9a-f]*|"") echo "no pull request head sha"; exit 1;; esac
-          git -C base fetch --no-tags origin "+refs/pull/$NUM/head:refs/knos/head"
-          test "$(git -C base rev-parse refs/knos/head)" = "$HEAD"
-          git -C base diff "$BASE...$HEAD" > pr.diff
-          printf '%s' "$BODY" > body.md
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
+          version: "0.8.20"
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
-      - name: install knos at this workflow's own commit
+          enable-cache: false      # nothing is restored into a job that runs here, and nothing is saved from it
+          ignore-empty-workdir: true
+      - name: install knos, this one requirement exactly
         env:
-          REF: ${{ job.workflow_sha }}
-          REPO: ${{ job.workflow_repository }}
-          UV_EXCLUDE_NEWER: "2026-10-05T00:00:00Z"   # the judge's dependencies as published by this release, never newer
-        run: |
-          case "$REF" in
-            "") uv pip install --system "knos==0.3.11" ;;
-            *[!0-9a-f]*) echo "job.workflow_sha is not a commit sha"; exit 1 ;;
-            *) uv pip install --system "knos @ git+https://github.com/${REPO:-drexthealpha/Knos}@$REF" ;;
-          esac
-      - name: the judge's memory of this repo, from this repo's Actions cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ runner.temp }}/.knos-memory
-          key: knos-judge-sibyl-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: knos-judge-sibyl-
-      - name: knos proof gate
-        id: gate
+          UV_EXCLUDE_NEWER: "2026-10-10T00:00:00Z"
+        run: uv tool install --no-config "knos==0.3.12"
+      - name: knos check
         env:
-          HEAD: ${{ github.event.pull_request.head.sha }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          if knos proof gate --base base --diff pr.diff --evidence evidence.json --store "$RUNNER_TEMP/.knos-memory" \
-               --repo "$GITHUB_REPOSITORY" --agent "$AUTHOR" --body-file body.md --head "$HEAD" --wait 600; then
-            echo "passed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "passed=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "### Knos: this pull request's claims do not hold"
-              jq -r '.reasons[]? | "- " + .' evidence.json
-            } >> "$GITHUB_STEP_SUMMARY"
-            # learned only from a refusal that ran no pull request code, so the pull request cannot have written it
-            if jq -e '[.reasons[] | select(startswith("repo rule:") or startswith("claim:"))] | length > 0' \
-                 evidence.json > /dev/null; then echo "learn=true" >> "$GITHUB_OUTPUT"; fi
-            exit 1
-          fi
-      - name: remember what was learned
-        if: always() && steps.gate.outputs.learn == 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ runner.temp }}/.knos-memory
-          key: knos-judge-sibyl-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-      - name: evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: knos-evidence
-          path: evidence.json
-          if-no-files-found: ignore
+        run: knos check --event "$GITHUB_EVENT_PATH" --repo "$GITHUB_REPOSITORY"

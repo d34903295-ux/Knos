@@ -101,9 +101,9 @@ DIFF = ("diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +
 
 
 def test_the_judge_on_github_refuses_a_second_pull_request_because_of_what_sibyl_kept(tmp_path):
-    """prove.yml's check job keeps <dir>/sibyl.db in the repository's Actions cache. A pull request that broke the
-    repository's rule teaches it; the same author's next pull request, to a repository with no such rule, is refused
-    for it. With the cache gone (no Sibyl store), nothing was learned."""
+    """The judge on GitHub keeps Sibyl's local store <dir>/sibyl.db. A pull request that broke the repository's rule
+    teaches it; the same author's next pull request, to a repository with no such rule, is refused for it. With
+    that store gone, nothing was learned."""
     strict = tmp_path / "strict"
     strict.mkdir()
     (strict / "CONTRIBUTING.md").write_text("# Rules\n\n- Do not leave print() debug statements in code.\n", "utf-8")
@@ -118,3 +118,33 @@ def test_the_judge_on_github_refuses_a_second_pull_request_because_of_what_sibyl
     shutil.rmtree(tmp_path / "cache")
     assert judge.gate(lax, DIFF, history.SibylStore.local(tmp_path / "cache"), "o/lax", "agent-x")["passed"]
     assert (tmp_path / "cache" / "sibyl.db").exists()
+
+
+def test_the_lessons_in_the_knos_memory_issue_are_nothing_without_sibyl(tmp_path, monkeypatch):
+    """Between runs on GitHub the lessons travel as comments in the repository's knos-memory issue (the Actions cache
+    can no longer be written from the runs that judge). A run loads them into Sibyl's store and judges from there.
+    The same comments with no Sibyl behind them remember nothing: they are not a second store."""
+    from _hub import Issues
+    from knos.proof import memory
+    strict = tmp_path / "strict"
+    strict.mkdir()
+    (strict / "CONTRIBUTING.md").write_text("# Rules\n\n- Do not leave print() debug statements in code.\n", "utf-8")
+    lax = tmp_path / "lax"
+    lax.mkdir()
+    github = Issues()
+    run1 = history.SibylStore.local(tmp_path / "run1")
+    assert not judge.gate(strict, DIFF, run1, "o/strict", "agent-x")["passed"]
+    assert memory.push("o/r", run1, github, github) == 3                    # the tamper, and the check it made required twice over
+    shutil.rmtree(tmp_path / "run1")                                        # the runner is gone; only the issue is left
+    assert judge.gate(lax, DIFF, history.SibylStore.local(tmp_path / "run2"), "o/lax", "agent-x")["passed"]   # nothing loaded: nothing known
+    run3 = history.SibylStore.local(tmp_path / "run3")
+    assert memory.pull("o/r", run3, github) == 3
+    again = judge.gate(lax, DIFF, run3, "o/lax", "agent-x")
+    assert not again["passed"] and again["evidence"]["required_by_history"] == ["tamper:rule:no_debug"]
+    with contextlib.closing(sqlite3.connect(tmp_path / "run3" / "sibyl.db")) as con:     # what was pulled is in Sibyl's own store
+        assert con.execute("select count(*) from entities where category = 'proof_rule'").fetchone()[0] >= 2
+    assert memory.pull("o/r", history.NullStore(), github) == 3                           # the same comments, with no Sibyl
+    assert judge.gate(lax, DIFF, history.NullStore(), "o/lax", "agent-x")["passed"]
+    monkeypatch.setitem(sys.modules, "sibyl_memory_client", None)                         # as if it were not installed
+    with pytest.raises(ImportError):
+        history.SibylStore.local(tmp_path / "run4")

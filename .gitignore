@@ -29,7 +29,11 @@ id_rsa*
 
 node_modules/
 programs/target
+programs-v2/target
 examples/*/target
 
 # agent tooling scratch
 .claude/
+
+# videos rendered by scripts/video/render.py
+scripts/video/out/

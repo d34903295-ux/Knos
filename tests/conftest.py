@@ -1,10 +1,12 @@
-"""Shared fixtures. Every test runs in its own throwaway home, with no network and no KNOS_* settings from the
-machine running it, and the session fails if a test touched the real home's knos or agent settings."""
+"""Shared fixtures. Every test runs in its own throwaway home, with no network, no KNOS_* settings and none of the
+coding agents of the machine running it, and the session fails if a test touched the real home's knos or agent
+settings."""
 
 from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import socket
 import subprocess
 from pathlib import Path
@@ -46,9 +48,29 @@ def _loopback_only(self, address):
     return _real_connect(self, address)
 
 
+_AGENT_CLIS = ("claude", "codex")   # what `knos init` looks for on PATH to tell that an agent is installed (init.present)
+_real_which = shutil.which
+
+
+def _which_without_this_machines_agents(own: Path):
+    """shutil.which, blind to the coding agents installed on the machine running the tests. `knos init` takes a
+    `claude` or a `codex` on PATH as that agent being here, so a developer who has Codex would see other results than
+    CI, which has neither. One a test itself puts on PATH (under pytest's own temporary directory `own`) is found."""
+    def which(cmd, *args, **kwargs):
+        found = _real_which(cmd, *args, **kwargs)
+        if found and Path(str(cmd)).stem.lower() in _AGENT_CLIS:
+            try:
+                Path(found).resolve().relative_to(own)
+            except ValueError:
+                return None
+        return found
+    return which
+
+
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path_factory, monkeypatch):
     fake = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr(shutil, "which", _which_without_this_machines_agents(tmp_path_factory.getbasetemp().resolve()))
     for k in list(os.environ):
         if k.startswith("KNOS_"):
             monkeypatch.delenv(k, raising=False)
@@ -96,11 +118,15 @@ def repo(tmp_path, monkeypatch):
 
 def pytest_configure(config):
     """On Linux, put every test's throwaway home and repo on tmpfs (/dev/shm). SQLite fsyncs on commit and close; on a
-    spinning disk each close costs ~0.1 s and the suite spends minutes on it. Set KNOS_TEST_TMPFS=0 to opt out."""
+    spinning disk each close costs ~0.1 s and the suite spends minutes on it. Set KNOS_TEST_TMPFS=0 to opt out.
+
+    Only the root moves there: under it pytest makes each run a numbered directory of its own and keeps the last
+    three. (One fixed directory, which pytest empties when a run starts, let a second run by the same user, in
+    another checkout or another terminal, delete the first one's files while its tests were using them.)"""
     import sys
     if (sys.platform.startswith("linux") and os.path.isdir("/dev/shm") and not config.option.basetemp
             and os.environ.get("KNOS_TEST_TMPFS", "1") != "0" and not hasattr(config, "workerinput")):
-        config.option.basetemp = f"/dev/shm/knos-pytest-{os.getuid()}"  # pytest empties it at the start of each run
+        os.environ.setdefault("PYTEST_DEBUG_TEMPROOT", "/dev/shm")
 
 
 def pytest_collection_modifyitems(config, items):

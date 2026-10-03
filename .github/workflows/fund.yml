@@ -1,119 +1,106 @@
 name: knos fund
 
-# A reusable workflow, called from a repo's own knos.yml (examples/knos-workflow.yml). A user with write access
-# (author_association OWNER, MEMBER or COLLABORATOR) funds a bounty in one action, from GitHub itself:
+# A reusable workflow. A repository's own knos.yml (examples/knos-workflow.yml) calls it for a comment that has a line
+# starting with /knos, and for a new issue whose description funds it. It is one job: install knos, run one command.
+# The command holds all the logic and is tested without GitHub:
 #
-#     /knos bounty <amount> [review <seconds>]      as a comment on issue N, or as a line of a NEW issue's description
-#     /knos veto                                    as a comment: takes back a tests-mode payment in its review window
+#     knos command --event "$GITHUB_EVENT_PATH" --repo "$GITHUB_REPOSITORY"
 #
-# No secret, wallet or faucet in the calling repo. This job checks out the DEFAULT branch only (never a pull request)
-# and asks GitHub for an OIDC token whose audience says exactly what to do. knos-pay accepts it only from this file
-# at the commit the bounty pins (job_workflow_sha), on a GitHub-hosted runner:
+# It reads the comment, does what it says and always answers with a comment: fund and tip (fix the bounty's terms,
+# choose the balance that pays, ask GitHub for a token, have it carried to Solana), take and release (assign the
+# issue), and for every other command the reply itself. `/knos help` lists the commands.
 #
-#     knos:fund:<issue>:<amount in units>:<mode>:<checks hash>:<work seconds>:<review seconds>
-#     knos:veto:<repository id>:<issue>
+# What GitHub signs here. knos-pay (the second deployment) opens a bounty only on a GitHub Actions OIDC token whose
+# audience is
 #
-# mode 0 (merge) is the default: the bounty is paid when a maintainer merges the pull request that closes the issue,
-# after the review window (default 1 hour; `review 0` pays at once) unless vetoed.
-# mode 1 (tests) applies when .knos/acceptance/<N>/ exists on the default branch: the bounty is paid when those
-# acceptance checks pass on a pull request, after the review window (default 24 hours) unless vetoed. The checks hash
-# is sha256 over that directory (sorted relative paths, each "path\0sha256(content)\n"); it is 64 zeros in mode 0.
-# The token is published as artifact `knos-fund` or `knos-veto`; the caller's relay.yml job posts it for the worker.
+#     knos2:fund:<issue>:<amount units>:<mode>:<terms hash>:<work seconds>:<balance address>
+#
+# from a file named fund.yml, in a run that a comment or a new issue started (`issue_comment`, `issues`), on a
+# GitHub-hosted runner, in the run's first attempt. GitHub also signs who commented (`actor_id`): only the owner of
+# the balance, or a spender the owner listed, can spend it with a comment. The job on chain records this file's
+# repository and commit (`job_workflow_ref`, `job_workflow_sha`); from then on only prove.yml of the same repository
+# at the same commit can pay it. Running a failed run again mints a token the chain refuses (GitHub signs a re-run
+# with the first run's actor, whoever pressed the button): comment again instead.
+#
+# How GitHub runs this, which the design rests on:
+#   - A reusable workflow called from another repository sees the caller's event: `github.event`, the file at
+#     $GITHUB_EVENT_PATH, `github.repository` and the job's token are all the calling repository's.
+#   - `issue_comment` and `issues` run the workflow file of the calling repository's default branch, with that
+#     repository's token, also when the comment is on a pull request from a fork, and whoever commented: anyone who
+#     can comment starts this job. So it checks out nothing and runs nothing from the repository or a pull request;
+#     what people wrote reaches the command as a file, never a shell; and who may do what is decided by the command
+#     (GitHub's answer about that person's access) and, where money moves, by the chain from GitHub's signature.
+#   - Only a new comment and a newly opened issue count (the job's own condition), whatever events a caller listens
+#     for: an edit can be made by someone who is not the author.
+#   - It takes no inputs: nothing a caller passes can change which code runs here. A caller chooses when to call it,
+#     and nothing else. Its one output tells the caller that a payment should be tried next; it decides no payment.
+#
+# The one secret is optional. With KNOS_RELAY_KEY (a Solana key that pays transaction fees; it never holds a
+# bounty's money) the job carries its own token to Solana. Without it the token is posted as a comment and Knos's
+# public relay (worker.yml in drexthealpha/Knos) carries it; anyone else can. The token is public on purpose: it
+# names one action, the chain takes it once, and the signature on it is GitHub's.
+#
+# The install, the same two steps in every Knos job: uv at a version whose checksum the pinned setup-uv action
+# checks, then knos as the one exact requirement named below (a release on PyPI), with dependencies no newer than
+# UV_EXCLUDE_NEWER, ignoring any uv configuration in the working directory. The runner is ubuntu-24.04 by name: its
+# image has Python 3.12, and `ubuntu-latest` is being moved to Ubuntu 26.04. No job here restores or saves an Actions
+# cache (`enable-cache: false`, and `cache-mode: read` on every job): a cache written by a run of pull request code
+# could be read by a job that signs, so every run downloads what it installs.
 on:
   workflow_call:
-    inputs:
-      decimals:
-        description: the bounty token's decimals (USDC has 6)
+    secrets:
+      KNOS_RELAY_KEY:
+        description: >-
+          Optional. A Solana key that pays transaction fees, so this run carries its own token to Solana. Without it
+          the token is posted as a comment and Knos's public relay carries it.
         required: false
-        type: number
-        default: 6
-      work-days:
-        description: days until an unproven bounty is refunded
-        required: false
-        type: number
-        default: 14
     outputs:
-      issue:
-        description: the issue number ('' when the comment was not a valid command)
-        value: ${{ jobs.mint.outputs.issue }}
-      kind:
-        description: fund or veto
-        value: ${{ jobs.mint.outputs.kind }}
+      settle:
+        description: >-
+          The number of the pull request whose payment should be tried now (`/knos settle`, or a tip that was just
+          funded); empty otherwise. The calling file runs prove.yml when it is set.
+        value: ${{ jobs.command.outputs.settle }}
 
 permissions: {}
 
 jobs:
-  mint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  command:
     if: >-
-      (github.event_name == 'issue_comment' && !github.event.issue.pull_request &&
-       (startsWith(github.event.comment.body, '/knos bounty ') || startsWith(github.event.comment.body, '/knos veto')) &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
-      (github.event_name == 'issues' && github.event.action == 'opened' && contains(github.event.issue.body, '/knos bounty ') &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+      (github.event_name == 'issue_comment' && github.event.action == 'created') ||
+      (github.event_name == 'issues' && github.event.action == 'opened')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # one command at a time for an issue or a pull request, each in its turn (GitHub keeps up to 100 waiting), so a
+    # comment is not dropped because another one came in
+    concurrency:
+      group: knos-command-${{ github.event.issue.number }}
+      queue: max
+    cache-mode: read
     permissions:
-      contents: read
-      id-token: write
+      contents: read          # the repository's files, read through GitHub's API (there is no checkout)
+      issues: write           # the reply; assigning an issue for /knos take
+      pull-requests: write    # the reply, when the comment is on a pull request
+      checks: read            # which checks the repository runs: a bounty's terms name them
+      statuses: read          # the same, for checks that report as commit statuses
+      actions: read           # which event starts each check's workflow
+      id-token: write         # the fund token
     outputs:
-      issue: ${{ steps.parse.outputs.issue }}
-      kind: ${{ steps.parse.outputs.kind }}
+      settle: ${{ steps.command.outputs.settle }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: uv, with no cache
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-      - id: parse
+          version: "0.8.20"
+          python-version: "3.12"
+          enable-cache: false      # nothing is restored into a job that runs here, and nothing is saved from it
+          ignore-empty-workdir: true
+      - name: install knos, this one requirement exactly
         env:
-          BODY: ${{ github.event_name == 'issues' && github.event.issue.body || github.event.comment.body }}
-          EVENT: ${{ github.event_name }}
-          ISSUE: ${{ github.event.issue.number }}
-          REPO_ID: ${{ github.repository_id }}
-          DECIMALS: ${{ inputs.decimals }}
-          WORK_DAYS: ${{ inputs.work-days }}
-        run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import hashlib, os, re, sys
-          from decimal import Decimal
-          from pathlib import Path
-          lines = [x.strip() for x in os.environ["BODY"].strip().splitlines()]
-          if os.environ["EVENT"] == "issues":      # a new issue: the command is any line of its description
-              lines = [x for x in lines if x.startswith("/knos bounty ")] or [""]
-          line = lines[0]
-          issue = int(os.environ["ISSUE"])
-          print(f"issue={issue}")
-          if re.fullmatch(r"/knos veto", line):
-              print("kind=veto")
-              print(f"aud=knos:veto:{int(os.environ['REPO_ID'])}:{issue}")
-              sys.exit(0)
-          m = re.fullmatch(r"/knos bounty\s+(\d+(?:\.\d+)?)(?:\s+review\s+(\d+))?", line)
-          if not m:
-              sys.exit("usage: /knos bounty <amount> [review <seconds>]   or   /knos veto")
-          units = int(Decimal(m.group(1)) * 10 ** int(os.environ["DECIMALS"]))
-          root = Path(".knos/acceptance") / str(issue)
-          if root.is_dir() and any(p.is_file() for p in root.rglob("*")):
-              # identical to knos.judge.checks_hash
-              h = hashlib.sha256()
-              for f in sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: p.relative_to(root).as_posix()):
-                  h.update(f"{f.relative_to(root).as_posix()}\0{hashlib.sha256(f.read_bytes()).hexdigest()}\n".encode())
-              mode, checks, review = 1, h.hexdigest(), int(m.group(2) or 86400)
-          else:      # paid on merge, an hour later: the pull request names the issue it closes, so a maintainer
-              mode, checks, review = 0, "0" * 64, int(m.group(2) or 3600)   # can still veto a wrong claim
-          work = int(os.environ["WORK_DAYS"]) * 86400
-          print("kind=fund")
-          print(f"aud=knos:fund:{issue}:{units}:{mode}:{checks}:{work}:{review}")
-          PY
-      - name: mint the OIDC token
+          UV_EXCLUDE_NEWER: "2026-10-10T00:00:00Z"
+        run: uv tool install --no-config "knos==0.3.12"
+      - name: knos command
+        id: command
         env:
-          AUD: ${{ steps.parse.outputs.aud }}
-          KIND: ${{ steps.parse.outputs.kind }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/knos"
-          curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUD" | jq -r .value > "$RUNNER_TEMP/knos/token.txt"
-          echo "minted a $KIND token for $AUD"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: knos-${{ steps.parse.outputs.kind }}
-          path: ${{ runner.temp }}/knos/token.txt
-          retention-days: 1
+          GH_TOKEN: ${{ github.token }}
+          KNOS_RELAY_KEY: ${{ secrets.KNOS_RELAY_KEY }}
+        run: knos command --event "$GITHUB_EVENT_PATH" --repo "$GITHUB_REPOSITORY"

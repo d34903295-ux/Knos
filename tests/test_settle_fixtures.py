@@ -46,6 +46,86 @@ def test_genesis_keys_are_the_issuers_key_sets_of_2_october():
     assert got == want and len(got) == 7
 
 
+# -- the second deployment (programs-v2) --------------------------------------------------------------------------
+
+def test_the_second_deployments_ids_agree_everywhere():
+    ids = json.loads((ROOT / "programs-v2" / "program_ids.json").read_text())
+    assert json.loads((ROOT / "src" / "knos" / "settle" / "v2" / "program_ids.json").read_text()) == ids
+    pay_rs = (ROOT / "programs-v2" / "knos_pay" / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert re.search(r'OIDC_ID: Pubkey = pubkey!\("(\w+)"\)', pay_rs).group(1) == ids["knos_oidc"]
+    first = json.loads((ROOT / "programs" / "program_ids.json").read_text())
+    assert ids["knos_oidc"] != first["knos_oidc"] and ids["knos_pay"] != first["knos_pay"]
+    from knos.settle import oidc as first_client
+    from knos.settle.v2 import oidc
+    assert str(oidc.OIDC_ID) == ids["knos_oidc"] and str(oidc.GUARDIAN) == ids["guardian"] and str(first_client.OIDC_ID) == first["knos_oidc"]
+
+
+def test_the_second_verifiers_pins_are_the_pinned_values():
+    """The guardian, the attester's account and repositories, the rotate pin, the delay and the expiry in pins.rs are
+    the ones in programs-v2/program_ids.json and in the client, and the test-only values are the harness's."""
+    from solders.keypair import Keypair
+    from solders.pubkey import Pubkey
+
+    from knos.settle.v2 import oidc
+    ids = json.loads((ROOT / "programs-v2" / "program_ids.json").read_text())
+    pins = (ROOT / "programs-v2" / "knos_oidc" / "src" / "pins.rs").read_text(encoding="utf-8")
+    num = lambda text: int(text.replace("_", ""))  # noqa: E731
+    assert re.search(r'pub const GUARDIAN: Pubkey = pubkey!\("(\w+)"\);', pins).group(1) == ids["guardian"]
+    assert num(re.search(r"pub const ATTEST_OWNER_ID: u64 = ([\d_]+);", pins).group(1)) == ids["attest_owner_id"]
+    repos = re.search(r"pub const ATTEST_REPO_IDS: \[u64; 2\] = \[([\d_, ]+)\];", pins).group(1)
+    assert [num(x) for x in repos.split(",")] == ids["attest_repo_ids"]
+    assert re.search(r'pub const ROTATE_SHA: &\[u8; 40\] = b"([0-9a-f]{40})";', pins).group(1) == ids["rotate_sha"]
+    assert 'pub const ROTATE_REF: &[u8] = b"drexthealpha/knos-oidc-rotate/.github/workflows/rotate.yml@";' in pins
+    assert 'pub const ATTEST_EVENTS: [&[u8]; 2] = [b"schedule", b"workflow_dispatch"];' in pins
+    assert num(re.search(r"pub const KEY_DELAY: i64 = ([\d_]+);", pins).group(1)) == oidc.KEY_DELAY == 86_400
+    days, day = re.search(r"pub const KEY_TTL: i64 = (\d+) \* ([\d_]+);", pins).groups()
+    assert int(days) * num(day) == oidc.KEY_TTL == 30 * 86_400
+    # the same rotate pin as the first deployment's, and as the workflow that calls it
+    assert ids["rotate_sha"] == json.loads((ROOT / "programs" / "program_ids.json").read_text())["rotate_sha"]
+    # every test-only value sits behind the testkeys feature, with a harmless twin for the real build
+    for name, off in (("TEST_GENESIS", "&[]"), ("TEST_ROTATE_SHA", "None"), ("TEST_ATTEST", "None"), ("TEST_GUARDIAN", "None")):
+        on, real = re.findall(rf'#\[cfg\((not\()?feature = "testkeys"\)?\)\]\npub const {name}: [^=]+ = ', pins), None
+        assert sorted(on) == ["", "not("], name
+        real = re.search(rf'#\[cfg\(not\(feature = "testkeys"\)\)\]\npub const {name}: [^=]+ = ([^;]+);', pins).group(1)
+        assert real == off, name
+    assert len(re.findall(r"pub const TEST_", pins)) == 8
+    guardian = re.search(r"pub const TEST_GUARDIAN: Option<Pubkey> = Some\(Pubkey::new_from_array\(\[(.*?)\]\)\);", pins, re.S).group(1)
+    test_guardian = Pubkey.from_bytes(bytes(int(x, 16) for x in re.findall(r"0x([0-9a-f]{2})", guardian)))
+    assert test_guardian == Keypair.from_seed(bytes([7]) * 32).pubkey() != oidc.GUARDIAN
+    owner, repo = re.search(r"pub const TEST_ATTEST: Option<\(u64, u64\)> = Some\(\(([\d_]+), ([\d_]+)\)\);", pins).groups()
+    assert (num(owner), num(repo)) == (424_242, 987_654_321)        # tests/_settle.py, github_claims
+
+
+def test_the_second_verifiers_genesis_keys_are_githubs_four_and_no_others():
+    """Every key in the saved GitHub JWKS is a genesis constant of programs-v2's pins.rs; GitLab's keys are not (they
+    come in on GitHub's signature); and they are the same four hashes the first deployment starts with."""
+    import base64
+    import hashlib
+
+    def genesis(tree: str) -> set:
+        pins = (ROOT / tree / "knos_oidc" / "src" / "pins.rs").read_text(encoding="utf-8")
+        body = pins[pins.index("pub const GENESIS"):]
+        return set(re.findall(r'\((\d), h\("([0-9a-f]{64})"\)\)', body[:body.index("];")]))
+
+    def published(issuer: int, name: str) -> set:
+        out = set()
+        for k in json.loads((ROOT / "tests" / "fixtures" / name).read_text())["keys"]:
+            n = base64.urlsafe_b64decode(k["n"] + "=" * (-len(k["n"]) % 4)).lstrip(b"\0")
+            out.add((str(issuer), hashlib.sha256(n).hexdigest()))
+        return out
+
+    github, gitlab = published(0, "github_jwks_2026-10-02.json"), published(1, "gitlab_jwks_2026-10-02.json")
+    assert genesis("programs-v2") == github and len(github) == 4 and not genesis("programs-v2") & gitlab
+    assert genesis("programs-v2") == {g for g in genesis("programs") if g[0] == "0"}
+
+
+def test_what_the_second_verifier_shares_with_the_first_is_the_same_bytes():
+    """claims.rs and rsa.rs (and the Wycheproof vectors they are tested with) are the first deployment's files."""
+    for name in ("src/claims.rs", "src/rsa.rs", "tests/wycheproof.rs", "tests/vectors/rsa_signature_2048_sha256_test.json",
+                 "tests/vectors/rsa_signature_4096_sha256_test.json"):
+        assert (ROOT / "programs-v2" / "knos_oidc" / name).read_bytes() == (ROOT / "programs" / "knos_oidc" / name).read_bytes(), name
+
+
 def test_the_javascript_client_matches_the_python_client(tmp_path):
     """sdk/settle/index.js (what the web app loads) against the fixtures, and its transaction read back by solders."""
     import shutil
@@ -78,6 +158,117 @@ def test_the_site_is_built_at_one_commit(tmp_path):
     site = tmp_path / "site"
     assert {"index.html", "app.js", "front.js", "settle.js", "knos-claim.yml", "program_ids.json"} <= {p.name for p in site.iterdir()}
     front = (site / "front.js").read_text(encoding="utf-8")
-    assert "KNOS_COMMIT_SHA" not in front and f"prove.yml@${{KNOS_SHA}}" in front and f'KNOS_SHA = "{sha}"' in front
+    # the site's own commit; the workflows it hands out name a commit of drexthealpha/knos-workflows (tests/test_workflows2.py)
+    assert "KNOS_COMMIT_SHA" not in front and f'KNOS_SHA = "{sha}"' in front
     assert (site / "settle.js").read_bytes() == (ROOT / "sdk" / "settle" / "index.js").read_bytes()
+    # the second deployment's addresses ship as a file, and the first deployment's are only in the page, as history
+    assert (site / "program_ids.json").read_bytes() == (ROOT / "src" / "knos" / "settle" / "v2" / "program_ids.json").read_bytes()
     assert subprocess.run(["bash", str(ROOT / "scripts" / "build_site.sh"), str(tmp_path / "x"), "main"], capture_output=True).returncode != 0
+
+
+# -- the site's words against the code they describe -----------------------------------------------------------------
+
+WEB = ROOT / "web"
+
+
+def _text(html: str) -> str:
+    """The words of a page: code in backticks, the rest as it reads, one space between words."""
+    html = re.sub(r"<(script|style)\b.*?</\1>", " ", html, flags=re.S)
+    html = re.sub(r"<code>(.*?)</code>", lambda m: "`" + m.group(1) + "`", html, flags=re.S)
+    import html as h
+    return " ".join(h.unescape(re.sub(r"<[^>]+>", " ", html)).split())
+
+
+def _view(name: str) -> str:
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    return re.search(rf'<section id="view-{name}".*?</section>', page, re.S).group(0)
+
+
+def test_the_site_ships_the_second_deployments_ids_and_names_the_first_once_as_history():
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    first = json.loads((ROOT / "src" / "knos" / "settle" / "program_ids.json").read_text())
+    second = json.loads((ROOT / "src" / "knos" / "settle" / "v2" / "program_ids.json").read_text())
+    history = re.search(r'<div id="first-deployment".*?</div>', page, re.S).group(0)
+    assert re.findall(r'<span class="mono">(\w+)</span>', history) == [first["knos_oidc"], first["knos_pay"]]
+    for address in (first["knos_oidc"], first["knos_pay"]):
+        assert page.count(address) == 1 and address not in app
+    # the second deployment's addresses are read from the program_ids.json the build ships, never typed into the page
+    for value in (v for v in second.values() if isinstance(v, str) and len(v) > 30):
+        assert value not in page and value not in app
+    assert "program_ids.json" in app and "first deployment" in _text(history)
+    stats = json.loads((ROOT / "tests" / "web" / "recorded" / "stats_with_data.json").read_text())
+    assert stats["programs"] == {"first": {"knos_oidc": first["knos_oidc"], "knos_pay": first["knos_pay"]},
+                                 "second": {"knos_oidc": second["knos_oidc"], "knos_pay": second["knos_pay"]}}
+
+
+def test_the_numbers_the_site_states_are_the_codes():
+    from knos import commands
+    from knos.settle.v2 import oidc, pay
+    fund, claim, build = (_text(_view(n)) for n in ("fund", "claim", "build"))
+    usdc = lambda units: f"{units / 10 ** 6:g}"                                    # noqa: E731
+    assert f"from {usdc(pay.MIN_AMOUNT)} to {usdc(pay.MAX_AMOUNT)} test USDC, with at most 6 decimals" in fund
+    assert f"at most {usdc(pay.FAUCET_CAP)} per comment, once per repository per minute" in fund and pay.FUND_PERIOD == 60
+    assert f"{commands.DAYS} days unless you say, {commands.MAX_DAYS} at most" in fund
+    assert f"{commands.RESERVE} unless you say" in fund
+    assert f"Fee: {pay.FEE_BPS / 100:g}% (at least {pay.FEE_MIN / 10 ** 6:.2f} test USDC), only when someone is paid" in fund
+    assert f"held for you for {pay.HOLD // 86_400} days" in claim and f"After {pay.HOLD // 86_400} days it goes back to the funder" in claim
+    assert f"stops working after {oidc.KEY_TTL // 86_400} days" in build and "waits a day" in build and oidc.KEY_DELAY == 86_400
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    plan = "upgradeable only through a multisig with a public 48-hour delay, until an outside review; then made immutable"
+    assert plan in app and plan in _text((WEB / "index.html").read_text(encoding="utf-8"))
+    assert "172800" in app and 172_800 == 48 * 3600                                  # the delay the page checks the chain against
+    assert "PAUSE_MAX" in app and pay.PAUSE_MAX == 7 * 86_400                          # the pause length shown is the client's constant
+
+
+def test_the_sample_reply_says_what_the_terms_say():
+    """The sentences of the reply the page shows are the ones the code writes for the terms of `/knos fund 20 checks: test`."""
+    from knos import commands, terms
+    fund = commands.parse("/knos fund 20 checks: test")
+    built = terms.build(fund, required=[], check_runs={"check_runs": [{"name": "test", "app": {"id": 15368}, "status": "completed", "conclusion": "success"}]},
+                        statuses={"statuses": []})
+    sample = _text(re.search(r'<blockquote id="fund-reply">(.*?)</blockquote>', (WEB / "index.html").read_text(encoding="utf-8"), re.S).group(0))
+    for sentence in terms.describe(built.terms, built.source):
+        assert sentence in sample, sentence
+    assert re.search(r"<pre id=\"fund-comment\">/knos fund 20 checks: test</pre>", (WEB / "index.html").read_text(encoding="utf-8"))
+    from knos.settle.v2 import pay
+    assert "20.00 test USDC" in sample and f"until you bind a wallet ({pay.HOLD // 86_400} days at most)" in sample and "`/knos address <your Solana address>`" in sample
+
+
+def test_the_first_view_has_no_numbers_outside_code():
+    """scripts/claims_check.py holds every number in this view to a fact; the easiest way to keep it true is to have none."""
+    assert not re.search(r"\d", re.sub(r"`[^`]*`", " ", _text(_view("check"))))
+
+
+def test_the_site_says_nothing_it_may_not():
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    words = _text(page)
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    banned = "|".join(("cla" "ude", "anthro" "pic", "hack" "athon", "win" "ner", "assis" "tant"))     # in pieces: no file spells them out
+    stale = rf"\b(veto|no admin|nobody can (?:change|upgrade)|no one can change|never be changed|one-hour|hour later|about a minute|{banned})\b"
+    assert not re.search(stale, words, re.I), re.search(stale, words, re.I).group(0)
+    assert not re.search(stale, app, re.I), re.search(stale, app, re.I).group(0)
+    plan = "upgradeable only through a multisig with a public 48-hour delay, until an outside review; then made immutable"
+    assert "immutable" not in words.replace(plan, "").lower() and "immutable" not in (app.replace(plan, "").replace('data-state="immutable"', "").replace('"immutable"', ""))
+    assert not re.search(r"(?<!test )(?<!Test )USDC", words), re.search(r".{20}(?<!test )(?<!Test )USDC", words).group(0)
+    # devnet money is called test USDC wherever the page says what a person is paid or puts in
+    assert "test USDC" in words and "mainnet" not in words.lower()
+
+
+def test_the_site_asks_nobody_but_github_and_devnet():
+    hosts = {"api.github.com", "api.devnet.solana.com", "github.com", "explorer.solana.com", "faucet.circle.com", "drexthealpha.github.io"}
+    for name in ("app.js", "front.js", "index.html"):
+        found = set(re.findall(r"https?://([\w.-]+)", (WEB / name).read_text(encoding="utf-8")))
+        assert found <= hosts, (name, found - hosts)
+    app = (WEB / "app.js").read_text(encoding="utf-8")
+    assert 'const RPC = "https://api.devnet.solana.com"' in app and 'const CHAIN = "solana:devnet"' in app
+    assert 'const DEVNET = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"' in app          # devnet's first block, which no other cluster has
+
+
+def test_the_pages_workflow_watches_the_ids_the_site_ships():
+    network = (ROOT / ".github" / "workflows" / "network.yml").read_text(encoding="utf-8")
+    watched = json.loads(re.search(r"paths: (\[.*?\])", network).group(1))
+    assert "src/knos/settle/v2/program_ids.json" in watched
+    for path in watched:
+        assert path.endswith("/**") or (ROOT / path).exists(), path
+    assert "src/knos/settle/v2/program_ids.json" in (ROOT / "scripts" / "build_site.sh").read_text(encoding="utf-8")

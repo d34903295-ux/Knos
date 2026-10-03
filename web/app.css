@@ -53,7 +53,7 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--bg); bord
 .foot { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; padding: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
 .stats .split { grid-column: 1 / -1; } .split h2 { margin-top: 10px; }
-.verdict { font-size: 28px; font-weight: 800; margin: 16px 0 8px; }
+.verdict { font-size: clamp(20px, 6vw, 28px); font-weight: 800; margin: 16px 0 8px; overflow-wrap: anywhere; }
 .verdict.bad, .status.bad { color: var(--bad); }
 .verdict.ok { color: var(--ok); }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0; }
@@ -61,3 +61,16 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--bg); bord
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 a.button { display: inline-block; font-weight: 600; border-radius: 10px; padding: 10px 16px; background: var(--accent); color: var(--accent-fg); text-decoration: none; margin: 8px 8px 0 0; }
 a.button.quiet { background: transparent; color: var(--accent); border: 1px solid var(--accent); padding: 9px 15px; }
+.devnet { display: inline-block; margin: 0 0 8px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--accent); color: var(--accent); font-size: 13px; font-weight: 600; }
+.view[hidden] { display: none; }
+.parts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 8px 0; }
+.parts dt { font-weight: 600; } .parts dd { margin: 0; }
+blockquote { margin: 10px 0; padding: 4px 14px; border-left: 3px solid var(--line); color: var(--muted); }
+.flow, .routes, .steps { padding-left: 20px; }
+.flow > li, .routes > li { margin: 14px 0; }
+details { margin: 8px 0; } summary { cursor: pointer; }
+h3 { font-size: 17px; margin: 14px 0 6px; } h4 { font-size: 15px; margin: 12px 0 4px; }
+td[data-key] { min-width: 12ch; }
+button.small { margin: 2px 4px 2px 0; }
+#money-form button, #owner-form button { margin-top: 12px; }
+@media (max-width: 560px) { .parts, .facts { grid-template-columns: 1fr; } }

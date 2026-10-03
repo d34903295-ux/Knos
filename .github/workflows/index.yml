@@ -1,11 +1,26 @@
 name: agent-pr-index
 
-# The Agent PR Index: scans 2,000+ pull requests by AI coding agents whose description says tests or CI pass, and
-# records what CI actually said at each head commit (too slow for the Pages build). It publishes index.json as the
-# asset of a GitHub Release tagged index-<date> (a release is not a data commit); the Pages build (network.yml)
-# downloads the newest one and re-checks its Merkle root. With only the default token the search budget is tight;
-# KNOS_INDEX_TOKEN (a read-only PAT) lifts it. A scan that keeps too few PRs publishes nothing, so the last good
-# release stays live.
+# The Agent PR Index: finds pull requests by AI coding agents whose description says tests or CI pass, and records what
+# CI actually said at each head commit (too slow for the Pages build). It publishes index.json as the asset of a GitHub
+# Release tagged index-<date> (a release is not a data commit); the Pages build (network.yml) downloads the newest one
+# and re-checks its Merkle root.
+#
+# Every run ends one of two ways, and both can be seen: it publishes a release, or it fails and says what was missing.
+# (Before 0.3.12 a run that counted under 2,000 pull requests ended green and published nothing. The scan kept at most
+# 480 per agent, 2,400 in all, before dropping those whose CI had not finished, so a run could publish only if all
+# five agents filled their 480 and more than 83% of those had finished CI.)
+#
+#   scan     what GitHub already answered is in the Actions cache (search pages and CI verdicts), so a run reads only
+#            what is new since the last one: the search windows are cut at fixed dates and do not move from day to day.
+#            When the hourly API budget is spent the scan waits for it to come back instead of giving up.
+#   gate     a scan that did not finish (a search out of time or refused, pull requests GitHub did not answer for) or
+#            that shrank to under half of the last index is not published: the step fails, the last release stays
+#            live, and the cache is saved all the same, so the next run continues where this one stopped.
+#   release  everything else is published, every 6 hours.
+#
+# With only the default token (GitHub allows it 1,000 API requests an hour) the first scan on an empty cache can take
+# more than one run: each run fails at the gate and the next continues from the cache. KNOS_INDEX_TOKEN (a read-only
+# PAT: 5,000 an hour) is optional.
 on:
   schedule:
     - cron: "17 */6 * * *"
@@ -24,33 +39,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
-      - name: API cache (search pages and CI verdicts; reruns resume)
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: what GitHub already answered (search pages and CI verdicts)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/knos-agent-pr-ci
-          key: agent-pr-ci-${{ github.run_id }}
+          key: agent-pr-ci-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: agent-pr-ci-
       - name: scan
-        # a PAT, when set, has the 5,000/h core budget the scan needs; the default token has 1,000/h per repo
-        run: python scripts/agent_pr_index.py scan --rows rows.json --max-seconds 15000
+        # up to 800 pull requests an agent; 15,000 s leaves the job's 300 minutes room to build, publish and save
+        run: python scripts/agent_pr_index.py scan --rows rows.json --per-agent 800 --max-seconds 15000
         env:
           GH_TOKEN: ${{ secrets.KNOS_INDEX_TOKEN || github.token }}
+      - name: keep the answers, whether or not the scan finished (the next run continues from them)
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/knos-agent-pr-ci
+          key: agent-pr-ci-${{ github.run_id }}-${{ github.run_attempt }}
       - name: build index.json
         run: python scripts/agent_pr_index.py build --rows rows.json --out index.json
-      - name: release index-<date> (skipped when the scan kept under 2,000 PRs)
+      - name: gate (a scan that did not finish fails here and publishes nothing; the last release stays live)
+        run: |
+          last=$(gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+                 --jq '[.[] | select(.tagName | startswith("index-"))] | sort_by(.createdAt) | last | .tagName // empty')
+          if [ -n "$last" ]; then gh release download "$last" -R "$GITHUB_REPOSITORY" -p index.json -O previous.json; fi
+          python scripts/agent_pr_index.py gate --rows rows.json --out index.json --previous previous.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: release index-<date>
         run: |
           n=$(python -c "import json; print(json.load(open('index.json'))['n_prs'])")
-          if [ "$n" -lt 2000 ]; then echo "only $n PRs; the last release stays live"; exit 0; fi
-          tag="index-$(date -u +%Y-%m-%d-%H%M)"
           root=$(python -c "import json; print(json.load(open('index.json'))['root'])")
-          gh release create "$tag" index.json --title "Agent PR Index $tag" --latest=false             --notes "Agent PR Index: $n PRs, Merkle root $root. Recompute it: python scripts/agent_pr_index.py check --out index.json"
+          tag="index-$(date -u +%Y-%m-%d-%H%M)"
+          gh release create "$tag" index.json -R "$GITHUB_REPOSITORY" --title "Agent PR Index $tag" --latest=false \
+            --notes "Agent PR Index: $n PRs, Merkle root $root. Recompute it: python scripts/agent_pr_index.py check --out index.json"
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Pages build (a release made with GITHUB_TOKEN triggers no workflow, so start it explicitly)
-        run: gh workflow run network.yml --ref main -R "${{ github.repository }}"
+        run: gh workflow run network.yml --ref main -R "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}

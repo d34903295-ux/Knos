@@ -4,8 +4,13 @@
 //! There is no CPI and no oracle.
 //!
 //! This crate has no dependency and does not allocate: bytes in, values out. It works with solana-program,
-//! pinocchio or anchor of any version, and off chain. The deployed program is immutable, so the account layout and
-//! the rules below do not change.
+//! pinocchio or anchor of any version, and off chain.
+//!
+//! There are two deployments of knos-oidc. The first (`ID`) is immutable, so its account layout and the rules below
+//! do not change. The second (`v2::ID`) admits signing keys more strictly, lets them expire and lets a guardian
+//! revoke them; it is upgradeable only through a multisig with a public 48-hour delay, until an outside review; then
+//! made immutable. A token account has the same layout and reads the same way under both. Your program chooses which
+//! deployment it trusts by the owner it requires: `Token::read` for the first, `v2::read` for the second.
 //!
 //! ```ignore
 //! let data = token_account.try_borrow_data()?;
@@ -17,13 +22,33 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-/// The knos-oidc program (devnet), as bytes. A token account must be owned by it.
+/// The knos-oidc program (devnet, the first deployment), as bytes. A token account must be owned by it.
 pub const ID: [u8; 32] = [
     0x0d, 0xc9, 0x82, 0xa8, 0x4f, 0x3b, 0x4e, 0xae, 0x63, 0x8e, 0x01, 0x8f, 0xe3, 0x9a, 0x96, 0xd0,
     0x6b, 0xd7, 0xe9, 0x53, 0x33, 0x1c, 0xda, 0x76, 0x0d, 0x51, 0x66, 0xb4, 0x0b, 0x34, 0x2b, 0xa3,
 ];
 /// The same address as Solana prints it.
 pub const ID_STR: &str = "vpWym9azbPU5f2PH2a6n8c4RfmsyUeW2dMuWr1DSHcE";
+
+/// The second deployment of knos-oidc. Its token accounts have the layout this crate reads and the same rules
+/// (`VERIFIED`, `LATE`, the claims); what differs is which signing keys the program accepts and for how long.
+pub mod v2 {
+    use super::{Error, Token};
+
+    /// The second deployment's address, as bytes. A token account it verified is owned by it.
+    pub const ID: [u8; 32] = [
+        0xdb, 0x45, 0x49, 0x36, 0x35, 0xef, 0x28, 0x0d, 0xfb, 0xbe, 0x73, 0x6a, 0x6d, 0xfa, 0xd8, 0xbc,
+        0xf8, 0x60, 0x38, 0xc2, 0xa5, 0x39, 0x74, 0xf7, 0x64, 0x1d, 0x78, 0x42, 0xb8, 0xaa, 0x41, 0x71,
+    ];
+    /// The same address as Solana prints it.
+    pub const ID_STR: &str = "FkwZdsYCmzicJMtHLTkPK76bYNVG4WNwkWJBiVWNtF3W";
+
+    /// `Token::read` for the second deployment: the account is owned by `v2::ID`, VERIFIED, and at most `LATE`
+    /// seconds past its expiry.
+    pub fn read<'a>(owner: &[u8; 32], data: &'a [u8], now: i64) -> Result<Token<'a>, Error> {
+        Token::read_from(&ID, owner, data, now)
+    }
+}
 
 pub const ISSUER_GITHUB: u8 = 0;
 pub const ISSUER_GITLAB: u8 = 1;
@@ -102,8 +127,11 @@ pub fn verified(d: &[u8]) -> Option<Verified<'_>> {
 #[derive(Clone, Copy, Debug)]
 pub struct Token<'a>(Verified<'a>);
 impl<'a> Token<'a> {
-    pub fn read(owner: &[u8; 32], data: &'a [u8], now: i64) -> Result<Token<'a>, Error> {
-        if *owner != ID { return Err(Error::NotOidc); }
+    pub fn read(owner: &[u8; 32], data: &'a [u8], now: i64) -> Result<Token<'a>, Error> { Self::read_from(&ID, owner, data, now) }
+    /// The same three checks against one deployment of knos-oidc that you name: `ID` or `v2::ID`. A token that one
+    /// deployment verified says nothing under the other's address, so name exactly the one your program trusts.
+    pub fn read_from(program: &[u8; 32], owner: &[u8; 32], data: &'a [u8], now: i64) -> Result<Token<'a>, Error> {
+        if owner != program { return Err(Error::NotOidc); }
         let v = verified(data).ok_or(Error::NotVerified)?;
         if !fresh(v.exp, now) { return Err(Error::Stale); }
         Ok(Token(v))
@@ -345,6 +373,32 @@ mod tests {
     #[test]
     fn the_id_is_the_deployed_address() {
         assert_eq!(b58_32(ID_STR.as_bytes()), Some(ID));
+    }
+
+    #[test]
+    fn the_second_deployment_has_its_own_address_and_reads_the_same_layout() {
+        assert_eq!(b58_32(v2::ID_STR.as_bytes()), Some(v2::ID));
+        assert_ne!(v2::ID, ID);
+        // a VERIFIED token account, as small as one can be: the header, then the claims
+        let payload = br#"{"aud":"x","exp":1000}"#;
+        let mut d = [0u8; T_JWT + 22];
+        d[T_STAGE] = VERIFIED;
+        d[T_ISSUER] = ISSUER_GITLAB;
+        d[T_POFF..T_POFF + 2].copy_from_slice(&(T_JWT as u16).to_le_bytes());
+        d[T_PLEN..T_PLEN + 2].copy_from_slice(&(payload.len() as u16).to_le_bytes());
+        d[T_EXP..T_EXP + 8].copy_from_slice(&1000i64.to_le_bytes());
+        d[T_JWT..].copy_from_slice(payload);
+        // each reader takes its own deployment's account and refuses the other's
+        let tok = v2::read(&v2::ID, &d, 1000).unwrap();
+        assert!(tok.issuer() == ISSUER_GITLAB && tok.exp() == 1000 && tok.audience().unwrap().is("x") && tok.claim_u64("exp") == Some(1000));
+        assert_eq!(v2::read(&ID, &d, 1000).unwrap_err(), Error::NotOidc);
+        assert_eq!(Token::read(&v2::ID, &d, 1000).unwrap_err(), Error::NotOidc);
+        assert!(Token::read(&ID, &d, 1000).is_ok() && Token::read_from(&v2::ID, &v2::ID, &d, 1000).is_ok());
+        assert_eq!(Token::read_from(&v2::ID, &[0; 32], &d, 1000).unwrap_err(), Error::NotOidc);
+        // the other two checks are the same ones
+        assert_eq!(v2::read(&v2::ID, &d, 1000 + LATE).unwrap_err(), Error::Stale);
+        d[T_STAGE] = 1;
+        assert_eq!(v2::read(&v2::ID, &d, 1000).unwrap_err(), Error::NotVerified);
     }
 
     #[test]

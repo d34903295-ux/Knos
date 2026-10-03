@@ -7,8 +7,10 @@ Two stores, both Sibyl's:
                                                  (`$SIBYL_MEMORY_DB`, else ~/.sibyl-memory/memory.db), behind Sibyl's
                                                  own cap gate. Knos does not patch or route around Sibyl's free-tier
                                                  cap; a Sibyl account on this machine (`sibyl init`) lifts it.
-    for the judge in GitHub Actions (prove.yml)  Sibyl's local store <dir>/sibyl.db, carried between runs in the
-                                                 caller repository's Actions cache: no secret, no network.
+    for the judge in GitHub Actions              Sibyl's local store <dir>/sibyl.db, for the run. Between runs its
+                                                 lessons travel as comments in the repository's `knos-memory` issue
+                                                 (knos.proof.memory), and are loaded back into this store: no
+                                                 secret, and nothing decides from the comments themselves.
 """
 
 from __future__ import annotations

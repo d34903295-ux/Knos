@@ -1,0 +1,145 @@
+{
+ "updated": "2026-10-03 04:00 UTC",
+ "cluster": "devnet",
+ "programs": {
+  "first": {
+   "knos_oidc": "vpWym9azbPU5f2PH2a6n8c4RfmsyUeW2dMuWr1DSHcE",
+   "knos_pay": "9UzPFbh2A4e4sEPgngKG523FfYLnQ3qPfFVfFTTAdfDi"
+  },
+  "second": {
+   "knos_oidc": "FkwZdsYCmzicJMtHLTkPK76bYNVG4WNwkWJBiVWNtF3W",
+   "knos_pay": "5y7iWJ1VAMJjnnWbbdo2a2PsWJEwTExSNpzrvQSEnS8k"
+  }
+ },
+ "outside": {
+  "funded": 0,
+  "completed": 0,
+  "funders": 0,
+  "payees": 0,
+  "repeat_funders": 0,
+  "repositories": 0,
+  "funded_amount": 0,
+  "paid_amount": 0,
+  "fees": 0
+ },
+ "apart": {
+  "own": {
+   "funded": 0,
+   "completed": 0,
+   "funders": 0,
+   "payees": 0,
+   "repeat_funders": 0,
+   "repositories": 0,
+   "funded_amount": 0,
+   "paid_amount": 0,
+   "fees": 0
+  },
+  "self": {
+   "funded": 0,
+   "completed": 0,
+   "funders": 0,
+   "payees": 0,
+   "repeat_funders": 0,
+   "repositories": 0,
+   "funded_amount": 0,
+   "paid_amount": 0,
+   "fees": 0
+  },
+  "test": {
+   "funded": 0,
+   "completed": 0,
+   "funders": 0,
+   "payees": 0,
+   "repeat_funders": 0,
+   "repositories": 0,
+   "funded_amount": 0,
+   "paid_amount": 0,
+   "fees": 0
+  }
+ },
+ "totals": {
+  "funded": 0,
+  "completed": 0,
+  "open": 0,
+  "held": 0,
+  "funded_amount": 0,
+  "paid_amount": 0,
+  "refunded": 0,
+  "unmatched_paid": 0,
+  "claimed": 0,
+  "claimed_amount": 0,
+  "vetoed": 0,
+  "bound": 0,
+  "balances": 0,
+  "withdrawn": 0,
+  "paused": 0
+ },
+ "by_deployment": {
+  "first": {
+   "funded": 0,
+   "completed": 0
+  },
+  "second": {
+   "funded": 0,
+   "completed": 0
+  }
+ },
+ "funnel": {
+  "installed": null,
+  "installed_note": "not measured",
+  "funded": 0,
+  "completed": 0,
+  "funded_again": 0
+ },
+ "latency": {
+  "funded_to_paid": {
+   "count": 0,
+   "median": null,
+   "p90": null,
+   "slowest": null
+  },
+  "comment_to_funded": {
+   "count": 0,
+   "median": null,
+   "p90": null,
+   "slowest": null
+  },
+  "merge_to_paid": {
+   "count": 0,
+   "median": null,
+   "p90": null,
+   "slowest": null
+  },
+  "relay": {
+   "fund": {
+    "count": 0,
+    "median": null,
+    "p90": null,
+    "slowest": null
+   },
+   "pay": {
+    "count": 0,
+    "median": null,
+    "p90": null,
+    "slowest": null
+   }
+  },
+  "note": "not measured: GitHub was not asked"
+ },
+ "recent": [],
+ "live": {
+  "first": {
+   "open": 0,
+   "open_amount": 0,
+   "proven_waiting": 0,
+   "unclaimed_accounts": 0,
+   "unclaimed_amount": 0
+  },
+  "second": {
+   "open": 0,
+   "open_amount": 0,
+   "held": 0,
+   "held_amount": 0
+  }
+ }
+}

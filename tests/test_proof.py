@@ -1,4 +1,4 @@
-"""Proof: AI agent work counts only when Knos proves it. The Stop hook blocks an unproven "done", lets a stop through
+"""Proof: compares what a change claims with what the repository and its checks show. The Stop hook blocks an unproven "done", lets a stop through
 after 3 blocks on unchanged evidence, and Sibyl history is load-bearing: the replay of Knos's own releases."""
 
 from __future__ import annotations
@@ -100,7 +100,147 @@ def test_the_test_command_follows_the_language(tmp_path):
     assert checks.test_command(tmp_path) == "" and checks.test_command(tmp_path, "make test") == "make test"
 
 
-def test_init_installs_the_stop_hook_and_undo_removes_it(knos_home, _isolated):
+# ---- a check that starts with `python` runs with Knos's own interpreter ------------------------------------------
+
+def _store_alias_first_on_path(folder: Path, monkeypatch) -> None:
+    """Put a `python` and a `python3` that run nothing first on PATH, as a Windows machine has them: the Microsoft
+    Store alias prints a hint and exits 9009 (on a POSIX shell that status is 9009 mod 256 = 49)."""
+    import os
+    folder.mkdir()
+    for name in ("python", "python3"):
+        if os.name == "nt":
+            (folder / f"{name}.cmd").write_text("@echo Python was not found\r\n@exit /b 9009\r\n", encoding="utf-8")
+        else:
+            (folder / name).write_text("#!/bin/sh\necho Python was not found\nexit 49\n", encoding="utf-8")
+            (folder / name).chmod(0o755)
+    monkeypatch.setenv("PATH", str(folder) + os.pathsep + os.environ["PATH"])
+
+
+def _interpreter_under(folder: Path, marker: Path) -> str:
+    """A working interpreter at a path with spaces: a wrapper that notes it ran, then runs this Python."""
+    import os
+    import sys
+    folder.mkdir(parents=True)
+    if os.name == "nt":
+        exe = folder / "python.cmd"
+        exe.write_text(f'@echo off\r\necho ran> "{marker}"\r\n"{sys.executable}" %*\r\n', encoding="utf-8")
+    else:
+        exe = folder / "python"
+        exe.write_text(f'#!/bin/sh\necho ran > "{marker}"\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        exe.chmod(0o755)
+    return str(exe)
+
+
+def test_a_check_that_starts_with_python_runs_with_the_interpreter_knos_runs_under(tmp_path, repo, knos_home, monkeypatch):
+    import sys
+    _store_alias_first_on_path(tmp_path / "alias", monkeypatch)
+    ok, fail = 'import sys; sys.exit(0)', 'import sys; sys.exit(3)'
+    assert checks._run(f'python -c "{ok}"', repo)[0] != 0               # what the shell alone finds: the alias
+    for word in ("python", "python3"):
+        r = checks.custom(repo, "c", f'{word} -c "{ok}"')
+        assert r.ok and r.evidence == {"command": f'{word} -c "{ok}"', "exit": 0}, r.detail   # the command as written
+    assert checks.tests(repo, f'python3 -c "{ok}"').ok                  # `tests = "python3 ..."` in a non-Python repo
+    # the interpreter lives under a path with spaces (C:\Program Files\Python312, ~/Library/Application Support/...)
+    marker = tmp_path / "ran"
+    monkeypatch.setattr(sys, "executable", _interpreter_under(tmp_path / "Program Files" / "Python 3", marker))
+    assert checks.custom(repo, "spaces", f'python -c "{ok}"').ok and marker.exists()
+    marker.unlink()
+    r = checks.custom(repo, "spaces", f'python3 -c "{fail}"')           # and its own exit code is the check's
+    assert not r.ok and r.evidence["exit"] == 3 and marker.exists()
+    # the way the Stop hook reaches it: .knos/proof.toml, a "done", no test command in this repo
+    (repo / ".knos").mkdir()
+    (repo / ".knos" / "proof.toml").write_text(f'[[check]]\nname = "manifests parse"\nrun = "python -c \\"{ok}\\""\n', "utf-8")
+    payload = {"cwd": str(repo), "session_id": "s-python", "last_assistant_message": "Done."}
+    assert hook.stop(payload, history.NullStore())[0] == "allow"
+    (repo / ".knos" / "proof.toml").write_text(f'[[check]]\nname = "manifests parse"\nrun = "python -c \\"{fail}\\""\n', "utf-8")
+    verdict, why = hook.stop(payload, history.NullStore())
+    assert verdict == "block" and "custom:manifests parse" in why and "exited 3" in why
+
+
+def test_only_a_first_word_of_python_or_python3_is_replaced_and_the_path_is_quoted_for_the_shell():
+    import os
+    exe = r"C:\Program Files\Python312\python.exe" if os.name == "nt" else "/opt/my tools/bin/python3"
+    quoted = f'"{exe}"' if os.name == "nt" else f"'{exe}'"
+    assert checks.with_python("python -m pytest -q", exe) == quoted + " -m pytest -q"
+    assert checks.with_python("python3 scripts/x.py --check", exe) == quoted + " scripts/x.py --check"
+    assert checks.with_python("  python\tx.py", exe) == quoted + "\tx.py" and checks.with_python("python", exe) == quoted
+    for other in ("python3.12 x.py", "pythonw x.py", "python-config --libs", "pytest -q", "PYTHONPATH=src python x.py",
+                  "cd sub && python x.py", "/usr/bin/python x.py", '"python" x.py', "npm test", ""):
+        assert checks.with_python(other, exe) == other, other
+
+
+def test_a_checks_output_that_is_not_text_is_reported_not_raised(repo):
+    r = checks.custom(repo, "bytes", 'python -c "import sys; sys.stdout.buffer.write(bytes([255, 254, 10])); sys.exit(3)"')
+    assert not r.ok and r.evidence["exit"] == 3
+
+
+# ---- knos init -----------------------------------------------------------------------------------------------------
+# What `knos init` writes depends on the machine in two ways, and neither may decide a test: which coding agents are
+# installed (conftest hides this machine's from every test), and where the knos script is (the fixture below).
+
+@pytest.fixture()
+def knos_script(_isolated, monkeypatch):
+    """A knos script of the test's own. `knos init` writes the script beside its interpreter, else one on PATH, else
+    `python -m knos` (init.own_script): a checkout run without installing it, or a stale knos on PATH, would otherwise
+    change what these tests read back."""
+    from knos import init
+    script = _isolated / "venv" / "bin" / "knos"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(init, "own_script", lambda: str(script))
+    return script
+
+
+def test_knos_is_started_by_the_script_beside_its_interpreter_else_one_on_path_else_the_module(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    from knos import init
+    name = "knos.exe" if os.name == "nt" else "knos"
+    venv, elsewhere = tmp_path / "venv" / "bin", tmp_path / "on path"
+    venv.mkdir(parents=True)
+    elsewhere.mkdir()
+    python = str(venv / ("python.exe" if os.name == "nt" else "python"))
+    monkeypatch.setattr(sys, "executable", python)
+    monkeypatch.setenv("PATH", str(elsewhere))                         # nothing of this machine's
+    assert init.own_script() is None and init.knos_argv() == [python, "-m", "knos"]
+    assert init.mcp_server() == (python, ["-m", "knos", "mcp"])
+    assert init.hook_cmd("codex") == f'"{python.replace(os.sep, "/")}" -m knos hook proof --client codex #knos-guard'
+    (elsewhere / name).write_text("#!/bin/sh\n", encoding="utf-8")
+    (elsewhere / name).chmod(0o755)
+    same = lambda a, b: os.path.normcase(a) == os.path.normcase(b)     # noqa: E731 - Windows finds knos.EXE
+    assert same(init.own_script(), str(elsewhere / name))              # one on PATH, when there is none of its own
+    (venv / name).write_text("#!/bin/sh\n", encoding="utf-8")
+    assert init.own_script() == str(venv / name)                       # its own, before a stale one on PATH
+    assert init.mcp_server() == (str(venv / name), ["mcp"])
+    assert init.hook_cmd("claude") == f'"{str(venv / name).replace(os.sep, "/")}" hook proof --client claude #knos-guard'
+
+
+def test_an_agent_found_on_path_gets_the_hook_before_it_has_a_config_folder(knos_home, _isolated, knos_script, tmp_path, monkeypatch):
+    """Claude Code and Codex are also found by their CLI (a fresh install has no ~/.codex yet). The agents of the
+    machine running the tests are hidden from every test (conftest), so this one puts a `codex` on PATH itself."""
+    import os
+
+    from knos import init
+    home = _isolated
+    assert not init.present("codex") and not init.present("claude")    # whatever this machine has installed
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    exe = folder / ("codex.cmd" if os.name == "nt" else "codex")
+    exe.write_text("@echo codex\r\n" if os.name == "nt" else "#!/bin/sh\necho codex\n", encoding="utf-8")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(folder) + os.pathsep + os.environ["PATH"])
+    assert init.present("codex") and not init.present("claude")
+    rep = init.install()
+    assert [h for h, _ in rep["done"]] == ["codex"] and [h for h, _ in rep["mcp"]] == ["codex"]
+    assert ("claude", "not installed here") in rep["skipped"]
+    hooks = json.loads((home / ".codex" / "hooks.json").read_text())["hooks"]
+    assert "hook proof --client codex" in hooks["Stop"][0]["hooks"][0]["command"]
+    init.undo()
+    assert "knos" not in (home / ".codex" / "hooks.json").read_text() and not (home / ".codex" / "config.toml").exists()
+
+
+def test_init_installs_the_stop_hook_and_undo_removes_it(knos_home, _isolated, knos_script):
     from knos import init
     home = _isolated
     (home / ".claude").mkdir()
@@ -120,7 +260,7 @@ def test_init_installs_the_stop_hook_and_undo_removes_it(knos_home, _isolated):
     assert [h["command"] for e in after["hooks"]["Stop"] for h in e["hooks"]] == ["mine"] and after["model"] == "x"
 
 
-def test_init_removes_what_older_versions_installed(knos_home, _isolated):
+def test_init_removes_what_older_versions_installed(knos_home, _isolated, knos_script):
     from knos import init
     home = _isolated
     (home / ".claude").mkdir()
@@ -152,7 +292,42 @@ def test_init_removes_what_older_versions_installed(knos_home, _isolated):
     assert {h for h, _ in rep["mcp"]} == {"claude", "codex"}
 
 
-def test_init_registers_the_mcp_server_with_every_host_that_is_here_and_undo_puts_the_files_back(knos_home, _isolated):
+def test_init_removes_an_older_knos_server_registered_for_one_project(knos_home, _isolated, knos_script, capsys):
+    """Claude Code keeps a server added for one project (`claude mcp add`, its default local scope) under
+    projects.<path>.mcpServers in ~/.claude.json, and there it wins over the one knos registers for the user: an older
+    install's entry, or one whose interpreter is gone, kept failing to start (spawn C:/python.exe ENOENT) after
+    `knos init`. Such entries go; a project's own working knos server and every other server stay."""
+    from knos import init
+    home = _isolated
+    (home / ".claude").mkdir()
+    working = {"type": "stdio", "command": str(knos_script), "args": ["mcp"]}
+    projects = {"C:\\Users\\me\\Desktop": {"mcpServers": {"knos": {"command": "C:/python.exe", "args": ["-m", "knos.mcp"]},
+                                                          "other": {"command": "x"}}, "allowedTools": []},
+                "/home/me/gone": {"mcpServers": {"knos": {"type": "stdio", "command": "C:/python.exe", "args": ["-m", "knos", "mcp"]}}},
+                "/home/me/fine": {"mcpServers": {"knos": working}},
+                "/home/me/none": {"mcpServers": {}}, "/home/me/odd": {"mcpServers": "not a table"}}
+    (home / ".claude.json").write_text(json.dumps({"projects": projects, "numStartups": 3}), "utf-8")
+    rep = init.install()
+    assert sorted(x for x in rep["removed"] if "project" in x) == [
+        f"the knos MCP server of the project /home/me/gone in {home / '.claude.json'}",
+        f"the knos MCP server of the project C:\\Users\\me\\Desktop in {home / '.claude.json'}"]
+    data = json.loads((home / ".claude.json").read_text())
+    assert data["numStartups"] == 3 and data["mcpServers"]["knos"]["args"] == ["mcp"]
+    assert data["projects"] == {"C:\\Users\\me\\Desktop": {"mcpServers": {"other": {"command": "x"}}, "allowedTools": []},
+                                "/home/me/gone": {"mcpServers": {}}, "/home/me/fine": {"mcpServers": {"knos": working}},
+                                "/home/me/none": {"mcpServers": {}}, "/home/me/odd": {"mcpServers": "not a table"}}
+    assert init.install()["removed"] == []                             # nothing older is left
+    # and `knos init` says what it took out as what it was: a server whose command is gone did not move to knos-labs
+    data["projects"]["/home/me/gone"]["mcpServers"]["knos"] = {"command": "C:/python.exe", "args": ["-m", "knos", "mcp"]}
+    (home / ".claude.json").write_text(json.dumps(data), "utf-8")
+    from knos.cli import main
+    assert main(["init", "--hosts", "claude"]) == 0
+    said = capsys.readouterr().out.replace("\n", "")
+    assert f"removed the knos MCP server of the project /home/me/gone in {home / '.claude.json'} (an older Knos's, or one whose command is gone)" in said
+    assert "knos-labs" not in said
+
+
+def test_init_registers_the_mcp_server_with_every_host_that_is_here_and_undo_puts_the_files_back(knos_home, _isolated, knos_script):
     from knos import init
     home = _isolated
     for folder in (".claude", ".codex", ".cursor", ".gemini"):
@@ -197,7 +372,7 @@ def test_init_registers_the_mcp_server_with_every_host_that_is_here_and_undo_put
     assert init.undo()["mcp"] == []
 
 
-def test_init_leaves_a_working_knos_server_and_everything_else_in_a_users_files_alone(knos_home, _isolated):
+def test_init_leaves_a_working_knos_server_and_everything_else_in_a_users_files_alone(knos_home, _isolated, knos_script):
     """A `knos mcp` entry that still starts (another install's, or one a registry wrote) is not touched; Codex's TOML
     keeps its comments, its line endings and its other tables whatever shape the old knos table had; a file knos
     cannot read is skipped; the backup keeps the original's permissions."""
@@ -245,7 +420,7 @@ def test_init_leaves_a_working_knos_server_and_everything_else_in_a_users_files_
         assert (home / ".claude.json").stat().st_mode & 0o777 == 0o600
 
 
-def test_init_touches_cursor_and_gemini_only_when_they_are_installed(knos_home, _isolated):
+def test_init_touches_cursor_and_gemini_only_when_they_are_installed(knos_home, _isolated, knos_script):
     from knos import init
     home = _isolated
     (home / ".claude").mkdir()
@@ -257,7 +432,7 @@ def test_init_touches_cursor_and_gemini_only_when_they_are_installed(knos_home, 
     assert dict(rep["skipped"])["cursor"] == "not installed here" and "unknown host" in dict(rep["skipped"])["vim"]
 
 
-def test_init_keeps_a_knos_server_someone_extended_and_another_install_s_is_replaced(knos_home, _isolated):
+def test_init_keeps_a_knos_server_someone_extended_and_another_install_s_is_replaced(knos_home, _isolated, knos_script):
     from knos import init
     home = _isolated
     (home / ".cursor").mkdir()
@@ -276,7 +451,7 @@ def test_init_keeps_a_knos_server_someone_extended_and_another_install_s_is_repl
     assert rep["mcp"] == [] and "left it alone" in dict(rep["skipped"])["cursor"] and json.loads(bad.read_text()) == {"mcpServers": ["knos"]}
 
 
-def test_knos_init_prints_one_line_for_each_hook_and_each_mcp_server(knos_home, _isolated, capsys):
+def test_knos_init_prints_one_line_for_each_hook_and_each_mcp_server(knos_home, _isolated, knos_script, capsys):
     from knos.cli import main
     home = _isolated
     (home / ".claude").mkdir()
@@ -293,7 +468,7 @@ def test_knos_init_prints_one_line_for_each_hook_and_each_mcp_server(knos_home, 
     assert not (home / ".claude.json").exists() and not (home / ".gemini" / "settings.json").exists()
 
 
-def test_a_settings_file_knos_cannot_read_is_left_alone(knos_home, _isolated):
+def test_a_settings_file_knos_cannot_read_is_left_alone(knos_home, _isolated, knos_script):
     from knos import init
     (_isolated / ".claude").mkdir()
     bad = _isolated / ".claude" / "settings.json"

@@ -1,7 +1,8 @@
 # knos-settle
 
 The JavaScript client for Knos's two Solana programs: `knos-oidc`, which verifies GitHub Actions and GitLab CI OIDC
-tokens on chain, and `knos-pay`, the escrow that pays a GitHub account when GitHub signs that the work passed.
+tokens on chain, and `knos-pay`, the escrow that pays a GitHub account when a pull request is merged with the checks named at funding passing, as a
+GitHub-signed workflow run attests.
 It derives the addresses, builds the audiences and instructions, reads the accounts and serializes a transaction for
 a wallet to sign. One file, no dependencies: it runs as is in a browser and in Node 20+.
 Every encoding is checked byte for byte against the Python client (`fixtures.json`, `npm test` in the repository).
@@ -11,13 +12,13 @@ Every encoding is checked byte for byte against the Python client (`fixtures.jso
 No registry account is needed. From the release:
 
 ```bash
-npm i https://github.com/drexthealpha/Knos/releases/download/v0.3.11/knos-settle-0.3.11.tgz
+npm i https://github.com/drexthealpha/Knos/releases/download/v0.3.12/knos-settle-0.3.12.tgz
 ```
 
 Or import it in a browser:
 
 ```js
-import * as knos from "https://cdn.jsdelivr.net/gh/drexthealpha/Knos@v0.3.11/sdk/settle/index.js";
+import * as knos from "https://cdn.jsdelivr.net/gh/drexthealpha/Knos@v0.3.12/sdk/settle/index.js";
 ```
 
 ## Read a bounty's state

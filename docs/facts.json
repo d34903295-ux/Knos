@@ -6,16 +6,16 @@
    ],
    "what": "repositories in the index with an agent pull request that claims tests or CI pass",
    "json": "docs/bench.json",
-   "path": "market.index.overall.by_repo.repos",
+   "path": "market.index.overall.first_pr_per_repo.repos",
    "equals": 826
   },
   {
    "say": [
     "147"
    ],
-   "what": "of those, the ones whose first such pull request had a failing check at its head commit",
+   "what": "of those, the ones whose first such pull request had a failed check of any kind at its head commit (any_check_failed)",
    "json": "docs/bench.json",
-   "path": "market.index.overall.by_repo.failed",
+   "path": "market.index.overall.first_pr_per_repo.any_check_failed.repos",
    "equals": 147
   },
   {
@@ -24,159 +24,295 @@
    ],
    "what": "147 of 826",
    "json": "docs/bench.json",
-   "path": "market.index.overall.by_repo.share",
+   "path": "market.index.overall.first_pr_per_repo.any_check_failed.share",
    "equals": 0.178
+  },
+  {
+   "say": [
+    "80"
+   ],
+   "what": "of the 826, the ones where a failed check was, by its name, a test, build, lint or type-check job (test_or_build_check_failed)",
+   "json": "docs/bench.json",
+   "path": "market.index.overall.first_pr_per_repo.test_or_build_check_failed.repos",
+   "equals": 80
+  },
+  {
+   "say": [
+    "9.7%"
+   ],
+   "what": "80 of 826 (0.0969)",
+   "json": "docs/bench.json",
+   "path": "market.index.overall.first_pr_per_repo.test_or_build_check_failed.share",
+   "equals": 0.0969
+  },
+  {
+   "say": [
+    "241"
+   ],
+   "what": "merged agent pull requests whose description said tests or CI pass, in the sample that records merges",
+   "json": "docs/backtest.json",
+   "path": "sample.merged.overall.prs",
+   "equals": 241
+  },
+  {
+   "say": [
+    "30"
+   ],
+   "what": "of those 241, the ones with a failed check of any kind at the head commit",
+   "json": "docs/backtest.json",
+   "path": "sample.merged.overall.any_check_failed.prs",
+   "equals": 30
   },
   {
    "say": [
     "6"
    ],
-   "what": "the index is rebuilt every 6 hours",
+   "what": "a new scan of the Agent PR Index is scheduled every 6 hours; it replaces the published list only when it has finished",
    "file": ".github/workflows/index.yml",
    "has": "cron: \"17 */6 * * *\""
   },
   {
    "say": [
-    "21",
-    "17"
+    "63",
+    "56"
    ],
-   "what": "cheating pull requests in the tamper benchmark, and how many fooled plain CI",
+   "what": "cheating pull requests in the tamper benchmark (21 ideas in each of three sample repositories), and how many passed plain CI",
    "file": "docs/TAMPER.md",
-   "has": "CI green fooled 17/21. Knos, tests: fooled 2/21. Knos, black box: fooled 0/21."
+   "has": "| **all** | **63** | **56** | **7** | **0** |"
   },
   {
    "say": [
     "2.5%"
    ],
-   "what": "the fee, fixed in the escrow program",
-   "file": "programs/knos_pay/src/lib.rs",
+   "what": "the fee: 250 basis points in the escrow program of the second deployment (the first deployment's constant is the same)",
+   "file": "programs-v2/knos_pay/src/lib.rs",
    "has": "pub const FEE_BPS: u64 = 250;"
   },
   {
    "say": [
     "0.05"
    ],
-   "what": "the minimum fee in USDC (6 decimals)",
-   "file": "programs/knos_pay/src/lib.rs",
+   "what": "the minimum fee, in a token with 6 decimals such as USDC",
+   "file": "programs-v2/knos_pay/src/lib.rs",
    "has": "pub const FEE_MIN: u64 = 50_000;"
   },
   {
    "say": [
-    "14"
+    "40",
+    "1"
    ],
-   "what": "days before an unproven bounty is refunded, by default",
-   "file": ".github/workflows/fund.yml",
-   "matches": "work-days:[^\\n]*\\n(?:[^\\n]*\\n){0,4}?\\s+default: 14"
+   "what": "at 250 basis points, 1 million USD of fees a year takes 40 million USD of settled payments (1,000,000 / 0.025); the check is the fee constant",
+   "file": "programs-v2/knos_pay/src/lib.rs",
+   "has": "pub const FEE_BPS: u64 = 250;"
   },
   {
    "say": [
-    "24"
+    "500"
    ],
-   "what": "hours a tests-mode payment waits, by default",
-   "file": ".github/workflows/fund.yml",
-   "has": "int(m.group(2) or 86400)"
+   "what": "the most one bounty may hold until an outside review, in a token with 6 decimals",
+   "file": "programs-v2/knos_pay/src/lib.rs",
+   "has": "pub const MAX_AMOUNT: u64 = 500_000_000;"
+  },
+  {
+   "say": [
+    "180"
+   ],
+   "what": "days a bounty whose payment was attested is held for a payee who has no wallet yet, before it returns to the funder",
+   "file": "programs-v2/knos_pay/src/lib.rs",
+   "has": "pub const HOLD: i64 = 180 * 86_400;"
+  },
+  {
+   "say": [
+    "7"
+   ],
+   "what": "days the guardian can pause new funding for, at most, per signature",
+   "file": "programs-v2/knos_pay/src/lib.rs",
+   "has": "pub const PAUSE_MAX: u32 = 7 * 86_400;"
+  },
+  {
+   "say": [
+    "7"
+   ],
+   "what": "days a `/knos take` reservation lasts, by default",
+   "file": "src/knos/commands.py",
+   "has": "RESERVE, MAX_RESERVE = 7, 90"
+  },
+  {
+   "say": [
+    "14",
+    "90"
+   ],
+   "what": "days before a bounty that has not been paid goes back: the default, and the most a funder can ask for",
+   "file": "src/knos/commands.py",
+   "has": "DAYS, MAX_DAYS = 14, 90"
+  },
+  {
+   "say": [
+    "30"
+   ],
+   "what": "days after which a signing key expires unless it is attested again",
+   "file": "programs-v2/knos_oidc/src/pins.rs",
+   "has": "pub const KEY_TTL: i64 = 30 * 86_400;"
   },
   {
    "say": [
     "2048",
     "4096"
    ],
-   "what": "RSA key sizes the verifier is tested with",
+   "what": "RSA key sizes the verifier takes and is tested with",
    "file": "docs/BENCH.md",
-   "has": "517 vectors, for 2048- and 4096-bit keys"
+   "matches": "517 vectors, for 2048- and\\s+4096-bit keys"
   },
   {
    "say": [
-    "517"
+    "11"
    ],
-   "what": "Wycheproof vectors run against the RSA arithmetic",
-   "file": "docs/BENCH.md",
-   "has": "517 vectors"
+   "what": "bounties funded on the first deployment on devnet, read from the escrow's own logs",
+   "json": "docs/bench.json",
+   "path": "devnet.first.funded",
+   "equals": 11
   },
   {
    "say": [
-    "10,000"
+    "6"
    ],
-   "what": "steps in the escrow's random walk, with no violation",
-   "file": "docs/BENCH.md",
-   "has": "Last 10,000-step run: 0 violations."
+   "what": "of those, the ones paid: every one Knos's own account paying itself",
+   "json": "docs/bench.json",
+   "path": "devnet.first.paid",
+   "equals": 6
   },
   {
    "say": [
-    "105,000"
+    "64,291"
    ],
-   "what": "lamports of fees to relay a whole bounty",
-   "file": "docs/BENCH.md",
-   "has": "costs a relayer 105,000"
-  },
-  {
-   "say": [
-    "2,100",
-    "3"
-   ],
-   "what": "a GitHub Actions token's size and the transactions that write it",
-   "file": "docs/BENCH.md",
-   "matches": "2,086 to 2,276 bytes[^.]*\\n?[^.]*writing it takes 3 transactions"
-  },
-  {
-   "say": [
-    "2",
-    "1"
-   ],
-   "what": "an RSA-2048 signature check is 2 transactions, each under 1M compute units",
-   "file": "docs/BENCH.md",
-   "has": "| 2 | 778,986 and 848,363 |"
-  },
-  {
-   "say": [
-    "1.4"
-   ],
-   "what": "Solana's compute limit per transaction, in millions",
-   "file": "docs/BENCH.md",
-   "has": "The limit is 1,400,000 per transaction."
-  },
-  {
-   "say": [
-    "21,632"
-   ],
-   "what": "compute units for another program to read a verified token through the interface crate",
-   "file": "docs/BENCH.md",
-   "has": "| part of its own | 21,632 |"
-  },
-  {
-   "say": [
-    "0.99",
-    "100"
-   ],
-   "what": "Intercom's Fin: $0.99 per resolved conversation, near $100M a year (secondary coverage of Mostly Metrics)",
-   "source": "https://enterprisedna.co/resources/ai-pulse/ai-pulse-2026-08-02-intercom-s-fin-ai-agent-is-nearing-100m-arr-roughly-half-of/",
-   "read": "2026-10-02"
-  },
-  {
-   "say": [
-    "64"
-   ],
-   "what": "open bounties on GitHub issues across all boards: 59 verified, $64,291",
+   "what": "open bounties on GitHub issues across all boards: 59 verified, 64,291 USD (the page's own update time: 2026-10-02 10:33 UTC)",
    "source": "https://bountyos.rovidev.com/en/github-bounty-board/",
    "read": "2026-10-02"
   },
   {
    "say": [
-    "7"
+    "209",
+    "83"
    ],
-   "what": "run-rate revenue of coding agents billed by usage, about $7B: Cursor about $4B (this source), Claude Code over $2.5B, Cognition $492M; all three sources are in docs/MARKET.md",
-   "source": "https://dealroom.co/news/134107-cursor-tops-4b-annualized-revenue/",
+   "what": "commits in the public repository up to Knos 0.3.11 (commit f3dfd3d), and how many were made before the contest period began (06:00 Pacific time, 14 Sep 2026); counted from the cloned history with the commands in docs/DISCLOSURE.md",
+   "source": "https://github.com/drexthealpha/Knos/commits/f3dfd3dca73b91d7b3b503e61edc0575e351b99d",
    "read": "2026-10-02"
   },
   {
+   "say": [
+    "1.1%",
+    "98.9%"
+   ],
+   "what": "lines at commit f3dfd3d by git blame: 423 of 39,778 last changed before the contest period (1.1%), the other 39,355 between 30 Sep and 2 Oct 2026 (98.9%); commands in docs/DISCLOSURE.md",
+   "source": "https://github.com/drexthealpha/Knos/commits/f3dfd3dca73b91d7b3b503e61edc0575e351b99d",
+   "read": "2026-10-02"
+  },
+  {
+   "say": [
+    "48"
+   ],
+   "what": "hours of public delay before an upgrade of the second deployment can execute: the time lock (172,800 seconds) of the Squads multisig `upgrade_multisig` in programs-v2/program_ids.json, whose vault is the programs' upgrade authority",
+   "live": "upgrade_delay"
+  },
+  {
    "say": [],
-   "what": "both programs are deployed on devnet with no upgrade authority",
+   "what": "both programs of the first deployment are on devnet with no upgrade authority",
    "live": "immutable"
   },
   {
    "say": [],
-   "what": "a whole bounty has been paid on the deployed programs",
+   "what": "a whole bounty has been paid on the first deployment",
    "live": "run"
+  },
+  {
+   "say": [
+    "6"
+   ],
+   "what": "tasks paid on the second deployment, on devnet (the site's stats.json of 2026-10-03 16:04 UTC)",
+   "json": "docs/bench.json",
+   "path": "devnet.stats.by_deployment.second.completed",
+   "equals": 6
+  },
+  {
+   "say": [
+    "0"
+   ],
+   "what": "tasks, on both deployments, that someone other than Knos funded with their own tokens and that were paid to someone other than the funder (the site's stats.json of 2026-10-03 16:04 UTC)",
+   "json": "docs/bench.json",
+   "path": "devnet.stats.outside.completed",
+   "equals": 0
+  },
+  {
+   "say": [
+    "0"
+   ],
+   "what": "the funders of those tasks (the site's stats.json of 2026-10-03 16:04 UTC)",
+   "json": "docs/bench.json",
+   "path": "devnet.stats.outside.funders",
+   "equals": 0
+  },
+  {
+   "say": [
+    "0"
+   ],
+   "what": "of those funders, the ones who funded another task after one of theirs was paid (the site's stats.json of 2026-10-03 16:04 UTC)",
+   "json": "docs/bench.json",
+   "path": "devnet.stats.outside.repeat_funders",
+   "equals": 0
+  },
+  {
+   "say": [
+    "2"
+   ],
+   "what": "the payments that median is over (the site's stats.json of 2026-10-03 16:04 UTC)",
+   "json": "docs/bench.json",
+   "path": "devnet.stats.latency.merge_to_paid.count",
+   "equals": 2
+  },
+  {
+   "say": [
+    "110"
+   ],
+   "what": "seconds from the merge to the payment, the median over the public relay's log (the site's stats.json of 2026-10-03 16:04 UTC)",
+   "json": "docs/bench.json",
+   "path": "devnet.stats.latency.merge_to_paid.median",
+   "equals": 110
+  },
+  {
+   "say": [
+    "909"
+   ],
+   "what": "tests that passed in the release's own run of the suite (`pytest -q` on the release commit). Measured: pytest -q on the release tree, ubuntu-latest Python 3.12 in tests.yml: 909 passed, 7 skipped (drexthealpha/knos-rc run 37134734073, the same tree as the release commit apart from these documents)",
+   "json": "docs/bench.json",
+   "path": "release.tests_passing.value",
+   "equals": 909
+  },
+  {
+   "say": [
+    "3"
+   ],
+   "what": "of the pull requests #32, #33 and #34 by jaystay-bot, the ones that were merged and paid on devnet when the release ran. Measured: Knos #32, #33 and #34 by jaystay-bot, merged 2026-10-03 14:53 UTC and paid by the first deployment's knos_pay after its one-hour hold: knos due jaystay-bot read 'Paid for 3 pull request(s) in 1 repository: 48.75 in all' at 15:56 UTC; the payments are the knos:paid lines of issues #29, #30 and #31 in knos_pay's log on devnet",
+   "json": "docs/bench.json",
+   "path": "release.outside_prs_merged_and_paid.value",
+   "equals": 3
+  },
+  {
+   "say": [
+    "3"
+   ],
+   "what": "payments on devnet, both deployments, whose payee is another GitHub account than the one that funded the task: the `knos:paid` and `knos2:paid` lines of the escrows' logs whose payee is not the task's funder. Measured: the paid lines of both escrows' logs on devnet (scripts/network_stats.py jobs_of over every transaction of both knos_pay programs, 2026-10-03 16:04 UTC): 15 payments, 3 of them to another GitHub account (254283079) than the funder (142920951)",
+   "json": "docs/bench.json",
+   "path": "release.payments_between_unrelated_accounts.value",
+   "equals": 3
+  },
+  {
+   "say": [
+    "32"
+   ],
+   "what": "days, from 1 Sep 2026 to the release, on which drexthealpha made a commit in the public repository (the automatic commits of a workflow are left out): `git log --author=drexthealpha --format=%ad --date=short | sort -u | wc -l`. Measured: git log --author=drexthealpha --format=%ad --date=short | sort -u | wc -l on drexthealpha/Knos from 2026-09-01 to the release commit of 2026-10-03",
+   "json": "docs/bench.json",
+   "path": "release.days_of_shipping.value",
+   "equals": 32
   }
  ]
 }

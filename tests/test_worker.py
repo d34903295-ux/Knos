@@ -1,0 +1,553 @@
+"""The public worker (knos.proof.ghrelay) against a fake GitHub: what it reads and how cheaply, where a token goes,
+what travels with it, what it logs, and how a caller finds its verdict. One pass runs end to end on LiteSVM."""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import re
+import time
+import urllib.error
+
+import pytest
+from solders.keypair import Keypair
+
+from knos.proof import ghrelay
+from knos.settle import relay as relay1
+from knos.settle.v2 import relay as relay2
+
+HOME, ROTATE = ghrelay.HOME_REPO, ghrelay.ROTATE_REPO
+TERMS = b'{"accept":"","checks":[{"app":15368,"name":"test"}],"deny":[".github/**",".knos/**"],"mode":"merge","paths":[],"reserve":7,"v":1}'
+BALANCE = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2"
+
+
+def jwt(aud: str, **claims) -> str:
+    """A token's shape with these claims (unsigned: the relays are faked wherever this is used)."""
+    enc = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()  # noqa: E731
+    return f"{enc({'alg': 'RS256', 'kid': 'k1'})}.{enc({'aud': aud, 'iat': 1000, **claims})}.c2ln"
+
+
+def fund_aud(n: int) -> str:
+    return f"knos2:fund:{n}:5000000:0:{hashlib.sha256(TERMS).hexdigest()}:1209600:{BALANCE}"
+
+
+class Answer:
+    def __init__(self, body, etag: str):
+        self.body, self.headers = json.dumps(body).encode(), {"ETag": etag}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self) -> bytes:
+        return self.body
+
+
+class GitHub:
+    """api.github.com, faked where the worker opens it. Every answer has an ETag; a request that names the current
+    one gets 304. `asked` is every request: (method, path, status)."""
+
+    def __init__(self):
+        self.comments: dict[str, list[dict]] = {}       # repository -> its issue comments, oldest first
+        self.issues: dict[str, list[dict]] = {}
+        self.search: list[str] = []                     # repositories the comment search finds
+        self.repos: dict[str, list[dict]] = {}          # owner -> repositories
+        self.asked: list[tuple[str, str, int]] = []
+        self.down: set[str] = set()                     # paths GitHub answers 502 for
+        self._id = 0
+
+    def comment(self, repo: str, number: int, body: str, who: str = ghrelay.LOG_BOT, at: float | None = None) -> None:
+        self._id += 1
+        self.comments.setdefault(repo, []).append({"id": self._id, "body": body, "user": {"login": who},
+                                                   "issue_url": f"https://api.github.com/repos/{repo}/issues/{number}",
+                                                   "created_at": ghrelay._stamp(time.time() if at is None else at)})
+
+    def open(self, req, timeout=None):
+        path, method = req.full_url[len(ghrelay.API):], req.get_method()
+        status, body = self._route(method, path, json.loads(req.data) if req.data else None)
+        etag = '"' + hashlib.sha256(json.dumps(body).encode()).hexdigest()[:16] + '"'
+        if method == "GET" and status == 200 and req.get_header("If-none-match") == etag:
+            status = 304
+        self.asked.append((method, path, status))
+        if status != 200:
+            raise urllib.error.HTTPError(req.full_url, status, "no", {}, None)
+        return Answer(body, etag)
+
+    def _route(self, method: str, path: str, data):
+        where, _, query = path.partition("?")
+        q = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+        if where in self.down:
+            return 502, None
+        if where == "search/issues":
+            return 200, {"items": [{"repository_url": f"https://api.github.com/repos/{r}"} for r in self.search]}
+        m = re.fullmatch(r"users/([^/]+)/repos", where)
+        if m:
+            return 200, self.repos.get(m.group(1), [])
+        m = re.fullmatch(r"repos/([^/]+/[^/]+)/issues/comments", where)
+        if m:       # the repository's comments, newest first, a page at a time
+            rows = list(reversed(self.comments.get(m.group(1), [])))
+            size, page = int(q.get("per_page", 30)), int(q.get("page", 1))
+            return 200, rows[(page - 1) * size:page * size]
+        m = re.fullmatch(r"repos/([^/]+/[^/]+)/issues/(\d+)/comments", where)
+        if m and method == "POST":
+            self.comment(m.group(1), int(m.group(2)), data["body"])
+            return 200, {"id": self._id}
+        if m:
+            rows = [c for c in self.comments.get(m.group(1), []) if c["issue_url"].endswith(f"/issues/{m.group(2)}") and c["created_at"] >= q.get("since", "")]
+            size, page = int(q.get("per_page", 30)), int(q.get("page", 1))
+            return 200, rows[(page - 1) * size:page * size]
+        m = re.fullmatch(r"repos/([^/]+/[^/]+)/issues", where)
+        if m and method == "POST":
+            issue = {"number": len(self.issues.get(m.group(1), [])) + 1, "state": "open", "labels": data.get("labels", [])}
+            self.issues.setdefault(m.group(1), []).append(issue)
+            return 200, issue
+        if m:
+            return 200, [i for i in self.issues.get(m.group(1), []) if q.get("labels") in i["labels"] and i["state"] == "open"][:1]
+        if re.fullmatch(r"repos/([^/]+/[^/]+)/labels", where):
+            return 200, {}
+        return 404, None
+
+    def log(self) -> list[str]:
+        """The worker's public log: the bodies of the comments on its log issue, in order."""
+        return [c["body"] for c in self.comments.get(HOME, [])]
+
+    def gets(self, since: int = 0) -> list[tuple[str, int]]:
+        return [(path.split("?")[0], status) for method, path, status in self.asked[since:] if method == "GET"]
+
+
+class Relays:
+    """What the worker hands to a relay, kept: `relay_one` in its place, answering what the test says."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.answers: dict[str, dict] = {}              # token id -> the result (default: a fund that worked)
+
+    def __call__(self, ledger, payer, kind, jwt, terms=None):
+        self.calls.append((kind, jwt, terms))
+        r = dict(self.answers.get(ghrelay.token_id(jwt), {"ok": True, "kind": ghrelay.RELAY_KIND.get(kind, kind), "sigs": ["s1", "s2"], "note": "done"}))
+        return r
+
+
+class Ledger:
+    """A chain with nothing on it: the worker's rounds of what needs no token find nothing to send."""
+
+    def now(self) -> int:
+        return 1_790_000_000
+
+    def program_accounts(self, program, size=None, memcmp=None):
+        return []
+
+    def account(self, address):
+        return None
+
+
+@pytest.fixture
+def world(monkeypatch, tmp_path):
+    """A fake GitHub behind the worker's reader, a state file of its own, and the relays faked."""
+    gh, relays = GitHub(), Relays()
+    monkeypatch.setattr(ghrelay, "_HUB", ghrelay.Hub(gh.open))
+    monkeypatch.setattr(ghrelay, "_LOG", {})
+    monkeypatch.setattr(ghrelay, "_state_path", lambda: tmp_path / "ghrelay.json")
+    monkeypatch.setattr(ghrelay, "relay_one", relays)
+    monkeypatch.delenv("KNOS_RELAY_REPOS", raising=False)
+    gh.issues[HOME] = [{"number": 1, "state": "open", "labels": [ghrelay.LOG_LABEL]}]
+    return gh, relays, tmp_path / "ghrelay.json"
+
+
+PAYER = Keypair()
+
+
+def passes(now: float, **kw) -> list[str]:
+    return ghrelay.once(Ledger(), PAYER, now=now, **kw)
+
+
+# -- reading GitHub: conditional requests for what is known, a search for what is not ----------------------------------------
+def test_known_repositories_are_read_with_conditional_requests_and_new_ones_searched_for_every_30_seconds(world, monkeypatch):
+    gh, relays, state = world
+    t0 = time.time()
+    first = jwt(fund_aud(7))
+    gh.comment("octo/widgets", 7, ghrelay.token_comment("fund", first, TERMS))
+    gh.search = ["octo/widgets"]
+    assert len(passes(t0)) == 1 and [c[1] for c in relays.calls] == [first]
+    # the search found the repository; its comments, the rotate repository's and the worker's own were read in full
+    assert sorted(gh.gets()) == sorted([("search/issues", 200), (f"users/{HOME.split('/')[0]}/repos", 200), (f"repos/{HOME}/issues/comments", 200),
+                                        (f"repos/{ROTATE}/issues/comments", 200), ("repos/octo/widgets/issues/comments", 200), (f"repos/{HOME}/issues", 200)])
+    saved = json.loads(state.read_text())
+    assert saved["repos"] == {"octo/widgets": t0} and saved["searched"] == t0 and saved["owners"] == ["octo"]
+    # three seconds later nothing is new: no search, and a 304 for each repository, which GitHub does not count
+    n = len(gh.asked)
+    assert passes(t0 + 3) == [] and len(relays.calls) == 1
+    assert sorted(gh.gets(n)) == sorted([(f"repos/{HOME}/issues/comments", 200), (f"repos/{ROTATE}/issues/comments", 304), ("repos/octo/widgets/issues/comments", 304)])
+    n = len(gh.asked)        # (the worker's own repository had changed: its log gained a line)
+    assert passes(t0 + 6) == [] and {status for _path, status in gh.gets(n)} == {304} and len(gh.gets(n)) == 3
+    # a new comment there: that repository alone is read again, and only the new token is carried
+    second = jwt(fund_aud(8), iat=1003)
+    gh.comment("octo/widgets", 8, ghrelay.token_comment("fund", second, TERMS))
+    n = len(gh.asked)
+    assert len(passes(t0 + 9)) == 1 and [c[1] for c in relays.calls] == [first, second]
+    assert ("repos/octo/widgets/issues/comments", 200) in gh.gets(n) and (f"repos/{ROTATE}/issues/comments", 304) in gh.gets(n)
+    # half a minute after the last search the next one runs, and finds a repository nobody knew
+    gh.comment("new/place", 1, ghrelay.token_comment("proof", jwt("knos2:pay:1:1:9:" + "a" * 40 + ":" + "0" * 64 + ":0:-")))
+    gh.search.append("new/place")
+    n = len(gh.asked)
+    assert len(passes(t0 + 29)) == 0 and ("search/issues", 304) not in gh.gets(n) and ("search/issues", 200) not in gh.gets(n)
+    assert len(passes(t0 + 30)) == 1 and ("search/issues", 200) in gh.gets(n) and relays.calls[-1][0] == "proof"
+    assert set(json.loads(state.read_text())["repos"]) == {"octo/widgets", "new/place"}
+    # a worker that starts afresh knows them from its state file before it has searched; what it has carried, it does not carry again
+    monkeypatch.setattr(ghrelay, "_HUB", ghrelay.Hub(gh.open))
+    n = len(gh.asked)
+    assert passes(t0 + 40) == [] and len(relays.calls) == 3
+    assert {path for path, _s in gh.gets(n)} == {f"repos/{r}/issues/comments" for r in ("octo/widgets", "new/place", HOME, ROTATE)}
+    # two days after a repository's last token it is no longer read on every pass (the search finds it when it posts again)
+    gh.search = []
+    n = len(gh.asked)
+    passes(t0 + 41 + ghrelay.KNOWN_FOR)
+    assert not [p for p, _s in gh.gets(n) if "octo/widgets" in p] and json.loads(state.read_text())["repos"] == {}
+
+
+def test_a_repository_github_does_not_answer_for_is_asked_again_and_a_busy_one_is_read_to_the_horizon(world):
+    gh, relays, _state = world
+    t0 = time.time()
+    gh.search = ["octo/widgets"]
+    gh.comment("octo/widgets", 1, ghrelay.token_comment("fund", jwt(fund_aud(1), iat=900)), who="someone", at=t0 - 2 * ghrelay.HORIZON)
+    for i in range(130):                                        # more comments in the last hour than one page holds
+        gh.comment("octo/widgets", i + 1, "talk" if i != 3 else ghrelay.token_comment("fund", jwt(fund_aud(4)), TERMS), who="someone", at=t0 - 600 + i)
+    gh.down.add("repos/octo/widgets/issues/comments")
+    assert passes(t0) == [] and relays.calls == []
+    gh.down.clear()
+    assert len(passes(t0 + 31)) == 1 and len(relays.calls) == 1  # the second page held it; the token of two hours ago is past carrying
+    assert [p for m, p, _s in gh.asked if "octo/widgets" in p and "page=2" in p]
+
+
+def test_past_fifteen_known_repositories_the_newest_are_read_every_pass_and_the_others_in_turn(world):
+    gh, relays, state = world
+    t0 = time.time()
+    known = {f"o/r{i:02}": t0 - 60 * i for i in range(30)}          # r00 had a token just now, r29 half an hour ago
+    state.write_text(json.dumps({"repos": known, "searched": t0}))
+    read = lambda n: {path.split("/issues/")[0][len("repos/"):] for path, _s in gh.gets(n)} - {HOME, ROTATE}  # noqa: E731
+    seen: list[set] = []
+    for i in range(3):
+        n = len(gh.asked)
+        assert passes(t0 + 3 * i) == []
+        seen.append(read(n))
+    newest = {f"o/r{i:02}" for i in range(15)}
+    assert all(newest < got and len(got) == 20 for got in seen)      # fifteen every time, and five of the rest
+    assert set().union(*seen) == set(known)                          # in three passes every one of them was read
+    assert len(gh.gets()) == 3 * 22                                  # with the two always read: 22 requests a pass, however many are known
+
+
+# -- what a comment carries ----------------------------------------------------------------------------------------------------
+def test_a_fund_tokens_terms_travel_with_it(world):
+    gh, relays, _state = world
+    t0 = time.time()
+    fund, proof = jwt(fund_aud(7)), jwt("knos2:pay:1:7:9:" + "a" * 40 + ":" + "0" * 64 + ":0:-", iat=1001)
+    body = ghrelay.token_comment("fund", fund, TERMS)
+    assert body.splitlines()[:2] == [f"knos-fund: {fund}", "knos-terms: " + TERMS.decode()] and ghrelay.MARK in body
+    comments = [{"body": body.replace("\n", "\r\n"), "issue_url": "https://api.github.com/repos/o/r/issues/7", "user": {"login": "github-actions[bot]"},
+                 "created_at": "2026-10-03T10:00:05Z"},
+                {"body": f"knos-proof: {proof}\nknos-terms: {TERMS.decode()}", "issue_url": "u/9", "user": None}]
+    got = ghrelay.tokens(comments)
+    assert got == [("fund", 7, fund, "github-actions[bot]"), ("proof", 9, proof, "")]       # what `found` always gave: four things
+    assert (got[0].terms, got[0].created, got[1].terms, got[1].created) == (TERMS, 1791021605.0, None, None)      # and what goes with them
+    assert ghrelay.tokens(comments, "2026-10-03T10:00:06Z") == [("proof", 9, proof, "")]     # a comment older than the horizon is past
+    for kind in ("fund", "proof", "bind", "key", "verify", "veto", "claim"):
+        assert ghrelay.tokens([{"body": ghrelay.token_comment(kind, fund), "issue_url": "u/1", "user": {"login": "a"}}]) == [(kind, 1, fund, "a")]
+    assert ghrelay.tokens([{"body": "knos-terms: {}\n\nno token here", "issue_url": "u/1", "user": {"login": "a"}}]) == []
+    # through a pass: a workflow posts its tokens (with its own GitHub token), the relay is handed the terms with the
+    # fund token and nothing with the proof
+    gh.search = ["o/r"]
+    posted: list[tuple] = []
+    assert ghrelay.post_token("o/r", 7, "fund", fund, TERMS) == ghrelay.token_id(fund)
+    assert ghrelay.post_token("o/r", 9, "proof", proof, github=lambda path, data: posted.append((path, data)) or gh.comment("o/r", 9, data["body"])) == ghrelay.token_id(proof)
+    assert posted == [("repos/o/r/issues/9/comments", {"body": ghrelay.token_comment("proof", proof)})] and gh.comments["o/r"][0]["body"] == body
+    assert len(passes(t0)) == 2 and relays.calls == [("fund", fund, TERMS), ("proof", proof, None)]
+
+
+def test_a_copy_of_a_token_posted_another_way_neither_uses_it_up_nor_speaks_for_it(world):
+    """A token is public once it is posted, and anyone can post it again: under another marker, with other terms or
+    none, in a repository of their own. Whatever is read first, the token is carried once, from the comment that
+    posts it rightly, and the only log line that names it is its own verdict."""
+    gh, relays, _state = world
+    t0 = time.time()
+    fund, proof = jwt(fund_aud(7)), jwt("knos2:pay:1:7:9:" + "a" * 40 + ":" + "0" * 64 + ":0:-", iat=1001)
+    gh.search = ["a/copies", "octo/widgets"]                    # the copies are in a repository that is read first
+    gh.comment("a/copies", 1, ghrelay.token_comment("fund", fund, b'{"v":2}'))
+    gh.comment("a/copies", 1, f"knos-fund: {fund}")
+    gh.comment("a/copies", 1, ghrelay.token_comment("proof", fund))
+    gh.comment("a/copies", 1, ghrelay.token_comment("verify", fund))
+    gh.comment("a/copies", 1, ghrelay.token_comment("bind", proof))
+    gh.comment("octo/widgets", 7, ghrelay.token_comment("fund", fund, TERMS))
+    gh.comment("octo/widgets", 9, ghrelay.token_comment("proof", proof))
+    gh.comment("b/echo", 3, ghrelay.token_comment("fund", fund, TERMS))      # and one copy is exact: the same token, posted the same way
+    gh.search.append("b/echo")
+    lines = passes(t0)
+    assert relays.calls == [("fund", fund, TERMS), ("proof", proof, None)]
+    named = [ln for ln in lines if f" {ghrelay.token_id(fund)} " in ln or f" {ghrelay.token_id(proof)} " in ln]
+    # (the exact copy was read before the original: the token did what it says all the same, and its one verdict is the same)
+    assert [ln.split()[1:5] for ln in named] == [["fund", "b/echo#3", ghrelay.token_id(fund), "ok"], ["proof", "octo/widgets#9", ghrelay.token_id(proof), "ok"]]
+    passed = sorted(ln.split(" - fail ")[1] for ln in lines if " - fail " in ln)
+    short = ghrelay.token_id(fund)[:8]
+    assert passed == sorted([f"this comment cannot carry its token ({short}...): its `knos-terms:` line is missing, or is not the terms the token names"] * 2 + [
+        f"this comment cannot carry its token ({short}...): posted as knos-proof, but its audience is a fund token's",
+        f"this comment cannot carry its token ({short}...): it is a Knos fund token, which is carried under its own marker",
+        f"this comment cannot carry its token ({ghrelay.token_id(proof)[:8]}...): posted as knos-bind, but its audience is a pay token's"]) and len(lines) == 7
+    assert ghrelay.wait_for(ghrelay.token_id(fund), HOME, 1, every=0) == named[0]       # whoever waits for the token reads its own verdict
+    assert passes(t0 + 3) == []                                  # and each comment was dealt with once
+    # the first deployment's tokens need no terms line, and a token of nobody's audience may be verified alone
+    assert ghrelay.misposted("fund", jwt("knos:fund:3:1:0:" + "0" * 64 + ":1209600:0")) is None and ghrelay.misposted("verify", jwt("sts.amazonaws.com")) is None
+    assert ghrelay.misposted("fund", jwt("sts.amazonaws.com")) is None       # (the relay itself says what that is)
+
+
+# -- where a token goes -------------------------------------------------------------------------------------------------------
+def test_a_token_goes_to_the_deployment_its_audience_names(monkeypatch):
+    went: list[tuple] = []
+    answer = lambda kind: {"ok": True, "kind": kind, "sigs": ["s"], "key": "K", "added": True, "vetoed": ["J"],  # noqa: E731
+                           "claimed": [], "address": "A", "account": "T", "payer": "P", "exp": 0, "refreshed": False, "user_id": 5, "wallet": "W", "settled": [],
+                           "job": "J", "issue": 7, "amount": 5_000_000, "mode": 0, "faucet": True, "balance": BALANCE, "deadline": 0}
+    monkeypatch.setattr(relay1, "submit", lambda ledger, payer, jwt: went.append(("first", jwt)) or answer(relay1.kind_of(ghrelay.audience(jwt))))
+    monkeypatch.setattr(relay2, "submit", lambda ledger, payer, jwt, terms=None: went.append(("second", jwt, terms)) or
+                        ({"ok": False, "kind": None, "why": "not an audience of the second deployment"} if relay2.kind_of(ghrelay.audience(jwt)) is None
+                         else answer(relay2.kind_of(ghrelay.audience(jwt)))))
+    monkeypatch.setattr(relay2, "verify_only", lambda ledger, payer, jwt: went.append(("verify", jwt)) or answer("verify"))
+    one = lambda kind, token, terms=None: ghrelay.relay_one("ledger", "payer", kind, token, terms=terms)  # noqa: E731
+    new, old, key = jwt("knos2:bind:" + BALANCE), jwt("knos:veto:5:7"), jwt("knos-oidc:key:0:" + "ab" * 32)
+    assert one("bind", new)["ok"] and went == [("second", new, None)]
+    assert one("veto", old)["ok"] and went[-1] == ("first", old)
+    assert one("claim", jwt("knos:claim:" + BALANCE))["ok"] and went[-1][0] == "first"
+    assert one("key", key)["note"].startswith("Key K registered with the second verifier") and went[-1] == ("second", key, None)      # which hands it to the first too
+    assert one("verify", jwt("sts.amazonaws.com"))["note"].startswith("Verified. Account T") and went[-1][0] == "verify"
+    assert one("fund", jwt(fund_aud(7)), TERMS)["ok"] and went[-1][2] == TERMS      # a fund token's terms go with it
+    # a comment that cannot carry its token is refused before anything is sent: a marker the audience does not fit, a
+    # fund token without the terms it names, a Knos token under the verify marker
+    n = len(went)
+    assert one("proof", new) == {"ok": False, "kind": None, "why": "posted as knos-proof, but its audience is a bind token's"}
+    assert one("bind", jwt("knos:claim:" + BALANCE))["why"] == "posted as knos-bind, but its audience is a claim token's"
+    assert one("fund", key)["why"] == "posted as knos-fund, but its audience is a key token's"
+    assert one("fund", jwt(fund_aud(7)))["why"] == one("fund", jwt(fund_aud(7)), b"{}")["why"] == "its `knos-terms:` line is missing, or is not the terms the token names"
+    assert one("verify", new)["why"] == "it is a Knos bind token, which is carried under its own marker" and len(went) == n
+    # an audience that is nobody's, and something that is no token: the second relay says so
+    assert one("fund", jwt("sts.amazonaws.com")) == {"ok": False, "kind": None, "why": "not an audience of the second deployment"}
+    assert not one("fund", "eyJ.x.y")["ok"] and went[-1] == ("second", "eyJ.x.y", None)
+
+
+def test_what_the_second_deployments_results_say_in_words():
+    fund = {"ok": True, "kind": "fund", "sigs": ["a"], "job": "J", "repo_id": 5, "issue": 3, "amount": 5_000_000, "mode": 0, "faucet": True,
+            "balance": "B", "deadline": 1_791_209_600}
+    assert ghrelay.note(fund) == ("5.00 test USDC is in escrow for issue #3, paid when the pull request that closes this issue is merged and meets "
+                                  "the bounty's terms. Unpaid by 2026-10-05 14:13 UTC, it goes back to its funder. Job J.")
+    assert ghrelay.note({**fund, "faucet": False, "mode": 1}).startswith("5.00 from balance B is in escrow for issue #3, paid when the issue's acceptance checks pass")
+    entry = {"job": "J", "amount": 5_000_000, "fee": 125_000, "mint": "M", "to": "W", "held_until": None}
+    paid = {"ok": True, "kind": "pay", "sigs": ["a"], "repo_id": 5, "issue": 3, "payee_id": 42, "head": "a" * 40, "paid": [entry, entry]}
+    assert ghrelay.note(paid) == "9.75 was paid to W for issue #3 (GitHub user id 42)."
+    from knos.settle.v2 import pay                              # the faucet's mint and Circle's devnet mint are test USDC, and called that
+    assert ghrelay.note({**paid, "paid": [{**entry, "mint": str(pay.faucet_mint())}, {**entry, "mint": str(pay.USDC_DEVNET)}]}).startswith("9.75 test USDC was paid to W")
+    held = ghrelay.note({**paid, "paid": [{**entry, "to": None, "held_until": 1_805_552_000}]})
+    assert held.startswith("4.88 is held for GitHub user id 42 for issue #3 until 2027-03-20 14:13 UTC. It is sent once they name a wallet: `knos claim <their Solana address>`")
+    bound = {"ok": True, "kind": "bind", "sigs": ["a"], "user_id": 42, "wallet": "W", "settled": []}
+    assert ghrelay.note(bound) == "GitHub user id 42 is now paid at W."
+    assert ghrelay.note({**bound, "settled": [{"job": "J", "amount": 5_000_000, "fee": 125_000, "mint": "M"}]}).endswith(" 1 held payment, 4.88 in all, went there.")
+    key = {"ok": True, "kind": "key", "sigs": [], "key": "K", "added": False, "refreshed": True, "first": {"ok": True, "added": False}}
+    assert ghrelay.note(key) == "Key K refreshed: the second verifier keeps it 30 days from now."
+    assert ghrelay.note({**key, "refreshed": False}) == "Key K already known to the second verifier."
+    assert ghrelay.note({**key, "refreshed": False, "why": "no", "first": {"ok": True, "added": True}}) == "Key K not taken by the second verifier (no). The first deployment added it."
+    assert ghrelay.note({"ok": True, "kind": "key", "sigs": [], "key": "K", "added": True}) == "Key K added."      # the first deployment's own result, as ever
+
+
+# -- the verify-only limit -----------------------------------------------------------------------------------------------------
+def test_verify_only_is_limited_to_20_a_day_for_one_repository(world):
+    gh, relays, state = world
+    t0 = 1_791_021_600.0                                        # 2026-10-03 10:00 UTC
+    gh.search = ["octo/widgets"]
+    mine = [jwt("sts.amazonaws.com", repository_id="111", iat=1000 + i) for i in range(23)]
+    other = jwt("sts.amazonaws.com", repository_id="222")
+    gitlab = jwt("https://vault.example.com", project_id="20")
+    for token in (*mine[:22], other, gitlab):
+        gh.comment("octo/widgets", 1, ghrelay.token_comment("verify", token), at=t0 - 5)
+    relays.answers[ghrelay.token_id(mine[0])] = {"ok": False, "kind": "verify", "why": "the signature is not the issuer's"}      # costs nothing: not counted
+    relays.answers[ghrelay.token_id(mine[1])] = {"ok": True, "kind": "verify", "sigs": [], "already": True, "note": "done"}      # nor is one already there
+    lines = passes(t0)
+    ok, no = [ln for ln in lines if " ok " in ln], [ln for ln in lines if " fail " in ln]
+    assert len(lines) == 24 and len(ok) == 23 and len(no) == 1 and "the signature is not the issuer's" in no[0]
+    assert json.loads(state.read_text())["verify"] == {"day": "2026-10-03", "n": {"111": 20, "222": 1, "gitlab:20": 1}}
+    # the twenty-first of that repository is refused without being carried; another repository's is not
+    gh.comment("octo/widgets", 1, ghrelay.token_comment("verify", mine[22]), at=t0)
+    gh.comment("octo/widgets", 1, ghrelay.token_comment("verify", jwt("x", repository_id="222", iat=5)), at=t0)
+    n = len(relays.calls)
+    lines = passes(t0 + 3)
+    assert len(relays.calls) == n + 1 and len(lines) == 2 and " ok " in lines[0]
+    assert lines[1].split(" fail ")[1] == ("20 tokens a day are verified for one repository, and this one has had them; post it again after midnight UTC, "
+                                           "or relay it yourself (anyone can)")
+    # the next day it is carried again
+    late = jwt("sts.amazonaws.com", repository_id="111", iat=99_000)
+    gh.comment("octo/widgets", 1, ghrelay.token_comment("verify", late), at=t0 + 86_400)
+    assert len(passes(t0 + 86_400)) == 1 and relays.calls[-1][1] == late
+    assert json.loads(state.read_text())["verify"] == {"day": "2026-10-04", "n": {"111": 1}}
+
+
+# -- the public log ------------------------------------------------------------------------------------------------------------
+def test_a_log_line_keeps_its_format_and_says_how_long_the_token_took(world, monkeypatch):
+    gh, relays, state = world
+    t0 = time.time()
+    gh.search = ["octo/widgets"]
+    good, bad, known = jwt(fund_aud(7)), jwt(fund_aud(8), iat=1001), jwt("knos-oidc:key:0:" + "ab" * 32, iat=1002)
+    relays.answers[ghrelay.token_id(good)] = {"ok": True, "kind": "fund", "sigs": ["s1", "s2", "s3", "s4"], "note": "5.00 test USDC is in escrow for issue #7."}
+    relays.answers[ghrelay.token_id(bad)] = {"ok": False, "kind": "fund", "why": "this commenter may not\nspend that balance"}
+    relays.answers[ghrelay.token_id(known)] = {"ok": True, "kind": "key", "sigs": [], "key": "K", "added": False, "refreshed": False}
+    gh.comment("octo/widgets", 7, ghrelay.token_comment("fund", good, TERMS), at=t0 - 5)
+    gh.comment("octo/widgets", 8, ghrelay.token_comment("fund", bad, TERMS), at=t0 - 5)
+    gh.comment("octo/widgets", 9, ghrelay.token_comment("key", known), at=t0 - 5)
+    lines = passes(t0)
+    m = re.fullmatch(rf"knos-relay fund octo/widgets#7 {ghrelay.token_id(good)} ok sig=s2,s3,s4 note=5.00 test USDC is in escrow for issue #7. t=(\d+)", lines[0])
+    assert m and 5 <= int(m.group(1)) <= 7, lines                # from the comment's creation to the last transaction
+    assert lines[1:] == [f"knos-relay fund octo/widgets#8 {ghrelay.token_id(bad)} fail this commenter may not spend that balance"]      # one line; no time on a refusal;
+    assert gh.log() == [lines[0], lines[1]]                      # and nothing for a key the chain already had. What worked was logged at once
+    assert ghrelay.log_line("proof", "o/r", 9, good, {"ok": True, "sigs": [], "note": "N", "already": True}, 12).endswith(" ok sig=none note=N (another relayer carried it first) t=12")
+    # a verdict GitHub would not take is not lost: the next pass posts it
+    later = jwt(fund_aud(10), iat=1005)
+    gh.comment("octo/widgets", 10, ghrelay.token_comment("fund", later, TERMS))
+    gh.down.add(f"repos/{HOME}/issues/1/comments")
+    lines = passes(t0 + 3)
+    assert len(lines) == 1 and len(gh.log()) == 2 and json.loads(state.read_text())["unposted"] == lines
+    gh.down.clear()
+    assert passes(t0 + 6) == [] and gh.log()[2] == lines[0] and "unposted" not in json.loads(state.read_text())
+    # a relay with no log issue yet makes one, labelled, on its first line
+    gh.issues[HOME] = []
+    monkeypatch.setattr(ghrelay, "_LOG", {})
+    ghrelay.post_log(["knos-relay settle - - ok sig=s note=n"])
+    assert gh.issues[HOME] == [{"number": 1, "state": "open", "labels": [ghrelay.LOG_LABEL]}] and gh.log()[-1] == "knos-relay settle - - ok sig=s note=n"
+    # more lines than one comment holds go in as many comments as it takes, none of them cut
+    many = [f"knos-relay fund o/r#{i} - fail " + "x" * 950 for i in range(130)]
+    n = len(gh.log())
+    ghrelay.post_log(many)
+    assert len(gh.log()) == n + 3 and "\n".join(gh.log()[n:]).splitlines() == many and all(len(body) <= 60_000 for body in gh.log()[n:])
+
+
+def test_a_token_that_must_wait_is_tried_again_when_its_time_comes_not_on_every_pass(world, monkeypatch):
+    gh, relays, state = world
+    t0 = time.time()
+    gh.search = ["a/one", "b/two"]
+    early, late, dropped = jwt(fund_aud(1), iat=1000), jwt(fund_aud(2), iat=2000), jwt(fund_aud(3), iat=3000)
+    gh.comment("b/two", 1, ghrelay.token_comment("fund", early, TERMS))
+    gh.comment("a/one", 2, ghrelay.token_comment("fund", late, TERMS))
+    gh.comment("a/one", 3, ghrelay.token_comment("fund", dropped, TERMS))
+    relays.answers[ghrelay.token_id(late)] = {"ok": False, "kind": "fund", "why": "the faucet serves a repository once a minute", "retry": True, "wait": 50}
+    relays.answers[ghrelay.token_id(dropped)] = {"ok": False, "kind": "fund", "why": "TimeoutError: not confirmed", "retry": True, "transient": True}
+    assert len(passes(t0)) == 1 and [c[1] for c in relays.calls] == [early, late, dropped]      # in the order GitHub issued them, across repositories
+    # the relay said how long the faucet's token must wait: it is not asked about again before that. A failure of the
+    # cluster's is tried on the next passes, then given more room each time
+    asked = lambda token: sum(1 for c in relays.calls if c[1] == token)  # noqa: E731
+    for i in range(1, 17):
+        passes(t0 + 3 * i)
+    assert asked(late) == 1 and asked(dropped) == 5 and list(json.loads(state.read_text())["tries"].values()) == [5]      # at 0, 3, 6, 18 and 39 s
+    del relays.answers[ghrelay.token_id(late)]
+    assert passes(t0 + 49) == [] and len(passes(t0 + 50)) == 1 and asked(late) == 2
+    # a failure that never clears is given up on after twelve tries, which now takes minutes, and said out loud
+    t, lines = t0 + 50, []
+    while not lines and t < t0 + 900:
+        t += 3
+        lines = passes(t)
+    assert asked(dropped) == 12 and 360 < t - t0 < 480 and lines[0].endswith("(gave up after 12 passes; run the workflow again for a fresh token)")
+    assert json.loads(state.read_text())["hold"] == {} and json.loads(state.read_text())["tries"] == {}
+
+
+def test_wait_for_finds_the_workers_line_for_a_token(world):
+    gh, _relays, _state = world
+    tid = ghrelay.token_id(jwt(fund_aud(7)))
+    line = f"knos-relay fund octo/widgets#7 {tid} ok sig=s1,s2 note=5.00 test USDC is in escrow for issue #7. t=6"
+    gh.comment(HOME, 1, f"knos-relay fund a/b#1 {'0' * 16} ok sig=x note=y t=1\nknos-relay proof a/b#2 {'1' * 16} fail no")
+    gh.comment(HOME, 1, line.replace(" ok ", " fail "), who="mallory")       # anyone can comment on a public issue: not the worker's, not counted
+    assert ghrelay.wait_for(tid, HOME, 0.05, every=0.01) is None
+    assert {status for _m, path, status in gh.asked if "issues/1/comments" in path} == {200, 304}       # asked again and again, for nothing
+    # the worker reports while the caller waits: the line comes back as it was written
+    polls = []
+
+    def get(path):
+        polls.append(path)
+        if len(polls) == 5:
+            gh.comment(HOME, 1, f"knos-relay key x/y#3 {'2' * 16} ok sig=k note=z\n{line}")
+        return ghrelay._api(path)
+    assert ghrelay.wait_for(tid, HOME, 5, every=0, get=get) == line
+    assert len(polls) == 5 and all(p.startswith(f"repos/{HOME}/issues/1/comments?since=") for p in polls)      # the log issue is looked up once, not on every poll
+    # a log with more than a page of lines since the caller began waiting is read to its end
+    gh.comments[HOME] = []
+    for i in range(101):
+        gh.comment(HOME, 1, f"knos-relay fund a/b#1 {i:016x} ok sig=x note=y t=1" if i < 100 else line)
+    assert ghrelay.wait_for(tid, HOME, 1, every=0) == line
+    # a repository with no relay log, and GitHub not answering: None when the time is up
+    assert ghrelay.wait_for(tid, "no/log", 0.02, every=0.01) is None
+    gh.down.add(f"repos/{HOME}/issues/1/comments")
+    assert ghrelay.wait_for(tid, HOME, 0.02, every=0.01) is None
+
+
+def test_serve_loops_passes_and_sends_what_needs_no_token_once_a_minute(monkeypatch):
+    clock, ran = [0.0], []
+
+    def once(ledger, payer, crank=True):
+        ran.append((clock[0], crank))
+        clock[0] += 1.0 if len(ran) != 3 else 7.0               # a pass takes a second; the third one, with a token to carry, seven
+        if len(ran) == 2:
+            raise OSError("GitHub is down")                     # one bad pass does not stop the worker
+        return ["line"]
+    monkeypatch.setattr(ghrelay, "once", once)
+    assert ghrelay.serve(70, every=3.0, ledger="ledger", payer="payer", clock=lambda: clock[0], sleep=lambda s: clock.__setitem__(0, clock[0] + s)) == len(ran) - 1
+    starts = [t for t, _c in ran]
+    assert starts[:5] == [0.0, 3.0, 6.0, 13.0, 16.0] and all(t < 70 for t in starts)      # every three seconds, or as soon as the last pass ended
+    assert [t for t, crank in ran if crank] == [0.0, 61.0]
+
+
+# -- one pass, end to end, on LiteSVM --------------------------------------------------------------------------------------------
+def test_a_pass_carries_a_fund_token_and_its_proof_to_the_second_deployment(monkeypatch, tmp_path):
+    pytest.importorskip("solders.litesvm")
+    from _pay2 import Chain
+    from test_relay2 import JWKS, TERMS as terms, Net, faucet_jwt, pay_jwt, user
+
+    from knos.settle.v2 import pay
+    c = Chain()
+    net = Net(c)
+    assert c.send([pay.init_faucet_ix(c.payer.pubkey())]), c.err
+    gh = GitHub()
+    gh.issues[HOME] = [{"number": 1, "state": "open", "labels": [ghrelay.LOG_LABEL]}]
+    gh.search = ["octo/widgets"]
+    monkeypatch.setattr(ghrelay, "_HUB", ghrelay.Hub(gh.open))
+    monkeypatch.setattr(ghrelay, "_LOG", {})
+    monkeypatch.setattr(ghrelay, "_state_path", lambda: tmp_path / "ghrelay.json")
+    monkeypatch.setattr(relay1, "fetch_jwks", lambda issuer: JWKS[issuer])      # GitHub's key set, as the relays would fetch it
+    monkeypatch.setattr(relay2, "_KEPT", {})
+    org, repo, payee, wallet = user(), user(), user(), Keypair().pubkey()
+    fund = faucet_jwt(c, 7, org, repo)
+    gh.comment("octo/widgets", 7, ghrelay.token_comment("fund", fund, terms), at=time.time() - 4)
+    [line] = ghrelay.once(net, c.payer)
+    job = pay.job_pda(repo, 7, pay.faucet_balance_pda(org))
+    assert re.fullmatch(rf"knos-relay fund octo/widgets#7 {ghrelay.token_id(fund)} ok sig=\S+ note=5.00 test USDC is in escrow for issue #7, paid when .* Job {job}\. t=\d+", line), line
+    assert pay.read_job(c.data(job)).terms == pay.terms_hash(terms) and net.terms_of(job) == terms
+    # a fund token in a comment without its terms line (a copy somebody made, or a broken workflow) funds nothing; the
+    # log says why without naming the token, and the token is still carried from the comment that posts it whole
+    c.warp(60)
+    bare = faucet_jwt(c, 8, org, repo)
+    gh.comment("octo/widgets", 8, f"knos-fund: {bare}\n\n{ghrelay.MARK}")
+    [line] = ghrelay.once(net, c.payer)
+    assert line == (f"knos-relay fund octo/widgets#8 - fail this comment cannot carry its token ({ghrelay.token_id(bare)[:8]}...): its `knos-terms:` line is missing, "
+                    "or is not the terms the token names")
+    assert ghrelay.wait_for(ghrelay.token_id(bare), HOME, 0.02, every=0.01) is None
+    gh.comment("octo/widgets", 8, ghrelay.token_comment("fund", bare, terms))
+    [line] = ghrelay.once(net, c.payer)
+    assert f" {ghrelay.token_id(bare)} ok sig=" in line and pay.read_job(c.data(pay.job_pda(repo, 8, pay.faucet_balance_pda(org)))).state == "open"
+    # the proof pays; the caller, waiting on the worker's log, reads the same line
+    proof = pay_jwt(c, repo, 7, payee, wallet)
+    gh.comment("octo/widgets", 12, ghrelay.token_comment("proof", proof))
+    c.warp(60)
+    [line] = ghrelay.once(net, c.payer)
+    assert f"note=4.88 test USDC was paid to {wallet} for issue #7 (GitHub user id {payee}). t=" in line and c.balance(pay.ata(wallet, pay.faucet_mint())) == 4_875_000
+    assert ghrelay.wait_for(ghrelay.token_id(proof), HOME, 1, every=0) == line
+    assert ghrelay.once(net, c.payer) == []                     # each token once
+    # what needs no token: a bounty nobody proved goes back when its time is up, and the log says so
+    c.warp(60)
+    late = faucet_jwt(c, 9, org, repo, work=60)
+    gh.comment("octo/widgets", 9, ghrelay.token_comment("fund", late, terms))
+    assert len(ghrelay.once(net, c.payer)) == 1
+    c.warp(61)
+    [line] = ghrelay.once(net, c.payer)
+    assert re.fullmatch(r"knos-relay refund - - ok sig=\S+ note=a bounty nobody could be paid from any more went back to its funder", line)
+    assert c.data(pay.job_pda(repo, 9, pay.faucet_balance_pda(org))) is None and gh.log()[-1] == line

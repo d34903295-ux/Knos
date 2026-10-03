@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="1280" height="720" fill="#0d1117"/>
+  <rect x="80" y="80" width="1120" height="560" rx="18" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+  <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="52" fill="#e6edf3" text-anchor="middle">
+    <text x="640" y="260">A constant frame rate</text>
+    <text x="640" y="350">Subtitles beside the video and inside it</text>
+    <text x="640" y="440">Never longer than three minutes</text>
+  </g>
+  <text x="640" y="560" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="30" fill="#8b949e">the narration is never cut short</text>
+</svg>

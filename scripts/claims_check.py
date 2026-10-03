@@ -6,10 +6,10 @@
 Pitch-facing text is README.md, the home page's first view (web/index.html), and docs/submission/*.md. Every number in
 it must be one a fact in docs/facts.json says ("say"), and every fact must hold:
 
-    {"say": ["27.2%"], "what": "...", "json": "docs/bench.json", "path": "market.index.overall.share", "equals": 0.2715}
+    {"say": ["17.8%"], "what": "...", "json": "docs/bench.json", "path": "market.index.overall.first_pr_per_repo.any_check_failed.share", "equals": 0.178}
     {"say": ["21"], "what": "...", "file": "docs/TAMPER.md", "has": "fooled 17/21"}
     {"say": ["1,470"], "what": "...", "source": "https://...", "read": "2026-10-02"}      an outside number, cited
-    {"say": [...], "what": "...", "live": "immutable"}                                   checked on devnet
+    {"say": [...], "what": "...", "live": "immutable"}                                   checked on devnet (see LIVE)
 
 Numbers that are not claims are ignored: versions, dates, clock times in the scripts, list numbering, names such as
 RS256, and anything inside code or a link's address. The generated benchmark table is checked by bench_docs.py.
@@ -29,8 +29,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 PITCH = ["README.md", "web/index.html", "docs/submission/SUBMISSION.md", "docs/submission/pitch_script.md",
-         "docs/submission/demo_script.md"]
-SENTENCE = "AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed."
+         "docs/submission/demo_script.md", "docs/submission/weekly_update.md"]
+SENTENCE = "Bounties that pay when the pull request is merged with the checks you named passing. Attested by a GitHub-signed workflow run, verified on Solana."
+# the long form, after the short one, in the README's lead and the home page's hero
+LONG = ("A pinned workflow reads the merge and the check results from GitHub. GitHub signs that workflow run. A Solana program "
+        "verifies the signature itself and pays the author in the same minute. Nobody holds the money in between, and nobody "
+        "decides after the fact.")
 NUMBER = re.compile(r"\$?\d[\d,]*(?:\.\d+)?%?")
 NOT_CLAIMS = [
     r"<!-- bench:(\w+) -->.*?<!-- /bench:\1 -->",            # generated; bench_docs.py --check covers it
@@ -39,11 +43,12 @@ NOT_CLAIMS = [
     r"\b\d+\.\d+\.\d+\b", r"\bKnos 0\.\d+\b", r"\b0\.\d–0\.\d\.\d\b",     # versions
     r"\b\d{1,2}(?:–\d{1,2})? (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*(?: \d{4})?\b", r"\b(?:Sep|Oct)[a-z]* 20\d\d\b",
     r"\b20[12]\d\b",                                           # years
-    r"\(\d:\d\d\)",                                            # clock times in the scripts
+    r"\(\d:\d\d(?:, \d+ seconds)?\)",                          # clock times and scene lengths in the scripts
+    r"\[\[stat: [a-z_]+\]\]",                                 # a slot the release run fills (scripts/bench_docs.py)
     r"(?m)^\s*\d+\.\s",                                        # list numbering
     r"(?m)^#+ \d+\.\s", r"\bsection \d+\b", r"\babout \d+ words\b",       # headings, cross-references, the word count
     r"\b0\.\d and\b",                                         # "0.2 and 0.3.0-0.3.9"
-    r"bounty 20\b", r"\b20\.00 USDC\b",                        # the amount typed in the example
+    r"bounty 20\b", r"\b20\.00 USDC\b", r"\b20 USDC\b",       # the amount typed in the example
     r"#\d+\b|#N\b", r"\bRS256\b|\bSHA-256\b|\bRSA-\d+\b|\bHS256\b|\buid \d+\b|\b360px\b",
 ]
 
@@ -91,21 +96,40 @@ def _rpc(method: str, params: list):
         return json.load(r)["result"]
 
 
-def live_immutable() -> tuple[bool, str]:
-    """Both programs are deployed on devnet and have no upgrade authority."""
+def _account(addr: str):
+    """(owner, data) of an account on the cluster, or None: what knos.mainnet_check reads the chain through."""
     import base64
+    v = _rpc("getAccountInfo", [addr, {"encoding": "base64", "commitment": "confirmed"}])["value"]
+    return (v["owner"], base64.b64decode(v["data"][0])) if v else None
 
+
+def live_immutable() -> tuple[bool, str]:
+    """Both programs of the first deployment are on devnet and have no upgrade authority."""
     from knos import mainnet_check as mc
     from knos.settle import oidc
 
-    def account(addr: str):
-        v = _rpc("getAccountInfo", [addr, {"encoding": "base64", "commitment": "confirmed"}])["value"]
-        return (v["owner"], base64.b64decode(v["data"][0])) if v else None
-    fetch = mc.Fetch(account=account, verified=lambda n: None, program_checks=lambda: (False, ""), get=lambda u: None,
-                     audit=lambda: (False, ""))
-    got = [(name, *mc.program_data(fetch, oidc.IDS[name])[:2]) for name in mc.PROGRAMS]
+    got = [(name, *mc.program_data(_account, oidc.IDS[name])[:2]) for name in mc.PROGRAMS]
     ok = all(deployed and authority is None for _n, deployed, authority in got)
     return ok, "; ".join(f"{n}: {'not deployed' if not d else 'immutable' if a is None else f'upgradeable by {a}'}" for n, d, a in got)
+
+
+def live_upgrade_delay() -> tuple[bool, str]:
+    """The second deployment's programs can be upgraded only by the vault of the pinned Squads multisig, whose time lock
+    on chain is 172,800 seconds (48 hours) and which no single key can change."""
+    from solders.pubkey import Pubkey
+
+    from knos import mainnet_check as mc
+    from knos.settle.v2 import oidc
+
+    ids = oidc.IDS
+    ms, found = mc.multisig_at(_account, ids["upgrade_multisig"], ids["squads_program"])
+    vault = str(mc.vault_address(Pubkey.from_string(ids["upgrade_multisig"]), Pubkey.from_string(ids["squads_program"])))
+    held = {name: mc.program_data(_account, ids[name])[:2] for name in mc.PROGRAMS}
+    ok = (ms is not None and ms.time_lock == mc.TIME_LOCK and ms.config_authority is None and vault == ids["upgrade_authority"]
+          and all(deployed and authority == vault for deployed, authority in held.values()))
+    return ok, f"upgrade multisig {found}; " + "; ".join(
+        f"{name}: " + ("not deployed" if not deployed else f"upgrade authority {authority or 'none'}" + (", its vault" if authority == vault else ", NOT its vault"))
+        for name, (deployed, authority) in held.items())
 
 
 def live_run() -> tuple[bool, str]:
@@ -119,7 +143,7 @@ def live_run() -> tuple[bool, str]:
     return paid > 0, f"{paid} payment(s) to {len(got)} GitHub account(s) recorded by knos-pay on devnet"
 
 
-LIVE = {"immutable": live_immutable, "run": live_run}
+LIVE = {"immutable": live_immutable, "run": live_run, "upgrade_delay": live_upgrade_delay}
 
 
 def check(fact: dict, offline: bool) -> tuple[bool | None, str]:
@@ -157,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
         if SENTENCE not in html.unescape(read(path)):
             fails += 1
             print(f"FAIL  {path}: the one sentence is missing")
+    for path in ("README.md", "web/index.html"):
+        if LONG not in html.unescape(read(path)):
+            fails += 1
+            print(f"FAIL  {path}: the long form of the sentence is missing")
     for f in facts:
         if not (set(f["say"]) & used) and "live" not in f:
             fails += 1

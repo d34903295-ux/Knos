@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "knos-oidc-interface"
-version = "0.3.11"
+version = "0.3.12"
 
 [[package]]
 name = "lazy_static"

@@ -1,0 +1,37 @@
+# A small storyboard that renders anywhere the tool runs: every page, picture and command in it is in this repository,
+# so it needs no network. Render it:
+#
+#     python scripts/video/render.py scripts/video/sample.storyboard
+#
+# The format is described at the top of storyboard.py. A scene is `--- name`, the words (`say:`), and one thing to show.
+
+title: Sample storyboard
+size: 1280x720
+fps: 30
+voice: piper:en_US-lessac-medium
+cwd: ../..
+env: PYTHONPATH=src
+
+--- title
+say: This is a sample of the video tool. A storyboard says what to show and what to say. A voice, a browser and ffmpeg
+  make the video with no one at the keyboard.
+show: still sample/card.svg
+hold: 5
+
+--- page
+say: A scene can show a real page. This one is a file in the repository; an address on the web works the same way.
+  The page scrolls while the words are spoken.
+show: url sample/page.html
+scroll: 1400
+wait: 0.5
+
+--- commands
+say: Or it can show the real output of commands. They run once, when the video is made, and the terminal page replays
+  what they printed, with the exit status and the time they took.
+run: {python} scripts/deploy_v2.py hash tests/fixtures/knos_pay_v2_nodevnet.so
+run: {python} -c "from knos.settle.v2 import pay; print('fee on a 20 USDC bounty:', pay.fee_of(20_000_000) / 1e6, 'USDC')"
+
+--- close
+say: The result is an H.264 file at a constant frame rate, a subtitle file, and a failure if the video is longer than
+  three minutes.
+show: still sample/end.svg

@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from knos.proof import ghrelay
-from knos.settle import pay
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB = "ab" * 32
@@ -22,7 +21,7 @@ def jwt(aud: str, exp: float | None = None) -> str:
     return f"{enc({'alg': 'RS256', 'kid': 'k1'})}.{enc({'aud': aud, 'exp': exp or time.time() + 300})}.c2ln"
 
 
-def test_checks_hash_matches_fund_yml(tmp_path):
+def test_checks_hash_is_sorted_paths_each_with_its_content_hash(tmp_path):
     d = tmp_path / ".knos" / "acceptance" / "1"
     (d / "sub").mkdir(parents=True)
     (d / "test_accept.py").write_bytes(b"def test_x():\n    assert 1\n")
@@ -31,9 +30,10 @@ def test_checks_hash_matches_fund_yml(tmp_path):
     for rel, data in sorted([("sub/data.txt", b"x"), ("test_accept.py", b"def test_x():\n    assert 1\n")]):
         want.update(f"{rel}\0{hashlib.sha256(data).hexdigest()}\n".encode())
     assert ghrelay.checks_hash(d) == want.hexdigest()
+    # 0.3.11's fund.yml computed the same hash in a script of its own, which had to be kept equal to this one by a
+    # test. Now the workflow computes nothing: one command does, and this is the only place the hash is made.
     src = (ROOT / ".github" / "workflows" / "fund.yml").read_text(encoding="utf-8")
-    assert 'h.update(f"{f.relative_to(root).as_posix()}\\0{hashlib.sha256(f.read_bytes()).hexdigest()}\\n".encode())' \
-        in src
+    assert "hashlib" not in src and "python3 -" not in src
 
 
 def test_relay_one_reports_in_words_and_checks_the_marker():
@@ -74,33 +74,36 @@ def test_found_and_discover():
         assert ghrelay.TOKEN.findall(f"knos-{kind}: {t}") == [(kind, t)]
 
 
-def test_caller_workflow_has_no_secret_and_front_matches():
+def test_caller_workflow_needs_no_secret_and_names_one_published_commit():
     wf = (ROOT / "examples" / "knos-workflow.yml").read_text(encoding="utf-8")
-    assert "secrets." not in wf and "secrets:" not in wf
-    # the workflows are pinned by one commit sha; the template carries a placeholder the Pages build replaces with the
-    # commit it is built from (network.yml), so the site hands out the workflows of its own commit
-    pins = set(re.findall(r"drexthealpha/Knos/\.github/workflows/(?:fund|prove|relay)\.yml@(\S+)", wf))
-    assert pins == {"KNOS_COMMIT_SHA"}
-    assert "kind: refused" in wf
-    assert "pull_request_target" in wf and "issue_comment" in wf and "closed" in wf
-    js = (ROOT / "web" / "front.js").read_text(encoding="utf-8")
-    assert 'KNOS_SHA = "KNOS_COMMIT_SHA"' in js and 'KNOS_RELAY_SHA = "KNOS_COMMIT_SHA"' in js
-    wf_js = re.search(r"export const WORKFLOW = `(.*?)`;\n", js, re.DOTALL).group(1)
-    wf_js = wf_js.replace("${KNOS_SHA}", "KNOS_COMMIT_SHA").replace("${KNOS_RELAY_SHA}", "KNOS_COMMIT_SHA")
-    assert wf_js.replace("\\${{", "${{").replace("\\\\", "\\") == wf
+    # no secret is needed; the one a repository may set is handed on by name, never all of them
+    assert set(re.findall(r"secrets\.(\w+)", wf)) == {"KNOS_RELAY_KEY"} and "inherit" not in wf and "No secret is needed" in wf
+    # the workflows are pinned by one commit of drexthealpha/knos-workflows; until a release names it the template
+    # carries a placeholder, and the release puts the commit into the examples and the site together
+    pins = set(re.findall(r"drexthealpha/knos-workflows/\.github/workflows/(?:fund|prove)\.yml@(\S+)", wf))
+    assert len(pins) == 1 and re.fullmatch(r"KNOS_WORKFLOWS_SHA|[0-9a-f]{40}", next(iter(pins)))
+    code = "\n".join(ln for ln in wf.splitlines() if not ln.lstrip().startswith("#"))
+    assert "pull_request_target" not in code and "issue_comment" in code and "push" in code
+    assert "relay.yml" not in wf and "drexthealpha/Knos/.github/workflows" not in wf     # nothing of the first deployment's
+    fund = (ROOT / ".github" / "workflows" / "fund.yml").read_text(encoding="utf-8")
+    assert "id-token: write" in fund and 'knos command --event "$GITHUB_EVENT_PATH" --repo "$GITHUB_REPOSITORY"' in fund
+
+
+def test_the_site_hands_out_the_examples_byte_for_byte():
+    """web/front.js carries the two files a repository installs as templates. They are written from examples/ by
+    scripts/front_workflow.py and by nothing else: after an example changes, run `python scripts/front_workflow.py`."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("front_workflow", ROOT / "scripts" / "front_workflow.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert mod.main(["--check"]) == 0          # both templates the site hands out are the examples, byte for byte
+    assert mod.main(["--check"]) == 0, "web/front.js does not hand out examples/: run python scripts/front_workflow.py"
+    js = (ROOT / "web" / "front.js").read_text(encoding="utf-8")
     check = re.search(r"export const CHECK_WORKFLOW = `(.*?)`;\n", js, re.DOTALL).group(1)
-    assert "check.yml@${KNOS_SHA}" in check and "id-token" not in check
+    code = "\n".join(ln for ln in check.splitlines() if not ln.lstrip().startswith("#"))      # its comments say it asks for none
+    assert "knos-workflows/.github/workflows/check.yml@" in code and "id-token" not in code and "write" not in code
     net = (ROOT / ".github" / "workflows" / "network.yml").read_text(encoding="utf-8")
     assert 'bash scripts/build_site.sh _site "$GITHUB_SHA"' in net
-    assert 's/KNOS_COMMIT_SHA/$sha/g' in (ROOT / "scripts" / "build_site.sh").read_text(encoding="utf-8")
     assert "settings/rules/new?target=branch&enforcement=active" in js
-    fund = (ROOT / ".github" / "workflows" / "fund.yml").read_text(encoding="utf-8")
-    assert '"OWNER","MEMBER","COLLABORATOR"' in fund and "id-token: write" in fund and "name: knos-${{ steps.parse.outputs.kind }}" in fund
 
 
 def test_judge_learns_a_contributing_violation_and_requires_it_next(tmp_path):
@@ -121,39 +124,16 @@ def test_judge_learns_a_contributing_violation_and_requires_it_next(tmp_path):
     assert v2["evidence"]["required_by_history"] == ["tamper:rule:no_debug"]
 
 
-def _fund_script() -> str:
+def test_fund_yml_hands_the_event_to_one_command_and_parses_nothing_itself():
+    """0.3.11's fund.yml read the comment and built the audience in an inline script, checked here against the client.
+    A script in YAML can drift from the client and is hard to test. Now `knos command` reads GitHub's event file and
+    does all of it (tests/test_commands.py and the command's own tests); who may fund is decided by the chain, from
+    GitHub's signature of who commented, not by a label on the comment."""
     import yaml
     doc = yaml.safe_load((ROOT / ".github" / "workflows" / "fund.yml").read_text(encoding="utf-8"))
-    run = next(s for s in doc["jobs"]["mint"]["steps"] if s.get("id") == "parse")["run"]
-    return run.split("<<'PY' >> \"$GITHUB_OUTPUT\"\n", 1)[1].rsplit("\nPY", 1)[0]
-
-
-def _fund(tmp_path, body: str, event: str = "issue_comment", issue: int = 7):
-    import subprocess
-    import sys
-    import textwrap
-    env = {"BODY": body, "EVENT": event, "ISSUE": str(issue), "REPO_ID": "555", "DECIMALS": "6", "WORK_DAYS": "14",
-           "PATH": __import__("os").environ.get("PATH", "")}
-    r = subprocess.run([sys.executable, "-c", textwrap.dedent(_fund_script())], cwd=tmp_path, env=env, capture_output=True, text=True)
-    return r.returncode, dict(x.split("=", 1) for x in r.stdout.splitlines() if "=" in x)
-
-
-def test_a_comment_or_a_new_issues_description_funds_a_bounty(tmp_path):
-    zeros = "0" * 64
-    rc, out = _fund(tmp_path, "/knos bounty 20")
-    assert rc == 0 and out == {"issue": "7", "kind": "fund", "aud": f"knos:fund:7:20000000:0:{zeros}:1209600:3600"}
-    assert out["aud"] == pay.fund_audience(7, 20_000_000, review_s=3600)       # exactly what knos-pay expects; held an hour
-    assert _fund(tmp_path, "/knos bounty 20 review 0")[1]["aud"] == pay.fund_audience(7, 20_000_000)   # paid at once
-    rc, out = _fund(tmp_path, "Slugify keeps punctuation.\n\nSteps: ...\n\n/knos bounty 12.5\n", event="issues")
-    assert rc == 0 and out["aud"] == f"knos:fund:7:12500000:0:{zeros}:1209600:3600"
-    rc, out = _fund(tmp_path, "/knos veto")
-    assert rc == 0 and out["kind"] == "veto" and out["aud"] == "knos:veto:555:7" == pay.veto_audience(555, 7)
-    assert _fund(tmp_path, "/knos bounty lots")[0] != 0 and _fund(tmp_path, "please /knos bounty 5")[0] != 0
-    # tests mode: an acceptance bundle on the default branch fixes its hash in the audience, with a review window
-    bundle = tmp_path / ".knos" / "acceptance" / "7"
-    bundle.mkdir(parents=True)
-    (bundle / "test_x.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
-    from knos import judge
-    rc, out = _fund(tmp_path, "/knos bounty 5 review 3600")
-    assert rc == 0 and out["aud"] == f"knos:fund:7:5000000:1:{judge.checks_hash(bundle)}:1209600:3600"
-    assert out["aud"] == pay.fund_audience(7, 5_000_000, pay.TESTS, bytes.fromhex(judge.checks_hash(bundle)), 14 * 86_400, 3600)
+    [job] = doc["jobs"].values()
+    scripts = [s["run"] for s in job["steps"] if "run" in s]
+    assert scripts[-1] == 'knos command --event "$GITHUB_EVENT_PATH" --repo "$GITHUB_REPOSITORY"' and len(scripts) == 2
+    text = json.dumps(job)
+    assert "author_association" not in text and "comment.body" not in text and "issue.body" not in text
+    assert not [s for s in job["steps"] if "artifact" in str(s.get("uses", ""))]       # the token is the command's to post or relay

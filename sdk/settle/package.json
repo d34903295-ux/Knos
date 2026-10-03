@@ -1,6 +1,6 @@
 {
   "name": "knos-settle",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "JavaScript client for knos-oidc and knos-pay on Solana: addresses, audiences, instructions and account layouts. No dependencies.",
   "type": "module",
   "exports": "./index.js",

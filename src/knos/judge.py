@@ -1,12 +1,15 @@
-"""The judge: prove.yml's `check` job. It decides whether a pull request may be paid, and the pull request cannot
+"""The judge: the check on a pull request. It decides whether a pull request may be paid, and the pull request cannot
 weaken what it is judged by.
 
 Two verdicts:
 
-    gate(...)    every bounty pull request, before merge, running NO pull request code: the repository's own rules
-                 (CONTRIBUTING.md, parsed once and kept in Sibyl), what this repository's history made required
+    gate(...)    every pull request, running NO pull request code. The free check: the repository's own rules
+                 (CONTRIBUTING.md, read from the base and kept in Sibyl), what this repository's history made required
                  (tampering caught before, also Sibyl), and the pull request's own words: a description saying "tests
-                 pass" or "CI is green" is checked against the commit's finished checks on GitHub.
+                 pass" or "CI is green" is checked against GitHub's record of the commit. For a bounty's pull request
+                 also what money moves on: the bounty's terms (knos.terms.accepted: every funded check passed at
+                 that commit and nothing out of scope changed) and who is paid (knos.who). A description's words can
+                 be found false; they never stand in for a check.
     judge(...)   tests mode (.knos/acceptance/<issue>/ exists on the base): the funder's acceptance checks, run in a
                  sandbox, must fail on the base and pass on the pull request.
 
@@ -41,8 +44,13 @@ process with the test runner, so a pull request written to forge the runner's re
 the report alone. The blackbox runner closes that: the check never loads the pull request's code, so nothing that
 code does can change the verdict except producing the right output. An implementation that special-cases fixed
 example inputs passes any check made of fixed examples; a blackbox check with generated inputs does not have that
-weakness either. For everything else there is the review window, in which the funder can veto a tests-mode payment,
-and the default mode, which pays on a maintainer's merge instead.
+weakness either. For everything else there is the default mode, which pays on a maintainer's merge instead (and, for
+a bounty funded on the first deployment, the review window in which its funder can veto a tests-mode payment).
+
+So on the second deployment, which has no veto, a bounty is paid by its acceptance checks alone only when the bundle
+is black-box by a mechanical test, `black_box`: an entry file blackbox / blackbox.sh / blackbox.py at its top that
+names KNOS_RUN, no file that names KNOS_TREE, and no other runner set in .knos/proof.toml. knos.flow funds any other
+bundle on the merge and says why, and refuses to sign a tests-mode proof for one.
 """
 
 from __future__ import annotations
@@ -66,6 +74,10 @@ try:
     import tomllib
 except ImportError:  # Python 3.10
     import tomli as tomllib  # type: ignore[no-redef]
+
+from .terms import ours as _ours   # a check run that is Knos's own: never evidence about the pull request
+from .terms import state_of, status_state, together
+from .who import excluded, payee  # noqa: F401 - payee is this module's too: `knos proof payee` and callers use judge.payee
 
 SANDBOX_UID = 65534
 _SKIP = {".git", "__pycache__", ".pytest_cache", "node_modules", "target"}
@@ -96,140 +108,106 @@ def _rule_violations(base: Path, diff_text: str | None, store, repo, agent):
     return required, contributing, violations
 
 
-_KNOS_JOBS = re.compile(r"^(?:prove|fund)(?:-relay|-refused)? / |^knos| / claims$")
+# The two things Knos ever rewrites or removes on GitHub, and nothing else, whoever calls `github`.
+_WRITES = {"PATCH": r"repos/[^/]+/[^/]+/issues/comments/\d+",     # the text of a comment: Knos's own review comment
+           "DELETE": r"repos/[^/]+/[^/]+/issues/\d+/assignees"}   # an issue's assignee: `/knos release`, a lapsed take
 
 
-def _ours(run: dict) -> bool:
-    """A check run that is Knos's own (this workflow run's jobs, and the Knos jobs of earlier runs on the same commit:
-    the check, the proof, the relay and its verdict): never evidence about the pull request."""
-    mine = os.environ.get("GITHUB_RUN_ID", "")
-    return bool(mine and f"/runs/{mine}/" in str(run.get("details_url", ""))) or bool(_KNOS_JOBS.search(str(run.get("name", ""))))
-
-
-def github(path: str):
-    """GET api.github.com/<path> (GH_TOKEN or GITHUB_TOKEN is sent when set). Raises OSError when GitHub says no."""
+def github(path: str, data: dict | None = None, method: str | None = None):
+    """GET api.github.com/<path>; with `data`, POST it there as JSON (GH_TOKEN or GITHUB_TOKEN is sent when set, and
+    the API version these calls were written against). `method` PATCH edits a comment and DELETE takes an assignee
+    off an issue, with `data` as the body: any other path is refused before anything is sent, and so is any other
+    method. Raises OSError when GitHub says no or does not answer in JSON. An empty answer is None."""
     import urllib.request
-    req = urllib.request.Request(f"https://api.github.com/{path}",
-                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "knos"})
+    if method not in (None, "GET", "POST") and not re.fullmatch(_WRITES.get(method, r"(?!)"), path):
+        raise ValueError(f"Knos does not send {method} to {path}")
+    req = urllib.request.Request(f"https://api.github.com/{path}", data=None if data is None else json.dumps(data).encode(),
+                                 method=method,
+                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "knos",
+                                          "X-GitHub-Api-Version": "2022-11-28",
+                                          **({} if data is None else {"Content-Type": "application/json"})})
     tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if tok:
         req.add_header("Authorization", f"Bearer {tok}")
     with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310 - api.github.com
-        return json.loads(resp.read())
+        raw = resp.read()
+    try:
+        return json.loads(raw) if raw.strip() else None
+    except ValueError:
+        raise OSError(f"GitHub's answer for {path} was not JSON") from None
 
 
-# How the agents that open pull requests under a bot account name the person who ran them. Each is a whole line of
-# the description: Devin ends it with "Requested by: @login"; Jules with "PR created automatically by Jules for task
-# N started by @login"; anyone can write "Knos-Pay-To: @login".
-_LOGIN = r"@([A-Za-z0-9][A-Za-z0-9-]{0,38})"
-_PAY_TO = (re.compile(r"knos-pay-to:[ \t]{0,8}" + _LOGIN + r"\.?", re.I),
-           re.compile(r"requested by:?[ \t]{0,8}" + _LOGIN + r"\.?", re.I),
-           re.compile(r"pr created automatically by jules\b[^@]{0,120}\bstarted by[ \t]{0,8}" + _LOGIN + r"\.?", re.I))
-# Copilot and Cursor credit that person in the commit: a GitHub no-reply address carries the numeric user id.
-_CO_AUTHOR = re.compile(r"co-authored-by:[^<]{0,120}<(\d{1,12})\+[A-Za-z0-9-]{1,39}@users\.noreply\.github\.com>", re.I)
+def assignment_check(issue: dict | None, pull: dict, paid: dict, events: list | None = None,
+                     terms: dict | None = None, now: float | None = None) -> list[str]:
+    """An issue someone is assigned to is theirs: a bounty on it is paid only for a pull request by an assignee (or by
+    the agent an assignee ran). An unassigned issue is open to anyone, and so is one whose `/knos take` has lapsed
+    (knos.who.reservation tells that from the issue's `events`, the bounty's `terms` and `now`). `payee` given the
+    issue has already applied this; it is here for a payee that was worked out from the pull request alone."""
+    why = excluded(issue, pull, paid, events, terms, now)
+    return [f"assigned: {why}"] if why else []
 
 
-def _named(body: str) -> set[str]:
-    """The logins a description's own lines name as the person to pay. Quoted lines and fenced code are not the
-    description's own words (an agent may have copied them from an issue), so they are skipped."""
-    out, fenced = set(), False
-    for line in (body or "").splitlines()[-400:]:
-        line = line.strip()
-        if line.startswith(("```", "~~~")):
-            fenced = not fenced
-            continue
-        if fenced or line.startswith(">") or len(line) > 300:
-            continue
-        for pat in _PAY_TO:
-            m = pat.fullmatch(line)
-            if m:
-                out.add(m.group(1).lower())
+def claim_report(body: str, check_runs: list[dict] | None, strict: bool = False, statuses: list[dict] | None = None) -> dict:
+    """What the description claims against GitHub's record of its head commit, in full:
+
+        said         what it claims ("tests pass", "CI is green"); empty when it claims neither
+        state        none (no claim), true (a check passed and none failed), false (a check failed), unverified
+        violations   what the gate refuses: a claim a failed check contradicts; and with `strict` (the merged commit)
+                     also a claim that cannot be borne out: checks not finished, no check run at all, none that
+                     passed, or GitHub unreadable
+        unverified   the same sentences when not strict: reported, not held against the pull request
+        facts        what is plainly so whatever was claimed, e.g. "checks failing: lint, test"
+        checks       {name: passed | failed | skipped | pending}, the states knos.terms uses; None when unreadable
+
+    `check_runs` is the commit's check runs (None: GitHub could not be read), `statuses` its commit statuses when the
+    caller read them. Knos's own jobs are not evidence. A description that claims nothing is never a false claim,
+    whatever failed: whether funded work is paid is decided by the bounty's terms, not by what was or was not said."""
+    from .proof import claims
+    kinds = claims.read(body or "").kinds & {"tests", "ci"}
+    said = " and ".join(sorted({"tests": "tests pass", "ci": "CI is green"}[k] for k in kinds))
+    out: dict = {"said": said, "state": "none", "violations": [], "unverified": [], "facts": [], "checks": None}
+
+    def unproven(why: str, again: str = "") -> None:
+        out["state"] = "unverified"
+        out["violations" if strict else "unverified"].append(f"claim: {why}{again}" if strict else why)
+
+    if check_runs is None:
+        if kinds:
+            unproven(f"the description says {said}, and GitHub's record of the head commit could not be read", "; run this job again")
+        return out
+    found: dict[str, list[str]] = {}
+    for r in check_runs:
+        if not _ours(r):
+            found.setdefault(str(r.get("name", "?")), []).append(state_of(r))
+    for s in statuses or []:
+        found.setdefault(str(s.get("context", "?")), []).append(status_state(s))
+    out["checks"] = {name: together(states) for name, states in sorted(found.items())}
+    failed, running, passed = (sorted(n for n, s in out["checks"].items() if s == want) for want in ("failed", "pending", "passed"))
+    if failed:
+        out["facts"].append("checks failing: " + ", ".join(failed[:6]))
+    if not kinds:
+        return out
+    if failed:
+        out["state"] = "false"
+        out["violations"].append(f"claim: the description says {said}, but these checks failed at the head commit: {', '.join(failed[:6])}")
+    elif running:
+        unproven(f"the description says {said}, and these checks have not finished at the head commit: {', '.join(running[:6])}",
+                 "; run this job again when they have")
+    elif not out["checks"]:
+        unproven(f"the description claims {said}; GitHub has no check runs for this commit")
+    elif not passed:
+        unproven(f"the description claims {said}; no check passed at this commit (skipped: {', '.join(sorted(out['checks'])[:6])})")
+    else:
+        out["state"] = "true"
     return out
 
 
-def payee(pull: dict, head_message: str = "", get=None) -> dict:
-    """Who a pull request's bounty is paid to: {"id", "login", "why"}, or {"id": None, "why"} when nobody can be named.
-
-    A person's pull request pays that person, whatever its description says. An agent that opens pull requests under
-    a bot account (Copilot, Devin, Jules, Cursor) has no account to be paid into, so the money goes to the person who
-    ran it, found the way that agent itself names them: the pull request's assignee; else a line of its description;
-    else the co-author of its head commit. A description that names two different people, or a name GitHub does not
-    confirm as a person, pays nobody: better no payment than one to whoever got a line into the text.
-    `pull` is the pull request as the event or the API gives it; `get(path)` reads api.github.com."""
-    get = get or github
-    user = pull.get("user") or {}
-    if user.get("type") != "Bot":
-        return {"id": user.get("id"), "login": user.get("login"), "why": "the pull request's author"}
-    bot = user.get("login")
-    nobody = lambda why: {"id": None, "login": None, "why": why}  # noqa: E731
-    fix = "assign the pull request to the person who ran it, or keep one line `Knos-Pay-To: @login` in its description"
-    for a in pull.get("assignees") or []:
-        if a.get("type", "User") == "User" and a.get("id"):
-            return {"id": a["id"], "login": a.get("login"), "why": f"assignee of {bot}'s pull request"}
-
-    def person(path: str) -> dict | None:
-        try:
-            who = get(path)
-        except Exception:  # noqa: BLE001 - GitHub did not answer: nobody is confirmed
-            return None
-        return who if isinstance(who, dict) and who.get("type") == "User" and who.get("id") else None
-
-    named = _named(pull.get("body") or "")
-    if len(named) > 1:
-        return nobody(f"{bot}'s description names more than one person to pay ({', '.join('@' + n for n in sorted(named))}): {fix}")
-    if named:
-        login = next(iter(named))
-        who = person(f"users/{login}")
-        if not who:
-            return nobody(f"{bot}'s description names @{login}, which GitHub did not confirm as a person: {fix}")
-        return {"id": who["id"], "login": who.get("login"), "why": f"named in the description of {bot}'s pull request"}
-    ids = {int(m.group(1)) for line in (head_message or "").splitlines()[-200:] if len(line) <= 300
-           for m in [_CO_AUTHOR.fullmatch(line.strip())] if m}
-    if len(ids) == 1:
-        uid = next(iter(ids))
-        who = person(f"user/{uid}")
-        if who and who["id"] == uid:
-            return {"id": uid, "login": who.get("login"), "why": f"co-author of {bot}'s head commit"}
-    return nobody(f"{bot} is a bot and nothing names the one person who ran it: {fix}")
-
-
-def assignment_check(issue: dict | None, pull: dict, paid: dict) -> list[str]:
-    """An issue someone is assigned to is theirs: a bounty on it is paid only for a pull request by an assignee (or by
-    the agent an assignee ran). An unassigned issue is open to anyone. `issue` is the issue as the API gives it."""
-    assigned = [a for a in (issue or {}).get("assignees") or [] if a.get("id")]
-    if not assigned:
-        return []
-    ids = {a["id"] for a in assigned}
-    if (pull.get("user") or {}).get("id") in ids or paid.get("id") in ids:
-        return []
-    names = ", ".join("@" + str(a.get("login")) for a in assigned[:4])
-    return [f"assigned: issue #{issue.get('number')} is assigned to {names}; only an assignee's pull request is paid for it"]
-
-
 def claim_check(body: str, check_runs: list[dict] | None, strict: bool = False) -> list[str]:
-    """What the pull request's description claims against GitHub's record of its head commit. `check_runs` is the
-    commit's check runs (GET /repos/{repo}/commits/{sha}/check-runs). A claim of passing tests or green CI is refused
-    when a finished check failed. Before a merge, unfinished or unreadable checks are not held against it. `strict`
-    (the merged commit, where money moves): a claim that cannot be checked is refused too, until it can be."""
-    from .proof import claims
-    kinds = claims.read(body or "").kinds & {"tests", "ci"}
-    if not kinds:
-        return []
-    said = " and ".join(sorted({"tests": "tests pass", "ci": "CI is green"}[k] for k in kinds))
-    if check_runs is None:
-        return [f"claim: the description says {said}, and GitHub's record of the head commit could not be read; "
-                "run this job again"] if strict else []
-    others = [r for r in check_runs if not _ours(r)]
-    bad = sorted({r.get("name", "?") for r in others
-                  if r.get("status") == "completed" and r.get("conclusion") in ("failure", "timed_out", "cancelled",
-                                                                                   "startup_failure", "action_required")})
-    if bad:
-        return [f"claim: the description says {said}, but these checks failed at the head commit: {', '.join(bad[:6])}"]
-    running = sorted({r.get("name", "?") for r in others if r.get("status") != "completed"})
-    if strict and running:
-        return [f"claim: the description says {said}, and these checks have not finished at the head commit: "
-                f"{', '.join(running[:6])}; run this job again when they have"]
-    return []
+    """The free check's verdict on the description's claims: what `claim_report` refuses. A claim of passing tests or
+    green CI is refused when a finished check failed. Before a merge, a claim that cannot be checked yet (checks
+    unfinished, none at all, GitHub unreadable) is not held against the pull request. `strict` (the merged commit):
+    it is refused too, until it can be checked."""
+    return claim_report(body, check_runs, strict)["violations"]
 
 
 def check_runs(repo: str, sha: str, wait: float = 0, body: str = "", get=None, sleep=None) -> list[dict] | None:
@@ -264,11 +242,22 @@ def check_runs(repo: str, sha: str, wait: float = 0, body: str = "", get=None, s
 
 def gate(base_dir, diff_text: str | None, store, repo: str | None = None, agent: str | None = None,
          body: str = "", check_runs: list[dict] | None = None, issue: str = "", pull: dict | None = None,
-         issue_data: dict | None = None, paid: dict | None = None, strict: bool = False) -> dict:
+         issue_data: dict | None = None, paid: dict | None = None, strict: bool = False, terms: dict | None = None,
+         statuses: list[dict] | None = None, changed: list | None = None, funded=(), events: list | None = None,
+         now: float | None = None) -> dict:
     """The verdict that needs no pull request code. {"passed", "checks_hash" (""), "reasons", "evidence"}. A rule
     violation is learned: that check is then required for every later pull request to this repo or by this agent.
-    With `pull` (the pull request) and `paid` (payee(pull)), a bounty's pull request must also name someone to pay,
-    and respect the issue's assignment (`issue_data`)."""
+    With `pull` (the pull request) and `paid` (payee(...)), a bounty's pull request must also pay someone, and
+    respect the issue's assignment (`issue_data`; with the issue's `events` and `now`, a `/knos take` that has
+    lapsed holds nothing, exactly as payee decided it).
+
+    With `terms` (the bounty's, knos.terms.parse) the pull request must also meet them at this commit: every funded
+    check `passed` in `check_runs` and `statuses` (knos.terms.head_checks), and no file in `changed` out of scope.
+    `funded` (issue numbers with a bounty) adds a note when the description mentions one without closing it.
+
+    `passed` is the check's verdict: everything above. What a payment is decided on is narrower and is in the
+    evidence: "accepted" (the terms alone; None without terms) and "payable" (the terms are met and someone is
+    paid; None unless both were given). A description's words and the repository's rules are in neither."""
     from .proof import history
     base = Path(base_dir)
     required, contributing, violations = _rule_violations(base, diff_text, store, repo, agent)
@@ -276,38 +265,82 @@ def gate(base_dir, diff_text: str | None, store, repo: str | None = None, agent:
         first = next(x for x in violations if x.rule["kind"] == kind)
         history.learn_tamper(store, repo, agent, f"rule:{kind}", str(first))
     reasons = [f"repo rule: {x}" for x in violations]
-    false_claims = claim_check(body, check_runs, strict)
-    if false_claims and "failed at the head commit" in false_claims[0]:    # a claim that could not be checked is not a lie
+    report = claim_report(body, check_runs, strict, statuses)
+    false_claims = report["violations"]
+    if report["state"] == "false":     # a claim that could not be checked is not a lie
         history.learn_tamper(store, repo, agent, "false-claim", false_claims[0])
     reasons += false_claims
-    who = []
+    bought: dict = {}
+    if terms is not None:
+        from . import terms as bounty
+        found = bounty.evidence(terms, check_runs, statuses)
+        ok, why = bounty.accepted(terms, found, changed)
+        reasons += [f"terms: {w}" for w in why]
+        bought = {"terms_hash": bounty.terms_hash(terms), "checks": found, "accepted": ok}
     if pull is not None and paid is not None:
-        if not paid.get("id"):
-            who.append(f"payee: {paid['why']}")
-        who += assignment_check(issue_data, pull, paid)
-    reasons += who
+        who = [f"{paid.get('kind', 'payee')}: {paid['why']}" + (f". {paid['fix']}" if paid.get("fix") else "")] \
+            if not paid.get("id") else assignment_check(issue_data, pull, paid, events, terms, now)
+        reasons += who
+        if bought:
+            bought["payable"] = bought["accepted"] and not who
+    from . import closing
+    note = closing.mention_note(closing.mentions_without_closing(body, funded, repo)) if funded else ""
     ev = {"issue": str(issue), "mode": "merge", **({"payee": paid} if paid is not None else {}), "repo_rules": [str(x) for x in violations],
-          "rules_known": len(contributing), "claims": false_claims,
+          "rules_known": len(contributing), "claims": false_claims, "unverified": report["unverified"], "facts": report["facts"],
+          "notes": [note] if note else [], "accepted": None, "payable": None, **bought,
           "checks_seen": None if check_runs is None else len(check_runs), "required_by_history": required,
           "learned": sorted(history.tamper_checks_required(store, repo, agent))}
     return {"passed": not reasons, "checks_hash": "", "reasons": reasons, "evidence": ev}
 
 
+def _funded_bundle(base: Path, issue: str, terms: dict) -> str:
+    """Why the acceptance checks on the base are not what these terms bought; empty when they are."""
+    if terms["mode"] != "tests":
+        return "this bounty is paid on the merge: it was not funded with acceptance checks"
+    try:
+        have = checks_hash(base / ".knos" / "acceptance" / issue) if re.fullmatch(r"[A-Za-z0-9._-]+", issue) else ""
+    except ValueError:
+        have = ""
+    return "" if have == terms["accept"] else (f"the acceptance checks in .knos/acceptance/{issue} on the base are not the "
+                                               "ones this bounty was funded with")
+
+
 def judge_with_rules(base_dir, pr_dir, cfg: dict, changed: list[str] | None, diff_text: str | None, store,
                      repo: str | None = None, agent: str | None = None, body: str = "",
                      check_runs: list[dict] | None = None, setup: str | None = None, sandbox: str = "auto",
-                     pull: dict | None = None, issue_data: dict | None = None, paid: dict | None = None) -> dict:
+                     pull: dict | None = None, issue_data: dict | None = None, paid: dict | None = None,
+                     strict: bool = False, terms: dict | None = None, statuses: list[dict] | None = None,
+                     events: list | None = None, now: float | None = None) -> dict:
     """gate() first; only a pull request that clears it has its code run by judge(). A protected-path refusal is
-    learned the same way a rule violation is."""
+    learned the same way a rule violation is.
+
+    With `terms` (a bounty funded in tests mode) the gate holds the pull request to them, and the acceptance checks
+    on the base must be the ones that were funded (the terms' `accept`). What a payment is decided on is in the
+    evidence, as for gate(): "accepted" (the funded checks passed at this commit, nothing out of scope changed, and
+    the funded acceptance checks pass) and "payable" (accepted, and someone is paid). So that a description's words
+    and the repository's rules enter neither, the acceptance checks are run whenever the rest of the terms is met,
+    also when the gate refused the pull request for another reason; `passed` still needs both."""
     from .proof import history
     base = Path(base_dir)
-    g = gate(base, diff_text, store, repo, agent, body, check_runs, str(cfg.get("issue", "")), pull, issue_data, paid)
-    if not g["passed"]:
+    issue = str(cfg.get("issue", ""))
+    scope = changed_files(base, Path(pr_dir)) if terms is not None and changed is None else changed
+    g = gate(base, diff_text, store, repo, agent, body, check_runs, issue, pull, issue_data, paid, strict, terms,
+             statuses, scope, (), events, now)
+    ev = g["evidence"]
+    someone = ev["payable"] if ev["accepted"] else None        # with the terms met, `payable` says whether someone is paid
+    if terms is not None:
+        why = _funded_bundle(base, issue, terms)
+        if why:
+            g["reasons"].append(f"terms: {why}")
+            g["passed"], ev["accepted"] = False, False
+        if not ev["accepted"] and ev["payable"] is not None:
+            ev["payable"] = False
+    if not (g["passed"] if terms is None else ev["accepted"]):
         try:
-            g["checks_hash"] = checks_hash(base / ".knos" / "acceptance" / str(cfg.get("issue", "")))
+            g["checks_hash"] = checks_hash(base / ".knos" / "acceptance" / issue)
         except ValueError:
             pass
-        g["evidence"]["mode"] = "tests"
+        ev["mode"] = "tests"
         return g
     v = judge(base_dir, pr_dir, cfg, changed, setup=setup, sandbox=sandbox)
     bad = [r for r in v["reasons"] if r.startswith("touches protected path")]
@@ -316,9 +349,17 @@ def judge_with_rules(base_dir, pr_dir, cfg: dict, changed: list[str] | None, dif
     v["evidence"]["mode"] = "tests"
     if paid is not None:
         v["evidence"]["payee"] = paid
-    if g["evidence"]["rules_known"]:
-        v["evidence"]["repo_rules"] = []
-    v["evidence"]["required_by_history"] = g["evidence"]["required_by_history"]
+    if ev["rules_known"]:
+        v["evidence"]["repo_rules"] = ev["repo_rules"]
+    for key in ("unverified", "facts", "notes"):
+        v["evidence"][key] = ev[key]
+    if terms is not None:
+        met = v["passed"]
+        v["evidence"].update(terms_hash=ev["terms_hash"], checks=ev["checks"], claims=ev["claims"], accepted=met,
+                             payable=None if someone is None else bool(someone and met))
+        v["reasons"] = g["reasons"] + v["reasons"]
+        v["passed"] = not v["reasons"]
+    v["evidence"]["required_by_history"] = ev["required_by_history"]
     v["evidence"]["learned"] = sorted(history.tamper_checks_required(store, repo, agent))
     return v
 
@@ -348,6 +389,71 @@ def changed_files(base: Path, pr: Path) -> list[str]:
     return sorted(f for f in set(a) | set(b) if a.get(f) != b.get(f))
 
 
+BLACKBOX_ENTRY = ("blackbox", "blackbox.sh", "blackbox.py")
+
+
+def black_box(files: dict, cfg: dict | None = None) -> str:
+    """Why an acceptance bundle is not black-box, in words that finish "its checks ..."; "" when it is.
+
+    This is the mechanical test that decides whether a bounty may be paid by its acceptance checks alone, with no
+    merge. docs/TAMPER.md measures why it matters: checks that import the submission into the judge's process were
+    fooled by pull requests that patch the test runner from inside or answer the fixed examples; black-box checks
+    (the submission runs as a separate process and only what it prints is compared) were fooled by none. knos.flow
+    asks this when a bounty is funded (a bundle that fails it is funded on the merge) and again before the proof of
+    such a bounty is signed.
+
+    `files`: the bundle, {path inside .knos/acceptance/<issue>/: content}. `cfg`: the same commit's
+    .knos/proof.toml, parsed ({} or None when there is none). A bundle is black-box when all three hold:
+
+      1. .knos/proof.toml does not send it to another runner: no `runner` (or `[judge] runner`) other than
+         "blackbox", and with none named no `[judge] run` command. Those are what `runner_of` reads first.
+      2. Its top level holds an entry file named blackbox, blackbox.sh or blackbox.py. The blackbox runner copies
+         the bundle out of the tree and runs that file as the judge, so no test runner shares a process with the
+         pull request's code.
+      3. The entry names KNOS_RUN, and no file of the bundle names KNOS_TREE. "$KNOS_RUN <command>" runs a command
+         in the pull request's tree inside the sandbox: the one way a check gets an answer from that code without
+         loading it. KNOS_TREE is the tree's path: a check that opens the tree itself can import the submission
+         into its own process, which is the weakness the runner exists to close.
+
+    The test reads names and text; it does not prove what a check computes. It keeps a funder from paying on a
+    bundle that is fooled by construction, and the funder still writes the check: generated inputs, compared with a
+    reference of its own, are what an implementation cannot special-case."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    section = cfg.get("judge") if isinstance(cfg.get("judge"), dict) else {}
+    if cfg.get("_error"):
+        return "cannot be checked: `.knos/proof.toml` is not valid TOML"
+    named = cfg.get("runner") or section.get("runner")
+    if named and named != "blackbox":
+        return f"share a process with the pull request's code (runner `{_word(named)}`)"
+    if not named and section.get("run"):
+        return "are a `[judge] run` command, run inside the pull request's tree"
+    entry = next((n for n in BLACKBOX_ENTRY if n in files), None)
+    if entry is None:
+        return "load the pull request's code into the process that judges it"
+    text = lambda raw: raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)  # noqa: E731
+    if "KNOS_RUN" not in text(files[entry]):
+        return "never run the pull request's code through `$KNOS_RUN`"
+    if any("KNOS_TREE" in text(raw) for raw in files.values()):
+        return "open the pull request's tree themselves (`KNOS_TREE`)"
+    return ""
+
+
+def _word(value) -> str:
+    return re.sub(r"[`\r\n]", "'", str(value))[:40]
+
+
+def proof_config(text: str | None) -> dict:
+    """A .knos/proof.toml's text, parsed as knos.proof.engine.load parses the file: {} for none, {"_error": ...} for
+    one that is not TOML."""
+    if not text:
+        return {}
+    try:
+        got = tomllib.loads(text)
+    except Exception:  # noqa: BLE001 - said by whoever asked, not raised
+        return {"_error": "unreadable .knos/proof.toml"}
+    return got if isinstance(got, dict) else {}
+
+
 def runner_of(base: Path, cfg: dict) -> str:
     """The language the acceptance bundle is written in."""
     named = cfg.get("runner") or (cfg.get("judge") or {}).get("runner")
@@ -359,7 +465,7 @@ def runner_of(base: Path, cfg: dict) -> str:
         return "command"
     bundle = Path(base) / ".knos" / "acceptance" / str(cfg.get("issue", ""))
     names = [p.name for p in bundle.rglob("*") if p.is_file()] if bundle.is_dir() else []
-    if any(n in ("blackbox", "blackbox.sh", "blackbox.py") for n in names):
+    if any(n in BLACKBOX_ENTRY for n in names):
         return "blackbox"
     if any(n in ("check", "check.sh") for n in names):
         return "command"
@@ -813,7 +919,7 @@ def _rust(box: Box, issue: str, test_dirs, timeout: float, cfg: dict) -> Run:
     return Run(got, accept, _by_name(got, f"sentinel_{tok}"), _by_name(got, f"canary_{tok}"), out[-2000:])
 
 
-_RUBY_LINE = re.compile(r"^(\S+#\S+) = [\d.]+ s = ([.FESB])$", re.M)
+_RUBY_LINE = re.compile(r"^(\S+#\S+) = [\d.]+ s = ([.FESB])\r?$", re.M)   # ruby on Windows ends each line with \r\n
 
 
 def _ruby(box: Box, issue: str, test_dirs, timeout: float, cfg: dict) -> Run:
@@ -894,7 +1000,7 @@ def _blackbox(box: Box, issue: str, test_dirs, timeout: float, cfg: dict) -> Run
     runner.write_text("#!/bin/sh\n" + f"cd {shlex.quote(str(box.work))} || exit 126\n"
                       + "exec " + " ".join(shlex.quote(a) for a in argv) + ' "$@"\n', "utf-8")
     runner.chmod(0o700)
-    name = next(n for n in ("blackbox", "blackbox.sh", "blackbox.py") if (private / n).is_file())
+    name = next(n for n in BLACKBOX_ENTRY if (private / n).is_file())
     cmd = [sys.executable, name] if name.endswith(".py") else ["sh", name]
     mine = {k: v for k, v in os.environ.items() if not k.startswith(_LEAK)}
     mine.update({"KNOS_RUN": str(runner), "KNOS_TREE": str(box.work), "KNOS_ISSUE": issue})

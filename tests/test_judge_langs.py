@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -142,6 +143,25 @@ def test_ruby(tmp_path):
     edits = judge.judge(v["base"], v["edits"], CFG, cache=cache)
     assert edits["reasons"] == ["touches protected path test/test_add.rb"]
     assert judge.judge(v["base"], v["rake"], CFG, cache=cache)["reasons"] == ["touches protected path Rakefile"]
+
+
+def test_ruby_reads_a_report_written_with_windows_line_endings(tmp_path, monkeypatch):
+    """ruby on Windows writes its report with CRLF line endings: every result is read all the same, the sentinel and
+    the canary too."""
+    box = judge.Box(tmp_path / "box", sandboxed=False)
+    tree(box.work, {"test/test_add.rb": "\n", ".knos/acceptance/7/mul_test.rb": "\n"})
+
+    def run(argv, timeout=600, **kw):
+        tok = re.search(r"class KnosProbe(\w+)", argv[4]).group(1)
+        lines = [("MulTest#test_mul" if argv[5].endswith("mul_test.rb") else "AddTest#test_add", "."),
+                 (f"KnosProbe{tok}#test_sentinel", "."), (f"KnosProbe{tok}#test_canary", "F")]
+        return 1, "".join(f"{test} = 0.00 s = {mark}\r\n" for test, mark in lines)
+    monkeypatch.setattr(box, "run", run)
+    got = judge._ruby(box, "7", ("test",), 60, {})
+    assert {k: v for k, v in got.results.items() if k not in (got.sentinel, got.canary)} == {
+        ".knos/acceptance/7/mul_test.rb::MulTest#test_mul": "passed", "test/test_add.rb::AddTest#test_add": "passed"}
+    assert got.accept == {".knos/acceptance/7/mul_test.rb::MulTest#test_mul"}
+    assert got.results[got.sentinel] == "passed" and got.results[got.canary] == "failed"
 
 
 def test_ruby_is_chosen_by_the_gemfile_or_a_gemspec_or_by_name(tmp_path):
@@ -334,3 +354,42 @@ def test_the_sandbox_reaches_an_interpreter_under_a_private_directory(tmp_path):
     assert judge._sandbox_cannot_run(str(exe)) is None
     assert private.stat().st_mode & 0o007 == 0o001
     assert "No such file" in (judge._sandbox_cannot_run(str(private / "bin" / "missing")) or "")
+
+
+def test_black_box_is_a_mechanical_test_that_agrees_with_the_runner_the_judge_picks(tmp_path):
+    """knos.judge.black_box decides whether a bounty may be paid by its checks alone. The benchmark's bundles
+    (docs/TAMPER.md): the three black-box ones pass it and the three that import the submission do not, and whatever
+    passes it is run by the blackbox runner."""
+    bench = Path(__file__).parent / "bench_tamper"
+
+    def bundle(repo: Path, issue: str) -> dict:
+        folder = repo / ".knos" / "acceptance" / issue
+        return {p.relative_to(folder).as_posix(): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+    for sample in ("sample", "sample_node", "sample_ruby"):
+        repo = bench / sample
+        cfg = judge.proof_config((repo / ".knos" / "proof.toml").read_text(encoding="utf-8") if (repo / ".knos" / "proof.toml").is_file() else None)
+        assert judge.black_box(bundle(repo, "2"), cfg) == "" and judge.runner_of(repo, {**cfg, "issue": "2"}) == "blackbox", sample
+        assert judge.black_box(bundle(repo, "1"), cfg) == "load the pull request's code into the process that judges it", sample
+        assert judge.runner_of(repo, {**cfg, "issue": "1"}) != "blackbox", sample
+    entry = b'out=$("$KNOS_RUN" ./run)\n[ "$out" = 4 ]\n'
+    ok = {"blackbox.sh": entry, "data/cases.json": b"[]"}
+    assert judge.black_box(ok) == "" and judge.black_box(ok, {}) == "" and judge.black_box(ok, {"runner": "blackbox"}) == ""
+    assert judge.black_box({"blackbox": entry}) == "" and judge.black_box({"blackbox.py": b"import os\nos.environ['KNOS_RUN']\n"}) == ""
+    # each way out of the blackbox runner, as runner_of reads it; and each way the entry could load the submission
+    for files, cfg, why in ((ok, {"runner": "python"}, "share a process with the pull request's code (runner `python`)"),
+                            (ok, {"judge": {"runner": "command"}}, "share a process with the pull request's code (runner `command`)"),
+                            (ok, {"judge": {"run": "make check"}}, "are a `[judge] run` command, run inside the pull request's tree"),
+                            (ok, {"_error": "unreadable .knos/proof.toml"}, "cannot be checked: `.knos/proof.toml` is not valid TOML"),
+                            ({"test_x.py": b"import calc\n"}, {}, "load the pull request's code into the process that judges it"),
+                            ({"check.sh": entry}, {}, "load the pull request's code into the process that judges it"),
+                            ({"deep/blackbox.sh": entry}, {}, "load the pull request's code into the process that judges it"),
+                            ({"blackbox.sh": b"exit 0\n"}, {}, "never run the pull request's code through `$KNOS_RUN`"),
+                            ({"blackbox.sh": entry, "lib.py": b"import os, sys\nsys.path.insert(0, os.environ['KNOS_TREE'])\n"}, {},
+                             "open the pull request's tree themselves (`KNOS_TREE`)")):
+        assert judge.black_box(files, cfg) == why, (files, cfg)
+        named = tree(tmp_path / str(len(list(tmp_path.iterdir()))), {f".knos/acceptance/7/{n}": "x" for n in files})
+        # where the judge's own choice of runner can be told from the files' names, it is not the blackbox runner either
+        if "KNOS" not in why and "_error" not in cfg and "deep/blackbox.sh" not in files:
+            assert judge.runner_of(named, {**cfg, "issue": "7"}) != "blackbox", (files, cfg)
+    assert judge.proof_config(None) == {} and judge.proof_config('runner = "go"\n[judge]\nrun = "x"\n') == {"runner": "go", "judge": {"run": "x"}}
+    assert judge.proof_config("runner = [") == {"_error": "unreadable .knos/proof.toml"}

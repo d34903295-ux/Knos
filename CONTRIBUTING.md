@@ -1,13 +1,13 @@
 # Contributing
 
-Knos is one product: AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed.
+Knos is one product: bounties that pay when the pull request is merged with the checks you named passing, attested by a GitHub-signed workflow run and verified on Solana.
 Changes that delete something are the most welcome kind.
 
 ## Run the tests
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-pytest -q -n auto                          # offline; includes both programs in LiteSVM and the judge in four languages
+pytest -q -n auto                          # offline; includes both deployments' programs in LiteSVM and the judge in five languages
 node sdk/settle/test.mjs                   # the JavaScript client against the Python client's fixtures
 python scripts/deadcode.py && vulture src/knos scripts --min-confidence 60     # nothing unused ships
 python scripts/claims_check.py --offline   # every number in the README, site and submission has a source
@@ -19,18 +19,24 @@ skipped when those toolchains are not installed.
 
 ## Change a program
 
-`programs/knos_oidc` and `programs/knos_pay` are deployed once and made immutable, so a change to either is a new
-deployment with a new address, not an upgrade.
+There are two deployments. `programs/` is the first: it is on devnet with no upgrade authority, so its source must
+stay byte for byte what was deployed. Do not change it. `programs-v2/` is the second, where every new bounty is
+funded. It is upgradeable only through a multisig with a public 48-hour delay, until an outside review, so a change
+there reaches devnet as an upgrade, two days after it is approved in public.
 
 ```bash
-bash scripts/build_programs.sh             # needs cargo build-sbf (agave 2.3); refreshes tests/fixtures/*.so
-cd programs/knos_oidc && cargo test --release      # the Wycheproof vectors
-KNOS_FUZZ_N=10000 pytest -q -s tests/test_pay_chain.py -k random_walk
+bash scripts/build_programs_v2.sh          # needs cargo build-sbf; refreshes tests/fixtures/*_v2_*.so and their pins
+cd programs-v2 && cargo test --release     # the Wycheproof vectors and the programs' unit tests
+pytest -q -s tests/test_oidc2_chain.py tests/test_pay2_chain.py            # prints the compute units of each step
+KNOS_FUZZ_N=2500 KNOS_FUZZ_SEED=1 pytest -q -s tests/test_pay2_chain.py -k random_walk    # a seed repeats a walk
 python scripts/settle_fixtures.py          # if an address, an audience or an instruction changed
+python scripts/bench_docs.py               # if a measured number changed: docs/bench.json first, then this
 ```
 
-A change to an instruction's bytes must change `src/knos/settle` (the authority), then `sdk/settle/index.js`, and
-the fixtures will tell you whether they still agree.
+A change to an instruction's bytes must change the module documentation at the top of the program, then
+`src/knos/settle/v2` (the client the tests use), then `idl/` and `sdk/settle/index.js`; the fixtures and
+`tests/test_idl.py` will tell you whether they still agree. `scripts/build_programs.sh` rebuilds the first
+deployment's test binaries from its unchanged source.
 
 ## Add a language to the judge
 
@@ -44,8 +50,28 @@ beside the others, and a test in `tests/test_judge_langs.py` with an honest fix,
 - If its description says tests pass, they pass: this repository runs its own check on pull requests.
 - No number in the README, the site or `docs/submission/` without an entry in `docs/facts.json`.
 
-Some issues carry a bounty (`/knos bounty` by a maintainer). The pull request that is merged for one is paid to its
-author's GitHub account, on devnet, in test USDC. See the site's "Get paid" page.
+Some issues carry a bounty (`/knos fund` by a maintainer). Knos's reply on the issue states its terms: the checks
+that must pass and the files a pull request may change. The pull request that is merged for it and meets those
+terms is paid on devnet, in test USDC, to the wallet you bound to your GitHub account (by hand on GitHub, or with `knos claim <address>`; an address in a
+link could be someone else's, so none is ever put in one) or named on the pull request (`/knos address <address>`). With neither, the payment is held for you for 180 days.
+`/knos take` on the issue reserves it for you.
+
+## Release
+
+A release is one push, of its tag:
+
+```bash
+git tag v0.3.12 && git push origin v0.3.12
+```
+
+`.github/workflows/release.yml` then runs the whole test workflow on that commit and, only when every job of it has
+passed, uploads the wheel and the sdist to PyPI, creates the GitHub release with the npm tarball, lists `knos mcp`
+in the MCP registry, attaches the Gemini CLI extension, publishes to crates.io and npm when their tokens are set,
+and rebuilds the site. Every one of those jobs needs the test job of the same run, so tagging early only starts the
+tests earlier, and a commit whose tests fail publishes nothing. A job added to that workflow must need `tests` too
+(`tests/test_release_gate.py` fails if one does not). Nothing is uploaded by hand: PyPI accepts the upload on the
+workflow's own GitHub token (trusted publishing; the one-time setup is at the top of the workflow file), so the
+project needs no PyPI API token and should have none.
 
 ## Licence
 

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A page in a storyboard</title>
+<style>
+  body { margin: 0; background: #ffffff; color: #1f2328; font: 22px/1.55 "Segoe UI", Helvetica, Arial, sans-serif; }
+  header { background: #0d1117; color: #e6edf3; padding: 56px 90px; }
+  header h1 { margin: 0 0 8px; font-size: 52px; }
+  header p { margin: 0; color: #9da7b3; font-size: 26px; }
+  main { padding: 20px 90px 90px; max-width: 1000px; }
+  h2 { margin: 54px 0 10px; font-size: 36px; }
+  code, pre { font-family: Consolas, Menlo, "DejaVu Sans Mono", monospace; font-size: 20px; }
+  pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px 20px; overflow: hidden; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  th, td { text-align: left; border-bottom: 1px solid #d0d7de; padding: 12px 10px; vertical-align: top; }
+  th { background: #f6f8fa; }
+</style>
+</head>
+<body>
+<header>
+  <h1>A page in a storyboard</h1>
+  <p>This is a file in the repository, shown as a real page in Chromium.</p>
+</header>
+<main>
+  <h2>Three kinds of scene</h2>
+  <table>
+    <tr><th>Line</th><th>What the scene shows</th></tr>
+    <tr><td><code>show: url ADDRESS</code></td><td>A real page: an address on the web, or a file next to the storyboard.</td></tr>
+    <tr><td><code>run: COMMAND</code></td><td>The real output of a command, in a terminal page. It stops the render if the command fails.</td></tr>
+    <tr><td><code>show: still FILE</code></td><td>A picture, fitted to the frame.</td></tr>
+  </table>
+  <h2>The words</h2>
+  <p>Each scene has <code>say:</code> lines. The voice speaks them one sentence at a time, and the length of every sentence is
+  measured from the audio. A scene lasts as long as its words, with a little quiet before and after.</p>
+  <pre>--- page
+say: A scene can show a real page.
+show: url sample/page.html
+scroll: 1400</pre>
+  <h2>The length</h2>
+  <p>The scenes are added up before anything is recorded. If they come to more than 180 seconds the render stops there,
+  and says how many words to cut. The finished file is measured again, and a file that is too long is deleted.</p>
+  <h2>The frame rate</h2>
+  <p>The page is photographed as fast as the browser allows, and each photograph is kept with the moment it was taken.
+  The video is then made at a constant frame rate: where the photographs are far apart, a frame is repeated.</p>
+  <h2>The audio</h2>
+  <p>The narration is joined by counting samples, so it is exactly as long as the scenes. The audio is padded to the length
+  of the video and never trimmed to the shorter of the two.</p>
+  <h2>The subtitles</h2>
+  <p>One cue for each sentence, with the times the voice speaks it. They are written beside the video, and also put inside it.</p>
+  <h2>Where it runs</h2>
+  <p>On Linux, macOS and Windows, with Python, ffmpeg, Playwright and one voice: Piper, which works offline, or the
+  online voices of Microsoft Edge through edge-tts.</p>
+  <h2>Before you publish</h2>
+  <p>Open the contact sheet the render writes beside the video. It shows twelve frames spread over the video, which is
+  enough to see a blank scene or a page that did not load.</p>
+</main>
+</body>
+</html>

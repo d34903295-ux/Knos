@@ -1,7 +1,9 @@
 """`knos mcp`: the server a coding agent talks to. Every test drives the real `serve` loop over in-memory streams,
 with a chain and a GitHub made of dictionaries, so nothing here opens the network (conftest refuses it anyway).
 
-The accounts are built byte for byte as knos-pay lays them out (see knos.settle.pay.read_job, read_due, read_rep).
+The accounts are built byte for byte as knos-pay lays them out: the first deployment's (knos.settle.pay.read_job,
+read_due, read_rep) and the second's (knos.settle.v2.pay.read_job, read_bind, read_rep, read_balance; the job and
+bind bytes are tests/_flow.py's).
 """
 
 from __future__ import annotations
@@ -11,8 +13,12 @@ import json
 
 from solders.pubkey import Pubkey
 
-from knos import mcp, version
+from _flow import bind_bytes
+from _flow import job_bytes as job2_bytes
+
+from knos import mcp, terms, version
 from knos.settle import pay
+from knos.settle.v2 import pay as pay2
 
 NOW = 1_790_000_000
 WIDGETS, GADGETS, GONE = 987_654_321, 555, 777      # repository ids
@@ -42,10 +48,11 @@ def rep_bytes(paid_jobs: int, total: int, repositories: int) -> bytes:
 
 
 class Ledger:
-    """The reads knos.mcp makes of a cluster, over a dictionary of accounts."""
+    """The reads knos.mcp makes of a cluster, over a dictionary of accounts for each deployment's escrow (`accounts`:
+    the first's; `second`: the second's, with `logs`: the terms JSON each job's funding transaction logged)."""
 
-    def __init__(self, accounts: dict | None = None, down: bool = False):
-        self.accounts, self.down = dict(accounts or {}), down
+    def __init__(self, accounts: dict | None = None, down: bool = False, second: dict | None = None, logs: dict | None = None):
+        self.accounts, self.down, self.second, self.logs = dict(accounts or {}), down, dict(second or {}), dict(logs or {})
 
     def _up(self) -> None:
         if self.down:
@@ -53,13 +60,18 @@ class Ledger:
 
     def account(self, address):
         self._up()
-        return self.accounts.get(address)
+        return self.accounts.get(address, self.second.get(address))
 
     def program_accounts(self, program, size: int, memcmp: dict[int, bytes] | None = None):
         self._up()
-        assert program == pay.PAY_ID
-        return [(a, d) for a, d in self.accounts.items()
+        assert program in (pay.PAY_ID, pay2.PAY_ID)
+        return [(a, d) for a, d in (self.accounts if program == pay.PAY_ID else self.second).items()
                 if len(d) == size and all(d[o:o + len(b)] == b for o, b in (memcmp or {}).items())]
+
+    def log_of(self, address, marker: str, check=None):
+        self._up()
+        lines = ["knos2:funded repo=1", *(["knos2:terms " + self.logs[address].decode()] if address in self.logs else [])]
+        return next((x for x in lines if x.startswith(marker) and (check is None or check(x))), None)
 
     def now(self) -> int:
         self._up()
@@ -233,14 +245,14 @@ def test_knos_bounties_lists_open_work_largest_first_with_what_the_author_gets()
     assert first == {"repo": "acme/gadgets", "issue": 3, "url": "https://github.com/acme/gadgets/issues/3",
                      "amount_usdc": "50.00", "net_usdc": "48.75",
                      "paid_when": "the funder's acceptance checks pass on a pull request",
-                     "refunded_after": "2026-10-05T14:13:20Z", "job": str(pay.job_pda(GADGETS, 3)),
+                     "refunded_after": "2026-10-05T14:13:20Z", "job": str(pay.job_pda(GADGETS, 3)), "deployment": 1,
                      "title": "Retry the upload", "labels": ["bug", "good first issue"], "assigned": False}
     assert got["bounties"][1]["paid_when"] == "a maintainer merges the pull request that closes the issue"
     assert unnamed["repo"] is None and unnamed["url"] is None and unnamed["repo_id"] == GONE   # GitHub did not answer
     assert (unnamed["title"], unnamed["labels"], unnamed["assigned"]) == (None, None, None)
     assert got["open"] == 3 and got["cluster"] == "devnet" and got["note"] == "test USDC, no real value"
-    for said in ("Fixes #<issue>", "No wallet or address is needed", "GitHub account", "knos claim <address>",
-                 "https://drexthealpha.github.io/Knos/#claim"):
+    for said in ("Fixes #<issue>", "No wallet is needed to start", "GitHub account", "`/knos address <Solana address>`", "held for that account for 180 days",
+                 "knos claim <address>", "https://drexthealpha.github.io/Knos/#claim"):
         assert said in got["how"]
 
 
@@ -361,12 +373,149 @@ def test_knos_due_shows_what_waits_what_was_paid_and_how_to_claim():
     ledger, github = world()
     got = call("knos_due", {"login": "@mona"}, ledger, github)["structuredContent"]
     assert got["login"] == "mona" and got["user_id"] == MONA
-    assert got["waiting"] == [{"mint": str(pay.faucet_mint()), "amount_usdc": "19.50"}] and got["waiting_usdc"] == "19.50"
-    assert got["paid"] == {"pull_requests": 3, "repositories": 2, "total_usdc": "61.25"}
-    assert "knos claim <address>" in got["how"] and "https://drexthealpha.github.io/Knos/#claim" in got["how"]
+    old = got["first_deployment"]
+    assert old["waiting"] == [{"mint": str(pay.faucet_mint()), "amount_usdc": "19.50"}] and old["waiting_usdc"] == "19.50"
+    assert old["paid"] == {"pull_requests": 3, "repositories": 2, "total_usdc": "61.25"}
+    assert got["said"] == "mona has bound no wallet. The first deployment holds 19.50 USDC for mona."
+    assert "knos claim <address>" in got["how"] and "https://drexthealpha.github.io/Knos/#claim" in got["how"] and "knos claim --v1 <address>" in got["how"]
+    assert (got["wallet"], got["held"], got["balances"]) == (None, [], []) and got["record"]["paid"] == 0
     github.pages["users/nobody"] = {"id": 5, "login": "nobody"}
     empty = call("knos_due", {"login": "nobody"}, ledger, github)["structuredContent"]
-    assert empty["waiting"] == [] and empty["paid"]["pull_requests"] == 0 and empty["said"] == "Nothing is waiting for nobody."
+    assert empty["first_deployment"]["waiting"] == [] and empty["first_deployment"]["paid"]["pull_requests"] == 0
+    assert empty["said"] == "nobody has bound no wallet. Nothing is waiting for nobody."
+
+
+# ---- the second deployment: where new funding goes -------------------------------------------------------------------
+
+BOUGHT = {"accept": "", "checks": [{"app": 15368, "name": "build"}, {"app": 15368, "name": "test"}], "deny": [".github/**", ".knos/**"],
+          "mode": "merge", "paths": ["src/**"], "reserve": 7, "v": 1}
+WALLET = "4G3cznCnwCUPBCZwzKiLupjdgB5pSoCcGWNGuFv4TYFo"
+JUNK = Pubkey.from_string("So11111111111111111111111111111111111111112")      # a mint that is nobody's USDC
+HUBOT_ID = 4242                                                                 # the owner of octo/widgets
+
+
+def balance_bytes(owner_id: int, authority: Pubkey, mint: Pubkey, cap: int = 0, spenders=(), faucet: bool = False, spent: int = 0) -> bytes:
+    d = bytearray(pay2.BALANCE_LEN)
+    d[0], d[2] = 1, int(faucet)
+    d[8:16], d[16:48], d[48:80], d[80:88] = _u64(owner_id), bytes(authority), bytes(mint), _u64(cap)
+    for k, who in enumerate(spenders):
+        d[96 + 8 * k:104 + 8 * k] = _u64(who)
+    d[128:136] = _u64(spent)
+    return bytes(d)
+
+
+def token_bytes(amount: int) -> bytes:
+    return bytes(64) + _u64(amount) + bytes(93)
+
+
+def rep2_bytes(paid: int, funders: int, total: int, test_paid: int, self_paid: int, test_total: int, first: int, last: int) -> bytes:
+    return (paid.to_bytes(4, "little") + funders.to_bytes(4, "little") + _u64(total) + test_paid.to_bytes(4, "little")
+            + self_paid.to_bytes(4, "little") + bytes(8) + _u64(test_total) + _u64(first) + _u64(last) + bytes(8))
+
+
+def world2() -> tuple[Ledger, GitHub]:
+    """The first deployment's world, and on the second: an open bounty of test USDC on octo/widgets#7 from a comment,
+    one from a wallet in a token of its own making, one past its deadline, a payment proven and held for mona, the
+    wallet bound to hubot, both records, and a balance a wallet set aside for hubot's repositories."""
+    ledger, github = world()
+    raw, faucet, wallet = terms.canonical(BOUGHT), pay2.faucet_balance_pda(HUBOT_ID), Pubkey.from_string(WALLET)
+    digest = pay2.terms_hash(raw)
+    job = lambda repo, issue, amount, source=faucet, **kw: (pay2.job_pda(repo, issue, source), job2_bytes(  # noqa: E731
+        repo, issue, amount, source, digest, deadline=kw.pop("deadline", NOW + 14 * 86_400), owner_id=HUBOT_ID, funder_id=HUBOT_ID, **kw))
+    balance = pay2.balance_pda(HUBOT_ID, wallet, pay2.USDC_DEVNET)
+    ledger.second = dict([
+        job(WIDGETS, 7, 30_000_000),
+        job(WIDGETS, 7, 400_000_000, wallet, faucet=False, mint=JUNK, kind=0),
+        job(GADGETS, 4, 70_000_000, deadline=NOW - 5),
+        job(GADGETS, 5, 10_000_000, state=3, payee=MONA, hold_until=NOW + 180 * 86_400),
+        job(WIDGETS, 11, 8_000_000, mode=1),
+        (pay2.bind_pda(HUBOT_ID), bind_bytes(HUBOT_ID, WALLET)),
+        (pay2.rep_pda(MONA), rep2_bytes(2, 1, 24_375_000, 5, 1, 97_500_000, NOW - 86_400, NOW - 3600)),
+        (balance, balance_bytes(HUBOT_ID, wallet, pay2.USDC_DEVNET, cap=50_000_000, spenders=(MONA,), spent=120_000_000)),
+        (pay2.baltok_pda(balance), token_bytes(75_500_000)),
+    ])
+    ledger.logs = {pay2.job_pda(WIDGETS, 7, faucet): raw, pay2.job_pda(WIDGETS, 7, wallet): raw, pay2.job_pda(WIDGETS, 11, faucet): b'{"not":"terms"}'}
+    github.pages.update({"users/hubot": {"id": HUBOT_ID, "login": "hubot"},
+                         "repos/octo/widgets/issues/11": {"number": 11, "title": "Slugify keeps punctuation", "labels": [], "assignees": []}})
+    return ledger, github
+
+
+def test_knos_bounties_lists_the_second_deployments_open_work_with_the_first(capsys):
+    ledger, github = world2()
+    got = call("knos_bounties", {}, ledger, github)["structuredContent"]
+    rows = got["bounties"]
+    # test USDC first, largest first, whichever deployment holds it; a token of someone's own making last, whatever
+    # its number; held and expired jobs are not work
+    assert [(b["deployment"], b["repo"], b["issue"], b["amount_usdc"], b.get("money")) for b in rows] == [
+        (1, "acme/gadgets", 3, "50.00", None), (2, "octo/widgets", 7, "30.00", "test USDC"), (1, "octo/widgets", 7, "20.00", None),
+        (2, "octo/widgets", 11, "8.00", "test USDC"), (1, None, 1, "1.00", None), (2, "octo/widgets", 7, None, f"token {JUNK}")]
+    assert got["open"] == 6
+    second = rows[1]
+    assert second == {"repo": "octo/widgets", "issue": 7, "url": "https://github.com/octo/widgets/issues/7", "amount_usdc": "30.00",
+                      "net_usdc": "29.25", "paid_when": "a maintainer merges the pull request that closes the issue",
+                      "refunded_after": "2026-10-05T14:13:20Z", "job": str(pay2.job_pda(WIDGETS, 7, pay2.faucet_balance_pda(HUBOT_ID))),
+                      "deployment": 2, "money": "test USDC", "amount_units": 30_000_000, "funded_from": "a balance, by a comment",
+                      "title": "Add a --json flag", "labels": [], "assigned": True}
+    assert rows[3]["paid_when"] == "the funder's acceptance checks pass on a pull request" and rows[3]["title"] == "Slugify keeps punctuation"
+    assert (rows[5]["amount_units"], rows[5]["net_usdc"], rows[5]["funded_from"]) == (400_000_000, None, "a wallet")
+    one = call("knos_bounties", {"repo": "octo/widgets", "limit": 2}, ledger, github)["structuredContent"]
+    assert [(b["deployment"], b["issue"]) for b in one["bounties"]] == [(2, 7), (1, 7)] and one["open"] == 4
+
+
+def test_knos_bounty_says_a_jobs_terms_in_words_and_who_a_held_one_waits_for():
+    ledger, github = world2()
+    got = call("knos_bounty", {"issue": "octo/widgets#7"}, ledger, github)["structuredContent"]
+    usdc, junk, old, proven = got["bounties"]
+    assert got["said"] == "4 bounties in escrow for octo/widgets#7." and [b["deployment"] for b in got["bounties"]] == [2, 2, 1, 1]
+    assert (usdc["state"], usdc["mode"], usdc["amount_usdc"], usdc["money"]) == ("open", "merge", "30.00", "test USDC")
+    assert usdc["terms"] == terms.describe(BOUGHT) == [
+        "It is paid when a maintainer merges a pull request that closes this issue, if these checks passed at that pull request's last "
+        "commit: `build`, `test`.",
+        "The pull request may not change `.github/**` or `.knos/**`, and may only change files matching `src/**`.",
+        "`/knos take` reserves the issue for 7 days."] and "terms_note" not in usdc
+    assert (junk["amount_usdc"], junk["money"], junk["funded_from"], junk["terms"]) == (None, f"token {JUNK}", "a wallet", usdc["terms"])
+    assert (old["state"], proven["state"], proven["author_id"]) == ("open", "proven", MONA) and "terms" not in old
+    # a job whose logged terms do not hash to what it stores, or are not terms: said, never guessed
+    eleven = call("knos_bounty", {"issue": "octo/widgets#11"}, ledger, github)["structuredContent"]["bounties"]
+    assert len(eleven) == 1 and eleven[0]["terms"] is None and eleven[0]["mode"] == "tests"
+    assert eleven[0]["terms_note"] == "its terms could not be read from Solana just now; `/knos status` on the issue says them"
+    # proven and held for its payee; past its deadline
+    github.pages["repos/acme/gadgets"] = {"id": GADGETS, "full_name": "acme/gadgets"}
+    held = call("knos_bounty", {"issue": "acme/gadgets#5"}, ledger, github)["structuredContent"]["bounties"]
+    assert [(b["state"], b["held_for_user_id"], b["held_until"], b["refunded_after"]) for b in held] == [
+        ("held", MONA, "2027-03-20T14:13:20Z", "2027-03-20T14:13:20Z")]
+    late = call("knos_bounty", {"issue": "acme/gadgets#4"}, ledger, github)["structuredContent"]["bounties"]
+    assert [b["state"] for b in late] == ["past its deadline: it pays nobody now and goes back to its funder"]
+    none = call("knos_bounty", {"issue": "octo/widgets#8"}, ledger, github)["structuredContent"]
+    assert none["bounties"] == [] and none["said"] == ("no bounty in escrow for octo/widgets#8; a maintainer funds one by commenting "
+                                                       "/knos fund 20 on it.")
+
+
+def test_knos_due_shows_the_bound_wallet_what_is_held_the_record_and_the_balances():
+    ledger, github = world2()
+    mona = call("knos_due", {"login": "mona"}, ledger, github)["structuredContent"]
+    assert mona["wallet"] is None and mona["held"] == [
+        {"repo": "acme/gadgets", "repo_id": GADGETS, "issue": 5, "net_usdc": "9.75", "money": "test USDC", "net_units": 9_750_000,
+         "held_until": "2027-03-20T14:13:20Z", "job": str(pay2.job_pda(GADGETS, 5, pay2.faucet_balance_pda(HUBOT_ID)))}]
+    record = dict(mona["record"])
+    assert "counted apart" in record.pop("note")
+    assert record == {"paid": 2, "funders": 1, "total_units": 24_375_000, "first": "2026-09-20T14:13:20Z", "last": "2026-09-21T13:13:20Z",
+                      "test_paid": 5, "test_total_usdc": "97.50", "self_paid": 1}
+    assert mona["said"] == ("mona has bound no wallet. 1 payment is held for mona until a wallet is bound. The first deployment holds "
+                            "19.50 USDC for mona.")
+    assert mona["how"].startswith("Bind a wallet as this GitHub account with `knos claim <address>` or at https://drexthealpha.github.io/Knos/#claim: "
+                                  "what is held is sent there") and mona["balances"] == []
+    assert mona["first_deployment"]["waiting_usdc"] == "19.50"
+    hubot = call("knos_due", {"login": "hubot"}, ledger, github)["structuredContent"]
+    wallet = Pubkey.from_string(WALLET)
+    assert hubot["wallet"] == WALLET and hubot["held"] == [] and hubot["record"]["paid"] == 0 and hubot["record"]["first"] is None
+    assert hubot["balances"] == [{"balance": str(pay2.balance_pda(HUBOT_ID, wallet, pay2.USDC_DEVNET)), "holds_usdc": "75.50", "holds_units": 75_500_000,
+                                  "money": "test USDC", "faucet": False, "cap_per_job_units": 50_000_000, "spender_ids": [MONA],
+                                  "opened_by_wallet": WALLET}]
+    assert hubot["said"] == f"hubot is paid at {WALLET}. Nothing is waiting for hubot." and hubot["how"] == "Nothing to do: payments go to the bound wallet."
+    # the cluster not answering is one sentence, as for every tool
+    ledger.down = True
+    assert _sentence(call("knos_due", {"login": "mona"}, ledger, github)) == "Solana devnet did not answer: connection refused."
 
 
 def _sentence(result: dict) -> str:

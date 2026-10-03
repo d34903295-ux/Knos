@@ -1,4 +1,4 @@
-"""knos - AI agent work gets paid only when GitHub's own signature, checked by Solana, proves it passed."""
+"""knos - Bounties that pay when the pull request is merged with the checks you named passing. Attested by a GitHub-signed workflow run, verified on Solana."""
 
 from importlib.metadata import PackageNotFoundError, version as _installed
 

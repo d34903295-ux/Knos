@@ -1,133 +1,204 @@
 # Why Knos
 
-The argument, with its sources. Every external number here was read on 2 Oct 2026 unless it says otherwise; where a
-number reached us through secondary coverage, that is said.
+The argument, with its sources. Every outside source was read on 2 Oct 2026; a date beside a link is the source's
+own date. "Secondary" marks a number read in coverage of the original, not in the original.
 
-## 1. An agent's word is free, so it is worth nothing
+## 1. An agent's word costs nothing, so it is not evidence
 
-Coding agents now write a large share of pull requests. One tracker counts about 1.3M a week from Claude Code alone,
-and puts 32.5% of sampled pull requests as agent-marked ([amplifying.ai](https://amplifying.ai/coding-agents/trends),
-to 27 Sep 2026; its Claude Code, Cursor and Codex counts are estimates from declared attribution).
+Coding agents open a large share of pull requests. One tracker counts about 1.7 million a week across the six
+agents it follows, and marks 32.5% of the pull requests it sampled as agent-made
+([amplifying.ai](https://amplifying.ai/coding-agents/trends), data to 27 Sep 2026; the total is our sum of its
+per-agent figures, and three of those are its estimates from declared attribution).
 
 We measured what those pull requests say against what happened. In 826 repositories, the first agent pull request
 whose description said tests or CI pass had a failing check at its head commit in 147 (17.8%). Counting every such
-pull request instead of one per repository it is 660 of 2,431 (27.2%), a figure that leans on a few busy
-repositories, so we quote the first ([BENCH.md](BENCH.md); the list is public and rebuilt every 6 hours). A failing
-check is GitHub's record; it does not say why the check failed, and a description can be written before CI finishes.
+pull request instead of one per repository gives 660 of 2,431 (27.1%); that figure leans on a few busy repositories,
+so we quote the first ([BENCH.md](BENCH.md), measured 2 Oct 2026; a new scan is scheduled every 6 hours). A failing
+check is GitHub's record. It does not say why the check failed, and a description can be written before CI finishes.
 What it shows is that the description is not evidence.
 
-Others measured the same thing from the inside:
+Others found the same from the inside:
 
-- Under a sealed harness, 63% of one model's "successful" SWE-bench Pro resolutions had retrieved the fix rather than
-  derived it ([Cursor, 25 Jun 2026](https://cursor.com/blog/reward-hacking-coding-benchmarks)).
-- On tasks made impossible on purpose, GPT-5 exploited the tests on 76% of one benchmark variant
-  ([ImpossibleBench, arXiv 2510.20270](https://arxiv.org/abs/2510.20270); the rate via
-  [Digital Applied](https://www.digitalapplied.com/blog/ai-coding-agent-reward-hacking-rates-published-data)).
-
-- Passing tests is not the same as mergeable work either: when maintainers reviewed 296 agent pull requests that
-  passed the benchmark's tests, they would have merged roughly a third to a half
+- 63% of one model's successful SWE-bench Pro resolutions had retrieved the fix rather than derived it. With git
+  history sealed and the network restricted, scores fell sharply
+  ([Cursor, 25 Jun 2026](https://cursor.com/blog/reward-hacking-coding-benchmarks)).
+- METR had 4 maintainers of 3 repositories review agent patches that passed the tests of SWE-bench Verified, 296
+  pull requests in all. Roughly half would not have been merged, and the maintainers' decisions ran about 24
+  points below the benchmark's scores
   ([METR, 10 Mar 2026](https://metr.org/notes/2026-03-10-many-swe-bench-passing-prs-would-not-be-merged-into-main/)).
+  METR adds that the agents had one attempt and no feedback.
 
-This is what Spence described in 1973: a signal carries information only if it is costly to fake. "All tests pass" in
-a description costs nothing to write.
+Spence described this in 1973 ("Job Market Signaling", Quarterly Journal of Economics 87): a signal carries
+information only if it is costly to fake. "All tests pass" in a description costs nothing to write.
 
-## 2. So the market for paid agent work is failing, the way Akerlof said it would
+## 2. So paid work for strangers breaks down
 
-When buyers cannot tell good from bad, they stop paying for either (Akerlof, 1970). That is happening to open-source
-bounties now:
+Akerlof (1970) showed what happens when a buyer cannot tell good from bad: "the presence of people who wish to pawn
+bad wares as good wares tends to drive out the legitimate business"
+([The Market for "Lemons"](https://www.sfu.ca/~allen/Ackerlof.pdf), Quarterly Journal of Economics 84). It is
+happening to paid open-source work now:
 
-- One study of the Algora bounty board found 1,470 payouts in 2025 against 175 in 2026 to its date, 73.2% of 529 open
-  bounties unreachable in practice, and 2 payouts in the trailing 30 days
-  ([incubagent, 10 Aug 2026](https://incubagent.com/research/agent-bounty-market/); one venue, one date).
-- A single bounty issue on one repository drew 253 bot comments and 27 untested AI pull requests in a day
-  ([AI Weekly](https://aiweekly.co/alerts/archestra-blocks-ai-bot-spam-with-git-contributor-gate), secondary).
-- curl closed its bug bounty on 26 Jan 2026; Ghostty added vouching; Jazzband announced its sunset
-  ([codenote](https://codenote.net/en/posts/oss-ai-slop-contribution-policy-shift/), secondary).
+- On the Algora board, settled payouts fell from 1,470 in 2025 to 175 in 2026 up to 10 Aug, with 2 in the 30 days
+  before that date ([incubagent, 10 Aug 2026](https://incubagent.com/research/agent-bounty-market/); in its words,
+  "one venue on one date").
+- curl ended its bug bounty on 31 Jan 2026, after 87 confirmed vulnerabilities and over 100,000 USD paid. The share
+  of reports that were real fell from "north of 15%" to "below 5%" in 2025
+  ([Stenberg, 26 Jan 2026](https://daniel.haxx.se/blog/2026/01/26/the-end-of-the-curl-bug-bounty/)).
+- OnlyDust closed after paying 18 million USD in grants to 4,000 contributors over four years: "Low-skill
+  contributors were flooding them with AI-generated code" ([onlydust.com](https://www.onlydust.com/)).
+- Across every board, 59 verified bounties worth 64,291 USD were open on 2 Oct 2026
+  ([BountyOS](https://bountyos.rovidev.com/en/github-bounty-board/)).
 
-Supply is not the problem. Agents will swarm any bounty. Trust is.
+Supply is not what is missing. Agents will answer any bounty. What is missing is a way for a buyer to pay only for
+work that held up, and for a worker to know the money is there.
 
-## 3. Agents are paid for attempts, because nobody neutral says what was delivered
+## 3. Paying per result already exists, where the seller keeps the meter
 
-Coding agents are sold by the seat, the token or the minute of compute, whatever comes out: Cursor about $4B a year
-([Dealroom, 9 Jun 2026](https://dealroom.co/news/134107-cursor-tops-4b-annualized-revenue/)), Claude Code over
-$2.5B ([Anthropic, Feb 2026](https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation)),
-Cognition $492M ([TechCrunch, 27 May 2026](https://techcrunch.com/2026/05/27/ai-coding-startup-cognition-raises-1b-at-25b-pre-money-valuation/)).
-We found no coding-agent vendor that charges per merged pull request.
+Intercom charges 0.99 USD per resolved conversation for its support agent, which is near 100 million USD a year
+([EnterpriseDNA, 2 Aug 2026](https://enterprisedna.co/resources/ai-pulse/ai-pulse-2026-08-02-intercom-s-fin-ai-agent-is-nearing-100m-arr-roughly-half-of/),
+secondary). For code, Sourcegraph began billing one product per merged changeset on 14 Sep 2026: "If it doesn't get
+merged, you don't pay" ([changelog](https://sourcegraph.com/changelog/agentic-batch-changes-ga),
+[its note on pricing, 16 Sep 2026](https://sourcegraph.com/blog/agentic-batch-changes-pricing)). In both the
+seller's own system counts the results.
 
-Where the seller can define the outcome, buyers already pay per outcome. Intercom's Fin charges $0.99 per resolved
-conversation and is near $100M a year
-([Mostly Metrics via EnterpriseDNA, 2 Aug 2026](https://enterprisedna.co/resources/ai-pulse/ai-pulse-2026-08-02-intercom-s-fin-ai-agent-is-nearing-100m-arr-roughly-half-of/),
-secondary); the share of AI companies pricing by outcome rose from 18% to 23% in six months
-([ICONIQ, State of AI 2026](https://www.iconiq.com/growth/reports/state-of-ai-2026)). In each case the vendor's own
-system decides what counts as "resolved", and the buyer has to trust it.
+Code has something support does not: a third party that already records the result. GitHub records who opened a
+pull request, what its checks concluded and who merged it, and it signs statements about a workflow run for free.
+What was missing is a way to move money on that signature, for any seller, with nobody in the middle who could
+forge it or keep the money.
 
-Code is the one kind of agent work where a neutral third party already signs the outcome. GitHub records who opened
-a pull request, what its checks said and who merged it, and will sign that statement for free. What was missing is
-something that moves money on that signature without anyone in the middle who could forge it.
+## 4. What has been tried before, and the rule Knos takes from each
 
-The same gap shows in agent payments on chain: x402 carried 75.41M transactions in 30 days, 76% of it on Solana
-([Solana Compass, 22 Sep 2026](https://solanacompass.com/news/solana-processes-76-of-all-x402-ai-agent-transactions-232-million-in-four-weeks)),
-and a rail moves money when someone says so; it has nothing to say about whether the work was done.
+### Letters of credit: pay against a third party's document
 
-Holmström (1979) is the reference for what to do when effort cannot be observed: pay on a verifiable signal of the
-output.
+A seller in one port and a buyer in another cannot see each other's goods or money. The letter of credit solved
+that: a bank pays the seller against documents that a third party signed, above all the carrier's bill of lading.
+In 2011 letters of credit covered 12.5% of world trade, 2.3 trillion USD
+([Niepmann and Schmidt-Eisenlohr, VoxEU, 11 Jun 2016](https://cepr.org/voxeu/columns/trade-finance-around-world)).
+The banks' rules are the UCP 600 ([text](https://pacliirms.austlii.edu.au/pits/en/treaty_database/2006/14.html)).
 
-## 4. Trade solved this centuries ago: pay against a third party's document
-
-A merchant in one port and a buyer in another do not trust each other, and neither can see the goods. The letter of
-credit fixed that: the bank pays the seller when the seller presents documents that conform, above all a bill of
-lading, signed by the carrier, a third party with no stake in the sale. The bank never inspects the cargo. Banks
-reported about $550B of documentary trade exposure in 2022 with export letter-of-credit loss rates of 0.02%
-([ICC Trade Register via TFG](https://www.tradefinanceglobal.com/posts/breaking-trade-finance-default-rates-rise-icc-trade-finance-register)).
-
-Knos is a letter of credit for agent work:
-
-| letter of credit | Knos |
+| UCP 600 | the rule Knos takes |
 |---|---|
-| the buyer's bank holds the money | a Solana program holds it, and nobody can change the program |
-| the carrier signs a bill of lading | GitHub signs a token: this pull request, by this account, was merged in this repository |
-| the bank checks the document, not the goods | the program checks GitHub's RSA signature and the token's claims, on chain |
-| the bank has a fixed time to examine the documents, pays on silence, and refuses only for a narrow reason ([UCP 600, articles 14 and 16](https://www.skrine.com/insights/alerts/july-2022/banks-duty-in-examining-documents-presented-u-1)) | a review window the funder chose; silence pays; `/knos veto` from a maintainer takes it back |
-| the seller is paid on conforming documents | the author's GitHub account is credited |
-| no conforming documents by the expiry date: the credit lapses | no proof by the deadline: the funder is refunded |
+| Article 4: "A credit by its nature is a separate transaction from the sale or other contract on which it may be based." | The escrow is separate from any argument about the work. It hears no disputes. |
+| Article 5: "Banks deal with documents and not with goods, services or performance to which the documents may relate." Article 14(a): they examine "on the basis of the documents alone". | The program reads GitHub's signed statement and the job's terms, and nothing else. It never looks at the code. |
+| Article 15(a): "When an issuing bank determines that a presentation is complying, it must honour." | A pay token that matches the terms is paid in the transaction that verifies it. There is no veto. |
+| Article 14(b): the bank has "a maximum of five banking days" to examine. Article 16: a refusal needs a single notice that states "each discrepancy"; a bank that fails to give it "shall be precluded from claiming that the documents do not constitute a complying presentation". | The time to object is fixed and comes first. A maintainer who does not want a pull request to take the bounty says so before merging (`/knos reject`, with the reason). Merging is acceptance. |
+| A credit has an expiry date. With no complying presentation by then, the bank owes nothing. | With no payment by the deadline, the funder is refunded. The refund needs no token. |
 
-What had to exist first is a chain program that can read GitHub's signature by itself, with no oracle and no operator
-who could forge it. That is `knos-oidc`, and it is the part others can build on ([OIDC.md](OIDC.md)).
+### Stand-alone escrow lost to payment built into the marketplace
 
-## 5. Why a signed merge and not only "tests passed"
+In 2001 "only 6% of online auction buyers" had paid through an online escrow service. Escrow.com charged 3% by
+cheque or money order and 6% by card, and the authors found that stand-alone escrow "may have difficulty surviving"
+where expected fraud is low
+([Hu, Lin, Whinston and Zhang, Information Systems Research 15(3), 2004](https://www.scheller.gatech.edu/directory/research/information-technology-management/zhang/pdf/isr-escrow.pdf)).
+What won was a payment inside the marketplace's own flow: in July 2002 "about 60 percent of PayPal's business"
+came from eBay users ([Associated Press, 8 Jul 2002](https://www.paypalobjects.com/html/press/070802APEbayBuys.html)).
 
-Goodhart's law applies to tests the moment money rides on them: section 1's numbers are agents gaming tests. So the
-default trigger in Knos is a maintainer's merge, a decision by the person who owns the code, attested by GitHub,
-**plus** a check that runs none of the pull request's code: if the description says tests pass and GitHub's record
-of the merged commit says a check failed, nothing is paid. Tests alone are an option the funder can choose; then the
-checks run in a sandbox, a black-box mode exists whose verdict the pull request's code cannot touch, and the payment
-waits a review window in which the funder can veto ([TAMPER.md](TAMPER.md), [SECURITY.md](SECURITY.md)).
+The rule: no separate place to go. Funding is a comment on the issue, payment follows the merge, and the result is
+a comment on the pull request. The fee, 2.5%, is below what escrow charged then.
 
-What neither mode proves is that the work is good. A signature proves what happened, not whether it was wise
-([SECURITY.md](SECURITY.md) says exactly where the line is).
+### Mechanical Turk: rejection that costs the buyer nothing
 
-## 6. Why now, and why on a chain
+On Mechanical Turk, "Requesters have the right to reject a Turker's completed work without payment" while
+"retaining ownership rights to the rejected work", and the platform "is not involved in resolving any labor
+disputes". Workers answer by avoiding requesters they do not know and by choosing tasks with concrete criteria
+([McInnis, Cosley, Nam and Leshed, CHI 2016](https://bpb-us-w2.wpmucdn.com/sites.coecis.cornell.edu/dist/1/6/files/2016/06/p2271-mcinnis-16rd8kx.pdf);
+437 comments from 391 workers).
 
-- **Now**: agent pull requests went from about 4M a month to 17M+ in six months (The Information, via
-  [ai2.work](https://ai2.work/blog/github-agentic-pull-requests-surge-28-fold-in-ten-months); the paywalled original
-  was not verified), while the bounty market that should pay for them shrank.
-- **A chain**, because the three things this needs are things a chain does and a company cannot promise: money held
-  by code nobody can change; a payee who needs no account with anyone (a GitHub id is enough, anywhere in the
-  world); and a verifier any other program can call. A company running the same escrow would be one more party to
-  trust, which is the problem being solved.
-- **Solana**, because verifying GitHub's RSA-2048 signature on chain takes two transactions of under 1M compute units
-  each, and relaying a whole proof is seven transactions, 35,000 lamports of fees ([BENCH.md](BENCH.md)); and because
-  most agent payment traffic is already there.
+The rule: once the work is accepted, the buyer cannot take the money back. There is no veto and no review window
+after the merge, and no instruction changes the terms after funding. What Knos does not fix: before the merge a
+maintainer can still read a pull request, decline it and write the same change. The merge button stays with the
+buyer.
 
-## 7. How new infrastructure like this has spread before
+### Bountysource: the custodian was the risk
 
-- Let's Encrypt made a signature free and automatic, and HTTPS went from under 30% of page loads to about 80% in
-  roughly five years ([Let's Encrypt, Dec 2025](https://letsencrypt.org/2025/12/09/10-years)). Verification that
-  costs nothing and needs no human becomes the default.
-- PayPal grew inside someone else's marketplace: 68.3% of its payment volume came from online auctions in the nine
-  months to Sep 2001 ([S-1/A](https://www.sec.gov/Archives/edgar/data/0001103415/000091205702004514/a2060419zs-1a.htm)).
-  Knos lives inside GitHub the same way: the funder comments on an issue, the worker opens a pull request, and
-  neither leaves.
+Bountysource announced terms, to start on 1 Jul 2020, under which a bounty with no accepted solution after two
+years "will be retained by Bountysource"; it withdrew them after protest
+([borg issue 5230](https://github.com/borgbackup/borg/issues/5230)). From June 2023 payout requests went
+unanswered. At least 21,702.10 USD of completed work was left unpaid, and its owner announced bankruptcy in 2023
+([boehs.org, 3 May 2024](https://boehs.org/node/bountysource)).
 
-Neither comparison is a forecast. They are why the product is free to verify with, and why it asks nobody to go
-anywhere new.
+The rule: no company holds the money. It sits in a program. Money with no payment returns to the funder at the
+deadline, without a token and without an operator. A payment held for a payee who gave no address returns after
+180 days. A prefunded balance can be withdrawn only by the wallet that opened it. One custodian risk remains and
+is stated: until an outside review, Knos can change the program through a multisig after a public 48-hour delay.
+
+### tea.xyz: a reward computed from countable things gets farmed
+
+Over 150,000 npm packages were published to farm tea's rewards, "artificially inflating package metrics through
+automated replication and dependency chains"
+([AWS Security Blog, 13 Nov 2025](https://aws.amazon.com/blogs/security/amazon-inspector-detects-over-150000-malicious-packages-linked-to-token-farming-campaign/)).
+
+The rule: Knos computes no reward and pays from no pool. Every payment is one funder's own money for one merge in
+the repository that funder chose. The public record counts distinct funders, and keeps self-payment and test money
+out of its totals.
+
+### curl's bounty: cash plus free submission floods the examiner
+
+curl's numbers are in section 2. The cost fell on the people who had to read every report.
+
+The rule: a bounty can be reserved. An assigned issue pays only its assignee, and `/knos take` reserves an
+unassigned one for 7 days unless the funder set another number. The free check marks a false "tests pass" before a
+person reads the pull request. Knos does not remove the review work. A maintainer who is flooded should also use
+GitHub's own limits ([COMPARE.md](COMPARE.md)).
+
+### Akerlof: a third party's certificate counters a market for lemons
+
+Akerlof's remedies are guarantees, brand names and licensing: someone other than the seller vouches for quality.
+
+The rule: GitHub's signature is the certificate. It certifies only what GitHub records, and section 6 says what
+that leaves out.
+
+### Holmström, and Holmström and Milgrom: pay on every informative signal, not only the measurable one
+
+Holmström (1979): "an optimal contract should link payment to all outcomes that can potentially provide
+information about actions that have been taken". Holmström and Milgrom (1991): pay teachers on test scores and
+they "might spend too little time teaching equally important (but harder to measure) skills"
+([the Nobel committee's summary, 2016](https://nobelprize.org/uploads/2018/06/popular-economicsciences2016-1.pdf)).
+
+The rule: pay on two signals together, a maintainer's merge and the funded checks at the merged pull request's
+head commit. Payment without a merge ("tests mode") is offered only when the acceptance bundle is black-box: the submission runs
+as a separate process and only its output is compared. Everything else is funded in merge mode
+([TAMPER.md](TAMPER.md) has the measured reason).
+
+### METR: a patch that passes the tests is often not one a maintainer would merge
+
+About half, in METR's review (section 1).
+
+The rule: the default acceptance is the merge. Checks are necessary and not sufficient.
+
+## 5. Why a chain, and why Solana
+
+A chain gives this three things a company cannot promise. The money is committed before the work, in a program and
+not in a company's account (Bountysource). The payee needs no account with a payment company, only a GitHub account
+and an address. And the verifier is a program any other program can call ([OIDC.md](OIDC.md)). A company running
+the same escrow would be one more party to trust. Until an outside review Knos is still such a party, through its
+multisig (section 4, Bountysource).
+
+Solana, for two reasons. Verifying GitHub's RSA-2048 signature on chain takes 2 transactions of under 1 million
+compute units each, and on the first deployment carrying a whole token took 7 transactions and 35,000 lamports of
+fees ([BENCH.md](BENCH.md), measured). And agent payments already run there: by Artemis data that Solana posted on
+22 Sep 2026, Solana carried 23.2 million x402 transactions in four weeks, 76% of the count
+([Solana Compass, 22 Sep 2026](https://solanacompass.com/news/solana-processes-76-of-all-x402-ai-agent-transactions-232-million-in-four-weeks)).
+That figure counts transactions, not money, and it says nothing about whether any work was done. A payment rail
+moves money when someone says so. Knos is about who may say so.
+
+## 6. What Knos does not cover
+
+**A signature authenticates a statement, not the truth of the world.** GitHub's signature says that GitHub issued
+this token to this workflow, at this commit, in this repository. It does not say that the merged code is good.
+It does not say that the maintainer and the author are independent people. And GitHub does not sign what the
+workflow read: which checks passed and who the author is are the workflow's reading of GitHub's record, as
+trustworthy as the repository it ran in.
+
+**Finite tests do not establish that software does everything intended.** A check that passed shows that this
+check passed. Of 21 cheating pull requests in [TAMPER.md](TAMPER.md), plain CI was fooled by 17. METR's maintainers
+would not have merged about half of the patches that passed. That is why the default asks for a person's merge as
+well, and why a merge is still only that person's judgment.
+
+**A program that depends on GitHub inherits GitHub's failures.** If GitHub is down, pay tokens wait. If GitHub signs
+something false, or one of its signing keys leaks, the program believes it until the key expires or the guardian
+revokes it. If GitHub changes its tokens or its rules for workflows, Knos has to change too. If GitHub closes an
+account, its owner cannot bind a wallet. One thing does not depend on GitHub: a refund at the deadline needs no
+token.
+
+[SECURITY.md](SECURITY.md) says who has to be trusted for what.

@@ -1,0 +1,419 @@
+{
+  "version": "0.3.12",
+  "name": "knos_pay_v2",
+  "docs": [
+    "Pay on proof, second deployment: an escrow that pays the author of a pull request on a GitHub-signed token verified on chain by knos-oidc.",
+    "Upgradeable only through a multisig with a public 48-hour delay, until an outside review; then made immutable.",
+    "A native program: this file is written by hand from programs-v2/knos_pay/src (lib.rs lists every instruction, state.rs every account) and checked by tests/test_idl.py and tests/test_pay2_idl.py.",
+    "Instruction data is the discriminant byte, then the arguments in order, little-endian, with no padding. A `bytes` argument runs to the end of the data.",
+    "Every token account below is a VERIFIED GitHub Actions token account owned by knos-oidc (the second deployment's verifier), from a GitHub-hosted",
+    "runner, at most an hour past its expiry, issued no more than 300 seconds ahead of the chain's clock and living at most an hour.",
+    "The account after it, key, is knos-oidc's account of the key that verified the token (the token account names it at bytes 18..50). It must be usable now:",
+    "a token is refused from the moment its key is revoked or expires (errors 76 to 78), and works again once an expired key is refreshed. What each token must say is in its audience (the aud claim):",
+    "fund knos2:fund:<issue>:<amount units>:<mode 0|1>:<terms hash hex>:<work seconds>:<balance address>, from fund.yml, on an issue_comment or issues event, the run's first attempt;",
+    "pay knos2:pay:<repository id>:<issue>:<payee github id>:<head sha>:<terms hash hex>:<mode>:<address or ->, from the job's pinned prove.yml;",
+    "bind knos2:bind:<address>, from the pinned claim workflow, run by hand by the owner of a repository named knos-claim (workflow_dispatch only, first attempt; a push is refused).",
+    "The terms hash is sha256 of the terms JSON that the funding instruction carries and logs (knos2:terms <json>).",
+    "Anyone may relay FundBalance, Pay, Settle, Refund, Bind and FaucetOpen and pay their gas. tokenProgram is SPL Token or Token-2022, the owner of the mint."
+  ],
+  "instructions": [
+    {
+      "name": "OpenBalance",
+      "docs": ["A wallet opens a Balance for the repositories of one GitHub owner (a user or an organisation): its own money, spendable by GitHub-signed comments. No money moves; add money with a plain token transfer to baltok."],
+      "accounts": [
+        {"name": "authority", "isMut": true, "isSigner": true, "desc": "The wallet that owns the Balance; pays the rent"},
+        {"name": "balance", "isMut": true, "isSigner": false, "desc": "PDA [\"bal\", ownerId u64 LE, authority, mint]"},
+        {"name": "baltok", "isMut": true, "isSigner": false, "desc": "PDA [\"baltok\", balance]: the Balance's token account, created here"},
+        {"name": "mint", "isMut": false, "isSigner": false, "desc": "The mint; a Token-2022 mint must pass the extension rules"},
+        {"name": "auth", "isMut": false, "isSigner": false, "desc": "PDA [\"auth\"]: owner of every token account of the program"},
+        {"name": "tokenProgram", "isMut": false, "isSigner": false, "desc": "SPL Token or Token-2022: the mint's owner"},
+        {"name": "systemProgram", "isMut": false, "isSigner": false, "desc": "System program"}
+      ],
+      "args": [
+        {"name": "ownerId", "type": "u64"},
+        {"name": "cap", "type": "u64"},
+        {"name": "spenders", "type": {"array": ["u64", 4]}}
+      ],
+      "discriminant": {"type": "u8", "value": 0}
+    },
+    {
+      "name": "SetBalance",
+      "docs": ["The wallet that opened a Balance sets its cap per job (0: none) and its four spenders (0: empty)."],
+      "accounts": [
+        {"name": "authority", "isMut": false, "isSigner": true, "desc": "The Balance's authority"},
+        {"name": "balance", "isMut": true, "isSigner": false, "desc": "The Balance"}
+      ],
+      "args": [
+        {"name": "cap", "type": "u64"},
+        {"name": "spenders", "type": {"array": ["u64", 4]}}
+      ],
+      "discriminant": {"type": "u8", "value": 1}
+    },
+    {
+      "name": "Withdraw",
+      "docs": ["The wallet that opened a Balance takes unspent money back, to a token account of its own. A faucet Balance cannot withdraw. Never paused."],
+      "accounts": [
+        {"name": "authority", "isMut": false, "isSigner": true, "desc": "The Balance's authority"},
+        {"name": "balance", "isMut": false, "isSigner": false, "desc": "The Balance"},
+        {"name": "baltok", "isMut": true, "isSigner": false, "desc": "PDA [\"baltok\", balance]"},
+        {"name": "destToken", "isMut": true, "isSigner": false, "desc": "A token account of the Balance's mint owned by the authority"},
+        {"name": "mint", "isMut": false, "isSigner": false, "desc": "The Balance's mint"},
+        {"name": "auth", "isMut": false, "isSigner": false, "desc": "PDA [\"auth\"]"},
+        {"name": "tokenProgram", "isMut": false, "isSigner": false, "desc": "The mint's owner"}
+      ],
+      "args": [
+        {"name": "amount", "type": "u64"}
+      ],
+      "discriminant": {"type": "u8", "value": 2}
+    },
+    {
+      "name": "FundBalance",
+      "docs": [
+        "One comment funds a job from the Balance its fund token names. The token is from a run in a repository of the Balance's owner, by the owner or a",
+        "listed spender (a faucet Balance: any actor), and works once: its iat must be later than the Balance's last, so a Balance takes its tokens in the order GitHub issued them.",
+        "The data is the terms JSON whose sha256 the audience carries (at most 600 bytes of printable ASCII). Refused while new funding is paused."
+      ],
+      "accounts": [
+        {"name": "relayer", "isMut": true, "isSigner": true, "desc": "Anyone; pays the job's rent and gets it back when the job closes"},
+        {"name": "fundToken", "isMut": false, "isSigner": false, "desc": "A VERIFIED fund token"},
+        {"name": "key", "isMut": false, "isSigner": false, "desc": "knos-oidc's key account that verified the token: PDA [\"key\", issuer u8, sha256(modulus)] of knos-oidc"},
+        {"name": "balance", "isMut": true, "isSigner": false, "desc": "The Balance the token's audience names"},
+        {"name": "baltok", "isMut": true, "isSigner": false, "desc": "PDA [\"baltok\", balance]"},
+        {"name": "job", "isMut": true, "isSigner": false, "desc": "PDA [\"job\", repoId u64 LE, issue u64 LE, balance]"},
+        {"name": "vault", "isMut": true, "isSigner": false, "desc": "PDA [\"vault\", mint]: the mint's vault, created on first use"},
+        {"name": "mint", "isMut": false, "isSigner": false, "desc": "The Balance's mint"},
+        {"name": "auth", "isMut": false, "isSigner": false, "desc": "PDA [\"auth\"]"},
+        {"name": "tokenProgram", "isMut": false, "isSigner": false, "desc": "The mint's owner"},
+        {"name": "systemProgram", "isMut": false, "isSigner": false, "desc": "System program"},
+        {"name": "pause", "isMut": false, "isSigner": false, "desc": "PDA [\"pause\"] (it need not exist)"}
+      ],
+      "args": [
+        {"name": "terms", "type": "bytes"}
+      ],
+      "discriminant": {"type": "u8", "value": 3}
+    },
+    {
+      "name": "FundWallet",
+      "docs": ["A wallet funds a job with its own money, pinning the repository and commit of the prove.yml that can prove it. Refused while new funding is paused."],
+      "accounts": [
+        {"name": "funder", "isMut": true, "isSigner": true, "desc": "The funding wallet; pays the job's rent and gets it back when the job closes"},
+        {"name": "job", "isMut": true, "isSigner": false, "desc": "PDA [\"job\", repoId u64 LE, issue u64 LE, funder]"},
+        {"name": "funderToken", "isMut": true, "isSigner": false, "desc": "A token account of the mint the funder has authority over"},
+        {"name": "vault", "isMut": true, "isSigner": false, "desc": "PDA [\"vault\", mint], created on first use"},
+        {"name": "mint", "isMut": false, "isSigner": false, "desc": "The mint; a Token-2022 mint must pass the extension rules"},
+        {"name": "auth", "isMut": false, "isSigner": false, "desc": "PDA [\"auth\"]"},
+        {"name": "tokenProgram", "isMut": false, "isSigner": false, "desc": "The mint's owner"},
+        {"name": "systemProgram", "isMut": false, "isSigner": false, "desc": "System program"},
+        {"name": "pause", "isMut": false, "isSigner": false, "desc": "PDA [\"pause\"] (it need not exist)"}
+      ],
+      "args": [
+        {"name": "repoId", "type": "u64"},
+        {"name": "issue", "type": "u64"},
+        {"name": "amount", "type": "u64"},
+        {"name": "work", "type": "i64"},
+        {"name": "mode", "type": "u8"},
+        {"name": "wfRepoHash", "type": {"array": ["u8", 32]}},
+        {"name": "wfSha", "type": {"array": ["u8", 40]}},
+        {"name": "terms", "type": "bytes"}
+      ],
+      "discriminant": {"type": "u8", "value": 4}
+    },
+    {
+      "name": "Pay",
+      "docs": [
+        "A pay token from the job's pinned prove.yml pays an open job: the fee to feeToken, the rest to a token account of the payee's bound wallet,",
+        "or with no Bind of the address in the audience. With neither, no money moves and the job is held for the payee for 180 days (the accounts",
+        "after bind are then not used). The payee's record is updated and the job is closed. There is no veto and no waiting time."
+      ],
+      "accounts": [
+        {"name": "relayer", "isMut": true, "isSigner": true, "desc": "Anyone; pays the rent of the record accounts"},
+        {"name": "payToken", "isMut": false, "isSigner": false, "desc": "A VERIFIED pay token"},
+        {"name": "key", "isMut": false, "isSigner": false, "desc": "knos-oidc's key account that verified the token"},
+        {"name": "job", "isMut": true, "isSigner": false, "desc": "The job"},
+        {"name": "bind", "isMut": false, "isSigner": false, "desc": "PDA [\"bind\", payee id u64 LE] (it need not exist)"},
+        {"name": "destToken", "isMut": true, "isSigner": false, "desc": "A token account of the job's mint owned by the destination wallet"},
+        {"name": "rep", "isMut": true, "isSigner": false, "desc": "PDA [\"rep\", payee id u64 LE]"},
+        {"name": "pair", "isMut": true, "isSigner": false, "desc": "PDA [\"pair\", payee id u64 LE, funder key]: funder key is the funding wallet, or sha256(\"gh\" || owner id u64 LE) for a Balance's job"},
+        {"name": "vault", "isMut": true, "isSigner": false, "desc": "PDA [\"vault\", mint]"},
+        {"name": "feeToken", "isMut": true, "isSigner": false, "desc": "A token account of the job's mint owned by the fee owner"},
+        {"name": "auth", "isMut": false, "isSigner": false, "desc": "PDA [\"auth\"]"},
+        {"name": "rentTo", "isMut": true, "isSigner": false, "desc": "The job's rentTo field: gets the job's rent back"},
+        {"name": "mint", "isMut": false, "isSigner": false, "desc": "The job's mint"},
+        {"name": "tokenProgram", "isMut": false, "isSigner": false, "desc": "The mint's owner"},
+        {"name": "systemProgram", "isMut": false, "isSigner": false, "desc": "System program"}
+      ],
+      "args": [],
+      "discriminant": {"type": "u8", "value": 5}
+    },
+    {
+      "name": "Settle",
+      "docs": ["Pays a held job, within its 180 days, once its payee has bound a wallet: to a token account of that wallet. No token is needed."],
+      "accounts": [
+        {"name": "relayer", "isMut": true, "isSigner": true, "desc": "Anyone; pays the rent of the record accounts"},
+        {"name": "job", "isMut": true, "isSigner": false, "desc": "The held job"},
+        {"name": "bind", "isMut": false, "isSigner": false, "desc": "PDA [\"bind\", the job's payee id u64 LE]"},
+        {"name": "destToken", "isMut": true, "isSigner": false, "desc": "A token account of the job's mint owned by the bound wallet"},
+        {"name": "rep", "isMut": true, "isSigner": false, "desc": "PDA [\"rep\", payee id u64 LE]"},
+        {"name": "pair", "isMut": true, "isSigner": false, "desc": "PDA [\"pair\", payee id u64 LE, funder key]"},
+        {"name": "vault", "isMut": true, "isSigner": false, "desc": "PDA [\"vault\", mint]"},
+        {"name": "feeToken", "isMut": true, "isSigner": false, "desc": "A token account of the job's mint owned by the fee owner"},
+        {"name": "auth", "isMut": false, "isSigner": false, "desc": "PDA [\"auth\"]"},
+        {"name": "rentTo", "isMut": true, "isSigner": false, "desc": "The job's rentTo field"},
+        {"name": "mint", "isMut": false, "isSigner": false, "desc": "The job's mint"},
+        {"name": "tokenProgram", "isMut": false, "isSigner": false, "desc": "The mint's owner"},
+        {"name": "systemProgram", "isMut": false, "isSigner": false, "desc": "System program"}
+      ],
+      "args": [],
+      "discriminant": {"type": "u8", "value": 6}
+    },
+    {
+      "name": "Refund",
+      "docs": ["An open job past its deadline, or a held job past its hold: the money goes back where it came from and the job is closed. No token is needed."],
+      "accounts": [
+        {"name": "relayer", "isMut": true, "isSigner": true, "desc": "Anyone"},
+        {"name": "job", "isMut": true, "isSigner": false, "desc": "The job"},
+        {"name": "vault", "isMut": true, "isSigner": false, "desc": "PDA [\"vault\", mint]"},
+        {"name": "refundToken", "isMut": true, "isSigner": false, "desc": "The job's refundTo (a Balance's token account), or for a wallet's job a token account of the mint owned by refundTo"},
+        {"name": "auth", "isMut": false, "isSigner": false, "desc": "PDA [\"auth\"]"},
+        {"name": "rentTo", "isMut": true, "isSigner": false, "desc": "The job's rentTo field"},
+        {"name": "mint", "isMut": false, "isSigner": false, "desc": "The job's mint"},
+        {"name": "tokenProgram", "isMut": false, "isSigner": false, "desc": "The mint's owner"}
+      ],
+      "args": [],
+      "discriminant": {"type": "u8", "value": 7}
+    },
+    {
+      "name": "Bind",
+      "docs": ["Binds the address in a bind token's audience to the token's actor: where that GitHub user is paid. A Bind that exists is replaced only by a later token."],
+      "accounts": [
+        {"name": "relayer", "isMut": true, "isSigner": true, "desc": "Anyone; pays the rent"},
+        {"name": "bindToken", "isMut": false, "isSigner": false, "desc": "A VERIFIED bind token"},
+        {"name": "key", "isMut": false, "isSigner": false, "desc": "knos-oidc's key account that verified the token"},
+        {"name": "bind", "isMut": true, "isSigner": false, "desc": "PDA [\"bind\", the token's actor id u64 LE]"},
+        {"name": "systemProgram", "isMut": false, "isSigner": false, "desc": "System program"}
+      ],
+      "args": [],
+      "discriminant": {"type": "u8", "value": 8}
+    },
+    {
+      "name": "Pause",
+      "docs": ["The guardian refuses new funding (FundBalance, FundWallet) for at most 7 days from now; 0 lifts the pause. Nothing else can be paused."],
+      "accounts": [
+        {"name": "guardian", "isMut": false, "isSigner": true, "desc": "The guardian (a Squads vault)"},
+        {"name": "payer", "isMut": true, "isSigner": true, "desc": "Pays the pause account's rent the first time"},
+        {"name": "pause", "isMut": true, "isSigner": false, "desc": "PDA [\"pause\"]"},
+        {"name": "systemProgram", "isMut": false, "isSigner": false, "desc": "System program"}
+      ],
+      "args": [
+        {"name": "seconds", "type": "u32"}
+      ],
+      "discriminant": {"type": "u8", "value": 9}
+    },
+    {
+      "name": "InitFaucet",
+      "docs": ["Devnet builds only. Creates the test-USDC mint (SPL Token, 6 decimals); its mint authority is the program."],
+      "accounts": [
+        {"name": "payer", "isMut": true, "isSigner": true, "desc": "Pays the rent"},
+        {"name": "mint", "isMut": true, "isSigner": false, "desc": "PDA [\"mint\"]"},
+        {"name": "auth", "isMut": false, "isSigner": false, "desc": "PDA [\"auth\"]"},
+        {"name": "tokenProgram", "isMut": false, "isSigner": false, "desc": "SPL Token program"},
+        {"name": "systemProgram", "isMut": false, "isSigner": false, "desc": "System program"}
+      ],
+      "args": [],
+      "discriminant": {"type": "u8", "value": 10}
+    },
+    {
+      "name": "FaucetOpen",
+      "docs": [
+        "Devnet builds only. Mints a fund token's amount of test USDC (at most 100) into the faucet Balance of the token's repository owner, created on",
+        "first use, and only when that is the Balance the token's audience names. One per repository per minute, in the order GitHub issued the tokens.",
+        "The token is not used up: FundBalance then spends that Balance with it."
+      ],
+      "accounts": [
+        {"name": "relayer", "isMut": true, "isSigner": true, "desc": "Anyone; pays the rent"},
+        {"name": "fundToken", "isMut": false, "isSigner": false, "desc": "A VERIFIED fund token"},
+        {"name": "key", "isMut": false, "isSigner": false, "desc": "knos-oidc's key account that verified the token"},
+        {"name": "balance", "isMut": true, "isSigner": false, "desc": "PDA [\"bal\", the token's repository owner id u64 LE, auth, faucet mint]: the Balance the token's audience names"},
+        {"name": "baltok", "isMut": true, "isSigner": false, "desc": "PDA [\"baltok\", balance]"},
+        {"name": "mint", "isMut": true, "isSigner": false, "desc": "PDA [\"mint\"]: the test-USDC mint"},
+        {"name": "auth", "isMut": false, "isSigner": false, "desc": "PDA [\"auth\"]"},
+        {"name": "tokenProgram", "isMut": false, "isSigner": false, "desc": "SPL Token program"},
+        {"name": "systemProgram", "isMut": false, "isSigner": false, "desc": "System program"},
+        {"name": "rate", "isMut": true, "isSigner": false, "desc": "PDA [\"rate\", the token's repository id u64 LE]"}
+      ],
+      "args": [],
+      "discriminant": {"type": "u8", "value": 11}
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Balance",
+      "docs": [
+        "PDA [\"bal\", ownerId u64 LE, authority, mint]: money a wallet set aside for bounties in the repositories of one GitHub owner. 160 bytes.",
+        "version is 1. faucet 1: the devnet faucet's Balance (its authority is the auth PDA; any actor spends it, nobody withdraws it).",
+        "capPerJob 0: no cap. spenders: GitHub ids that may spend it by comment besides the owner (0: empty). lastIat: the iat of the last fund token that spent it.",
+        "spent: everything it ever put into jobs."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {"name": "version", "type": "u8"},
+          {"name": "bump", "type": "u8"},
+          {"name": "faucet", "type": "u8"},
+          {"name": "padding0", "type": {"array": ["u8", 5]}},
+          {"name": "ownerId", "type": "u64"},
+          {"name": "authority", "type": "publicKey"},
+          {"name": "mint", "type": "publicKey"},
+          {"name": "capPerJob", "type": "u64"},
+          {"name": "lastIat", "type": "i64"},
+          {"name": "spenders", "type": {"array": ["u64", 4]}},
+          {"name": "spent", "type": "u64"},
+          {"name": "padding1", "type": {"array": ["u8", 24]}}
+        ]
+      }
+    },
+    {
+      "name": "Job",
+      "docs": [
+        "PDA [\"job\", repoId u64 LE, issue u64 LE, source]: one bounty. 320 bytes. source is the Balance it was funded from, or the funding wallet.",
+        "state: 1 open, 3 held (proven; waits for the payee to bind a wallet until holdUntil). mode: 0 merge, 1 tests. kind: 0 funded by a wallet, 1 from a Balance.",
+        "tokenProgram: 0 SPL Token, 1 Token-2022. faucet 1: the mint is the devnet faucet's (test money). amount: what the vault received.",
+        "payeeId: set when held. funderId: the GitHub id that wrote the funding comment (0 for a wallet). ownerId: the Balance's owner (0 for a wallet).",
+        "notBefore: a pay token must be issued at or after this. refundTo: the Balance's token account, or the funding wallet. rentTo: who paid the job's rent.",
+        "terms: sha256 of the terms JSON. wfRepoHash: sha256 of \"owner/name\" of the repository that holds the workflows. wfSha: their commit, 40 lowercase hex characters."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {"name": "state", "type": "u8"},
+          {"name": "mode", "type": "u8"},
+          {"name": "kind", "type": "u8"},
+          {"name": "bump", "type": "u8"},
+          {"name": "padding0", "type": {"array": ["u8", 2]}},
+          {"name": "tokenProgram", "type": "u8"},
+          {"name": "faucet", "type": "u8"},
+          {"name": "repoId", "type": "u64"},
+          {"name": "issue", "type": "u64"},
+          {"name": "amount", "type": "u64"},
+          {"name": "deadline", "type": "i64"},
+          {"name": "padding1", "type": {"array": ["u8", 8]}},
+          {"name": "holdUntil", "type": "i64"},
+          {"name": "payeeId", "type": "u64"},
+          {"name": "funderId", "type": "u64"},
+          {"name": "notBefore", "type": "i64"},
+          {"name": "ownerId", "type": "u64"},
+          {"name": "source", "type": "publicKey"},
+          {"name": "refundTo", "type": "publicKey"},
+          {"name": "rentTo", "type": "publicKey"},
+          {"name": "mint", "type": "publicKey"},
+          {"name": "terms", "type": {"array": ["u8", 32]}},
+          {"name": "wfRepoHash", "type": {"array": ["u8", 32]}},
+          {"name": "wfSha", "type": {"array": ["u8", 40]}}
+        ]
+      }
+    },
+    {
+      "name": "Bind",
+      "docs": ["PDA [\"bind\", userId u64 LE]: the wallet a GitHub user is paid at. 56 bytes. version is 1. iat: the iat of the bind token that set it."],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {"name": "version", "type": "u8"},
+          {"name": "bump", "type": "u8"},
+          {"name": "padding0", "type": {"array": ["u8", 6]}},
+          {"name": "userId", "type": "u64"},
+          {"name": "wallet", "type": "publicKey"},
+          {"name": "iat", "type": "i64"}
+        ]
+      }
+    },
+    {
+      "name": "Rep",
+      "docs": [
+        "PDA [\"rep\", userId u64 LE]: a GitHub user's public record. 64 bytes.",
+        "paid, total: payments in real money from someone else, and what they put in the user's wallet. funders: distinct funders among them.",
+        "testPaid, testTotal: payments in the devnet faucet's test USDC. selfPaid: payments whose funder was the payee.",
+        "first, last: the time of the first and of the latest payment counted in paid (0: none yet)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {"name": "paid", "type": "u32"},
+          {"name": "funders", "type": "u32"},
+          {"name": "total", "type": "u64"},
+          {"name": "testPaid", "type": "u32"},
+          {"name": "selfPaid", "type": "u32"},
+          {"name": "padding0", "type": {"array": ["u8", 8]}},
+          {"name": "testTotal", "type": "u64"},
+          {"name": "first", "type": "i64"},
+          {"name": "last", "type": "i64"},
+          {"name": "padding1", "type": {"array": ["u8", 8]}}
+        ]
+      }
+    },
+    {
+      "name": "Pair",
+      "docs": ["PDA [\"pair\", payeeId u64 LE, funder key]: exists (1) once this funder has paid this payee in real money. 1 byte."],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {"name": "exists", "type": "u8"}
+        ]
+      }
+    },
+    {
+      "name": "Pause",
+      "docs": ["PDA [\"pause\"]: new funding is refused until this time. 8 bytes."],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {"name": "until", "type": "i64"}
+        ]
+      }
+    },
+    {
+      "name": "Rate",
+      "docs": ["PDA [\"rate\", repoId u64 LE]: the devnet faucet's last use by a repository, and that fund token's iat. 16 bytes."],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {"name": "lastUse", "type": "i64"},
+          {"name": "lastIat", "type": "i64"}
+        ]
+      }
+    }
+  ],
+  "errors": [
+    {"code": 60, "name": "Base64Url", "msg": "knos-oidc's claims reader: not unpadded base64url"},
+    {"code": 61, "name": "Json", "msg": "knos-oidc's claims reader: the claims are not a JSON object"},
+    {"code": 62, "name": "DuplicateClaim", "msg": "knos-oidc's claims reader: a claim appears twice"},
+    {"code": 63, "name": "Claim", "msg": "knos-oidc's claims reader: a claim is missing or of the wrong type"},
+    {"code": 76, "name": "KeyNotActive", "msg": "knos-oidc's key rule: the key that verified the token is not active yet"},
+    {"code": 77, "name": "KeyExpired", "msg": "knos-oidc's key rule: the key that verified the token has expired; the token works again once the key is refreshed, while the token is fresh"},
+    {"code": 78, "name": "KeyRevoked", "msg": "knos-oidc's key rule: the guardian revoked the key that verified the token; the token can do nothing"},
+    {"code": 80, "name": "Accounts", "msg": "A wrong account, or a missing signature"},
+    {"code": 81, "name": "Terms", "msg": "The amount, work time, mode, workflow commit, terms JSON or pause length is not allowed"},
+    {"code": 82, "name": "Job", "msg": "The job exists already, or this account is not a job"},
+    {"code": 83, "name": "State", "msg": "Wrong state or time for this instruction"},
+    {"code": 84, "name": "Token", "msg": "The token is not verified by knos-oidc, not GitHub's, expired, or its times are not GitHub's"},
+    {"code": 85, "name": "Claims", "msg": "The token's claims do not allow this"},
+    {"code": 86, "name": "Workflow", "msg": "The token is not from the workflow this instruction needs"},
+    {"code": 87, "name": "Audience", "msg": "The audience does not match"},
+    {"code": 88, "name": "Payee", "msg": "Wrong destination, fee or refund account, or the payee has no bound wallet"},
+    {"code": 89, "name": "DevnetOnly", "msg": "Devnet builds only"},
+    {"code": 90, "name": "RateLimit", "msg": "The faucet gives one funding per repository per minute, in the order GitHub issued the tokens"},
+    {"code": 91, "name": "Replay", "msg": "This token is not newer than the last one used here: a token works once"},
+    {"code": 92, "name": "Spender", "msg": "The token's repository owner or actor may not spend this Balance"},
+    {"code": 93, "name": "Cap", "msg": "More than the Balance's cap per job"},
+    {"code": 94, "name": "Funds", "msg": "The Balance does not hold that much"},
+    {"code": 95, "name": "Mint", "msg": "The mint or the token program is not accepted"},
+    {"code": 96, "name": "Paused", "msg": "New funding is paused"},
+    {"code": 97, "name": "Guardian", "msg": "Not the guardian"},
+    {"code": 98, "name": "Balance", "msg": "The Balance exists already, is not a Balance, or the signer is not its authority"},
+    {"code": 99, "name": "Faucet", "msg": "A faucet Balance cannot withdraw"}
+  ],
+  "metadata": {
+    "origin": "shank",
+    "address": "5y7iWJ1VAMJjnnWbbdo2a2PsWJEwTExSNpzrvQSEnS8k"
+  }
+}

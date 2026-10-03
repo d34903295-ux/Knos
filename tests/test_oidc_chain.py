@@ -13,7 +13,7 @@ pytest.importorskip("solders.litesvm")
 
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 
-from _settle import FIX, NOW, Chain, b64, github_claims, modulus, sign_jwt, signing_key  # noqa: E402
+from _settle import FIX, NOW, Chain, b64, github_claims, gitlab_claims, jwt_size, modulus, sign_jwt, signing_key, sized_jwt  # noqa: E402
 
 from knos.settle import oidc  # noqa: E402
 
@@ -99,6 +99,60 @@ def test_a_gitlab_token_under_a_4096_bit_key_is_verified_in_six(chain):
     assert all(v[-1] < 1_350_000 for k, v in chain.cu.items() if k.startswith("verify_4096"))
     # the same key cannot vouch for GitHub's issuer
     assert chain.verify(sign_jwt(key, github_claims()), GL, modulus(key)) is None and code(chain) == 72
+
+
+def test_the_4096_bit_plan_fits_a_token_of_any_size_and_the_old_plan_ran_out(chain):
+    """Regression. A GitLab token grows with the user's groups. The plan this client used to send for 4096-bit keys,
+    [2, 3, 3, 3, 3, 2], ends with two squarings, and the call that finishes also multiplies once more, hashes the
+    token, decodes its payload and reads its claims: past about 5,000 bytes of such a token that call ran out of
+    compute units (it fits at 4,500 and does not at 5,500; in between it depends on the token). step_plan now ends
+    with one squaring, and every call fits for every size the program takes."""
+    key, n = signing_key(4096), modulus(signing_key(4096))
+    old, plan = [2, 3, 3, 3, 3, 2], oidc.step_plan(4096)
+    assert plan == [2, 3, 3, 3, 4, 1] and sum(plan) == 16 == sum(oidc.step_plan(2048)) and len(plan) == len(old)
+
+    def steps(jwt: str, squarings: list[int]) -> list[int]:
+        """The compute units of each step that succeeded (a failed step ends the run)."""
+        tid, out = chain.write(jwt), []
+        for sq in squarings:
+            if not chain.send([oidc.step_ix(chain.payer.pubkey(), tid, oidc.key_pda(GL, n), sq)], tag="plan"):
+                break
+            out.append(chain.cu["plan"][-1])
+        return out
+
+    for size in (2_500, 3_500, 4_500, 5_500, oidc.MAX_JWT):
+        jwt = sized_jwt(key, gitlab_claims(aud=f"knos:pay:1:{size}"), size)
+        tok = chain.verify(jwt, GL, n, tag=f"gitlab{size}")
+        assert tok is not None, f"{len(jwt)} bytes: {chain.err}"
+        cu = [chain.cu[f"gitlab{size}_4096_step{i + 1}"][-1] for i in range(len(plan))]
+        print(f"\nCU 4096-bit, {len(jwt)}-byte GitLab token, plan {plan}: {cu}")
+        assert max(cu) < 1_340_000, cu                      # at least 60,000 compute units to spare in every step
+        body = jwt.split(".")[1]
+        signed = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        assert oidc.read_token(chain.data(tok)).claims() == signed and signed["aud"] == f"knos:pay:1:{size}"
+        # the same token under the old plan
+        assert chain.send([oidc.close_ix(chain.payer.pubkey(), oidc.token_id(jwt))]), chain.err
+        got = steps(jwt, old)
+        print(f"   the old plan {old}: {got if len(got) == 6 else got + ['out of compute units']}")
+        if size <= 4_500:
+            assert len(got) == 6 and oidc.read_token(chain.data(oidc.token_pda(chain.payer.pubkey(), oidc.token_id(jwt)))).verified
+        else:
+            assert len(got) == 5 and "ProgramFailedToComplete" in chain.err
+            assert not oidc.read_token(chain.data(oidc.token_pda(chain.payer.pubkey(), oidc.token_id(jwt)))).verified
+    # no shorter plan exists: the first call cannot take three squarings, no call five, and the last needs its own
+    short = sized_jwt(key, gitlab_claims(aud="knos:pay:1:0"), 2_500)
+    assert steps(short, [3]) == [] and "ProgramFailedToComplete" in chain.err
+    assert chain.send([oidc.close_ix(chain.payer.pubkey(), oidc.token_id(short))]), chain.err
+    assert len(steps(short, [2, 5])) == 1 and "ProgramFailedToComplete" in chain.err
+    # claims of the costliest shape we could build (many two-byte pairs that are not ASCII), at the largest size
+    base = json.dumps(gitlab_claims(), separators=(",", ":")).encode()[:-1]
+    pairs = next(k for k in range(2000, 0, -1) if jwt_size(key, len(base) + 6 * k + 1) <= oidc.MAX_JWT)
+    worst = sign_jwt(key, {}, raw_payload=base + b"," + b",".join([b'"\xff":\xff'] * pairs) + b"}")
+    assert oidc.MAX_JWT - 8 <= len(worst) <= oidc.MAX_JWT
+    assert chain.verify(worst, GL, n, tag="worst") is not None, chain.err
+    cu = [chain.cu[f"worst_4096_step{i + 1}"][-1] for i in range(len(plan))]
+    print(f"CU 4096-bit, {len(worst)}-byte token of the costliest claims: {cu}")
+    assert max(cu) < 1_400_000
 
 
 def _flip(jwt: str, part: int, at: int) -> str:

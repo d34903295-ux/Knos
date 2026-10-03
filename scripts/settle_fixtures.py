@@ -2,14 +2,26 @@
 the Python client (the authority, src/knos/settle), so any other client (the web app's JavaScript, an npm package, a
 program doing CPI) can check its encodings byte for byte, offline.  Run: python scripts/settle_fixtures.py
 `--check` exits 1 if the file on disk is stale.
+
+The top level is the first deployment (programs/), as it always was. `second` is the second deployment
+(programs-v2/, src/knos/settle/v2): the same kinds of entries, the accounts as bytes with what the readers make of
+them, what `key_usable` says about a key, and each transaction the site asks a wallet to sign, as solders serialises it.
 """
+import base64
+import dataclasses
 import json
 import sys
 from pathlib import Path
 
+from solders.hash import Hash
+from solders.instruction import AccountMeta, Instruction
+from solders.message import Message
 from solders.pubkey import Pubkey
+from solders.transaction import Transaction
 
 from knos.settle import oidc, pay
+from knos.settle.v2 import oidc as oidc2
+from knos.settle.v2 import pay as pay2
 
 OUT = Path(__file__).resolve().parents[1] / "sdk" / "settle" / "fixtures.json"
 NAMES = ["payer", "funder", "funder_token", "mint", "relayer", "address", "rent_to", "token_account"]
@@ -19,6 +31,22 @@ N2048 = (1 << 2047) | 0x1234567  # an odd 2048-bit number: only its encoding mat
 CHECKS = bytes(range(32))
 TID = bytes([0xC0 + i for i in range(32)])
 JWT = "eyJhbGciOiJSUzI1NiJ9." + "A" * 1000 + ".c2ln"
+
+# -- the second deployment's inputs ---------------------------------------------------------------------------------
+NAMES2 = [*NAMES, "authority", "wallet", "dest_token", "mint22", "attest", "key"]
+K2 = {n: Pubkey(bytes([i + 1]) * 32) for i, n in enumerate(NAMES2)}
+N4096 = (1 << 4095) | 0x1234567
+N2048_B = (1 << 2047) | 0x89ABCD3     # its low bits make -n^-1 mod 2^32 take every round of the iteration that finds it
+MAINT, SPENDERS, CAP = 555000, [555000, 9], 20_000_000
+T22 = pay2.TOKEN_2022
+TERMS = {"accept": "", "checks": [{"app": 15368, "name": "test"}], "deny": [".github/**", ".knos/**"], "mode": "merge", "paths": [],
+         "reserve": 7, "v": 1}
+TERMS_TESTS = {**TERMS, "accept": "ab" * 32, "mode": "tests", "paths": ["src/**", "caf\u00e9/*.md", "docs/\U0001f4c4*"]}
+ODD = {"z": ["tab\there", "del\x7f", "quote\"", "back\\slash", "line\u2028", "nul\x00", "slash/"], "a": {"b": 1, "a": [True, None, -2]}}
+WF_REPO, WF_SHA, HEAD = "drexthealpha/knos-workflows", "c" * 40, "a" * 40
+NOW = 1_790_000_000
+BLOCKHASH = Hash(bytes([0xBB]) * 32)
+TRANSFER_CHECKED = 12       # SPL Token and Token-2022: TransferChecked { amount u64, decimals u8 }
 
 
 def ix(i) -> dict:
@@ -82,6 +110,290 @@ def build() -> dict:
             "token (626 + jwt bytes)": "0 stage u8 (2 = verified) | 1 issuer u8 | 2 squarings done u8 | 3 limbs u8 | 4 jwt_len u16 | 6 payload_off u16 | "
                                        "8 payload_len u16 | 10 exp i64 | 18 key[32] | 50 payer[32] | 82 id[32] | 114 x[512] | 626 jwt",
             "key (8 + 8 * limbs bytes)": "0 ready u8 | 1 issuer u8 | 2 limbs u8 (64 or 128) | 3 bump u8 | 4 n0inv u32 | 8 n (LE limbs) | then r2 (LE limbs)",
+        },
+        "second": second(),
+    }
+
+
+# -- the second deployment ------------------------------------------------------------------------------------------
+def _put(buf: bytearray, at: int, value, size: int = 8, signed: bool = False) -> None:
+    raw = value.to_bytes(size, "little", signed=signed) if isinstance(value, int) else bytes(value)
+    buf[at:at + len(raw)] = raw
+
+
+def job_bytes(*, state=1, mode=0, kind=1, token_program=0, faucet=0, repo=REPO, issue=ISSUE, amount=AMOUNT, deadline=NOW + 14 * 86_400,
+              hold_until=0, payee=0, funder_id=MAINT, not_before=NOW, owner_id=OWNER, source, refund_to, rent_to, mint, terms, wf_repo, wf_sha) -> bytes:
+    """A job account, laid out as programs-v2/knos_pay/src/state.rs lays it out (idl/knos_pay_v2.json, Job)."""
+    d = bytearray(pay2.JOB_LEN)
+    d[0], d[1], d[2], d[3], d[6], d[7] = state, mode, kind, 254, token_program, faucet
+    for at, v, signed in ((8, repo, False), (16, issue, False), (24, amount, False), (32, deadline, True), (48, hold_until, True),
+                          (56, payee, False), (64, funder_id, False), (72, not_before, True), (80, owner_id, False)):
+        _put(d, at, v, signed=signed)
+    for at, v in ((88, source), (120, refund_to), (152, rent_to), (184, mint), (216, terms), (248, pay2.wf_repo_hash(wf_repo)), (280, wf_sha.encode())):
+        _put(d, at, v)
+    return bytes(d)
+
+
+def balance_bytes(*, faucet=0, owner_id=OWNER, authority, mint, cap=CAP, last_iat=NOW - 60, spenders=SPENDERS, spent=7_500_000) -> bytes:
+    d = bytearray(pay2.BALANCE_LEN)
+    d[0], d[1], d[2] = 1, 253, faucet
+    _put(d, 8, owner_id); _put(d, 16, authority); _put(d, 48, mint); _put(d, 80, cap); _put(d, 88, last_iat, signed=True)
+    for i, s in enumerate(spenders):
+        _put(d, 96 + 8 * i, s)
+    _put(d, 128, spent)
+    return bytes(d)
+
+
+def bind_bytes(user: int, wallet: Pubkey, iat: int) -> bytes:
+    d = bytearray(pay2.BIND_LEN)
+    d[0], d[1] = 1, 255
+    _put(d, 8, user); _put(d, 16, wallet); _put(d, 48, iat, signed=True)
+    return bytes(d)
+
+
+def rep_bytes(paid=3, funders=2, total=58_500_000, test_paid=4, self_paid=1, test_total=19_500_000, first=NOW - 86_400, last=NOW) -> bytes:
+    d = bytearray(pay2.REP_LEN)
+    _put(d, 0, paid, 4); _put(d, 4, funders, 4); _put(d, 8, total); _put(d, 16, test_paid, 4); _put(d, 20, self_paid, 4)
+    _put(d, 32, test_total); _put(d, 40, first, signed=True); _put(d, 48, last, signed=True)
+    return bytes(d)
+
+
+def key_bytes(n: int, *, state=1, issuer=oidc2.GITHUB, active_at=NOW - 86_400, expires_at=NOW + 29 * 86_400, flags=oidc2.APPROVED | oidc2.GENESIS) -> bytes:
+    """A key account: the 40-byte header, then n and r2 as little-endian limbs."""
+    raw = oidc2.modulus_bytes(n)
+    n0inv, r2 = oidc2.key_params(n)
+    d = bytearray(oidc2.K_HDR)
+    d[0], d[1], d[2], d[3] = state, issuer, len(raw) // 4, 252
+    _put(d, 4, n0inv, 4); _put(d, 8, active_at, signed=True); _put(d, 16, expires_at, signed=True)
+    d[24] = flags
+    return bytes(d) + raw[::-1] + r2[::-1]
+
+
+def token_bytes(payload: bytes, *, stage=2, issuer=oidc2.GITHUB, done=16, exp=NOW + 300, key: Pubkey, payer: Pubkey) -> bytes:
+    """A token account whose `jwt` is header.payload.signature with `payload` in the clear where the verifier leaves
+    the decoded claims (payload_off, payload_len)."""
+    jwt = b"eyJhbGciOiJSUzI1NiJ9." + payload + b".c2ln"
+    d = bytearray(oidc2.T_JWT)
+    d[0], d[1], d[2], d[3] = stage, issuer, done, 64
+    _put(d, 4, len(jwt), 2); _put(d, 6, oidc2.T_JWT + 21, 2); _put(d, 8, len(payload), 2); _put(d, 10, exp, signed=True)
+    _put(d, 18, key); _put(d, 50, payer); _put(d, 82, oidc2.token_id(jwt))
+    return bytes(d) + jwt
+
+
+def plain(value):
+    """A reader's result as JSON: addresses as base58, bytes as hex, tuples as lists."""
+    if dataclasses.is_dataclass(value):
+        return {f.name: plain(getattr(value, f.name)) for f in dataclasses.fields(value)}
+    if isinstance(value, Pubkey):
+        return str(value)
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()
+    if isinstance(value, (list, tuple)):
+        return [plain(v) for v in value]
+    return value
+
+
+def transfer_checked_ix(source: Pubkey, mint: Pubkey, dest: Pubkey, owner: Pubkey, amount: int, decimals: int, token_program: Pubkey = pay2.TOKEN) -> Instruction:
+    """SPL Token's TransferChecked: how a wallet adds money to a Balance (a plain transfer to its token account).
+    tests/test_settle_fixtures.py runs this encoding against the token program itself."""
+    return Instruction(token_program, bytes([TRANSFER_CHECKED]) + amount.to_bytes(8, "little") + bytes([decimals]),
+                       [AccountMeta(source, False, True), AccountMeta(mint, False, False), AccountMeta(dest, False, True), AccountMeta(owner, True, False)])
+
+
+def tx(ixs: list[Instruction], payer: Pubkey) -> dict:
+    """The unsigned legacy transaction a wallet is handed: what solders makes of these instructions."""
+    message = Message.new_with_blockhash(ixs, payer, BLOCKHASH)
+    return {"payer": str(payer), "instructions": [ix(i) for i in ixs], "message": bytes(message).hex(),
+            "transaction": base64.b64encode(bytes(Transaction.new_unsigned(message))).decode()}
+
+
+def second() -> dict:
+    k = K2
+    terms, terms_tests = pay2.terms_json(TERMS), pay2.terms_json(TERMS_TESTS)
+    th, th_tests = pay2.terms_hash(terms), pay2.terms_hash(terms_tests)
+    bal, bal22, faucet_bal = pay2.balance_pda(OWNER, k["authority"], k["mint"]), pay2.balance_pda(OWNER, k["authority"], k["mint22"], ), pay2.faucet_balance_pda(OWNER)
+    job_bal, job_wallet = pay2.job_pda(REPO, ISSUE, bal), pay2.job_pda(REPO, ISSUE, k["funder"])
+    key2048, key4096 = oidc2.key_pda(oidc2.GITHUB, N2048), oidc2.key_pda(oidc2.GITLAB, N4096)
+    accounts = {
+        "job (open, from a Balance)": job_bytes(source=bal, refund_to=pay2.baltok_pda(bal), rent_to=k["relayer"], mint=k["mint"], terms=th,
+                                                wf_repo=WF_REPO, wf_sha=WF_SHA),
+        "job (held, from a wallet, Token-2022, tests mode)": job_bytes(state=3, mode=1, kind=0, token_program=1, hold_until=NOW + pay2.HOLD, payee=AUTHOR,
+                                                                      funder_id=0, owner_id=0, not_before=NOW - pay2.CLOCK_SLACK, source=k["funder"],
+                                                                      refund_to=k["funder"], rent_to=k["funder"], mint=k["mint22"], terms=th_tests,
+                                                                      wf_repo=WF_REPO, wf_sha=WF_SHA),
+        "job (open, faucet money)": job_bytes(faucet=1, amount=20_000_000, source=faucet_bal, refund_to=pay2.baltok_pda(faucet_bal), rent_to=k["relayer"],
+                                              mint=pay2.faucet_mint(), terms=th, wf_repo=WF_REPO, wf_sha=WF_SHA),
+        "balance": balance_bytes(authority=k["authority"], mint=k["mint"]),
+        "balance (faucet)": balance_bytes(faucet=1, authority=pay2.auth_pda(), mint=pay2.faucet_mint(), cap=0, spenders=[], spent=0, last_iat=0),
+        "bind": bind_bytes(AUTHOR, k["wallet"], NOW - 3600),
+        "rep": rep_bytes(),
+        "pause": (NOW + 3 * 86_400).to_bytes(8, "little", signed=True),
+        "rate": NOW.to_bytes(8, "little", signed=True) + (NOW - 5).to_bytes(8, "little", signed=True),
+    }
+    readers = {"job": pay2.read_job, "balance": pay2.read_balance, "bind": pay2.read_bind, "rep": pay2.read_rep, "pause": pay2.read_pause,
+               "rate": pay2.read_rate}
+    jobs = {name: pay2.read_job(data) for name, data in accounts.items() if name.startswith("job")}
+    j_bal, j_wallet = jobs["job (open, from a Balance)"], jobs["job (held, from a wallet, Token-2022, tests mode)"]
+    bind = pay2.read_bind(accounts["bind"])
+    fund_aud = pay2.fund_audience(ISSUE, AMOUNT, pay2.MERGE, th, bal)
+    pay_aud = pay2.pay_audience(REPO, ISSUE, AUTHOR, HEAD, th, pay2.MERGE, k["address"])
+    pay_aud_none = pay2.pay_audience(REPO, ISSUE, AUTHOR, HEAD, th_tests, pay2.TESTS)
+    keys = {
+        "ready, genesis": (key_bytes(N2048), NOW),
+        "ready, 4096-bit, attested and approved": (key_bytes(N4096, issuer=oidc2.GITLAB, flags=oidc2.APPROVED), NOW),
+        "not on chain": (None, NOW),
+        "not a key account": (bytes(41), NOW),
+        "registered, not ready": (key_bytes(N2048, state=0), NOW),
+        "revoked": (key_bytes(N2048, flags=oidc2.APPROVED | oidc2.REVOKED), NOW),
+        "new, not approved, still waiting": (key_bytes(N2048, active_at=NOW + 3600, expires_at=NOW + 31 * 86_400, flags=0), NOW),
+        "new, not approved, wait over": (key_bytes(N2048, active_at=NOW - 60, flags=0), NOW),
+        "approved, still waiting": (key_bytes(N2048, active_at=NOW + 3600, expires_at=NOW + 31 * 86_400, flags=oidc2.APPROVED), NOW),
+        "expired": (key_bytes(N2048, active_at=NOW - 31 * 86_400, expires_at=NOW - 86_400), NOW),
+        "expires this second": (key_bytes(N2048, expires_at=NOW), NOW),
+    }
+    token = token_bytes(json.dumps({"aud": fund_aud, "repository_id": str(REPO), "actor_id": str(MAINT), "iat": NOW}, separators=(",", ":")).encode(),
+                        key=key2048, payer=k["relayer"])
+    unverified = token_bytes(b"{}", stage=1, done=8, key=key2048, payer=k["relayer"])
+    n_b64 = base64.urlsafe_b64encode(oidc2.modulus_bytes(N2048)).rstrip(b"=").decode()
+    jwks = {"keys": [{"kty": "RSA", "kid": "k-2048", "alg": "RS256", "use": "sig", "e": "AQAB", "n": n_b64},
+                     {"kty": "RSA", "kid": "no-alg", "e": "AQAB", "n": base64.urlsafe_b64encode(oidc2.modulus_bytes(N4096)).rstrip(b"=").decode()},
+                     {"kty": "RSA", "kid": "other-exponent", "alg": "RS256", "e": "Aw", "n": n_b64},
+                     {"kty": "RSA", "kid": "other-alg", "alg": "PS256", "e": "AQAB", "n": n_b64},
+                     {"kty": "EC", "kid": "curve", "crv": "P-256", "x": "AA", "y": "AA"}]}
+    wallet_tok = pay2.ata(k["authority"], k["mint"])
+    wallet_tok22 = pay2.ata(k["authority"], k["mint22"], T22)
+    open_ix = pay2.open_balance_ix(k["authority"], OWNER, k["mint"], CAP, SPENDERS)
+    return {
+        "note": "The second deployment (programs-v2), from src/knos/settle/v2.",
+        "programs": dict(pay2.IDS),
+        "inputs": {**{n: str(v) for n, v in k.items()}, "repo_id": REPO, "issue": ISSUE, "payee_id": AUTHOR, "owner_id": OWNER, "maintainer_id": MAINT,
+                   "spenders": SPENDERS, "cap": CAP, "amount": AMOUNT, "token_id": TID.hex(), "n2048": hex(N2048), "n4096": hex(N4096), "jwt": JWT,
+                   "wf_repo": WF_REPO, "wf_sha": WF_SHA, "head_sha": HEAD, "now": NOW, "blockhash": str(BLOCKHASH), "terms": TERMS,
+                   "terms_tests": TERMS_TESTS},
+        "constants": {"MERGE": pay2.MERGE, "TESTS": pay2.TESTS, "FEE_BPS": pay2.FEE_BPS, "FEE_MIN": pay2.FEE_MIN, "MIN_AMOUNT": pay2.MIN_AMOUNT,
+                      "MAX_AMOUNT": pay2.MAX_AMOUNT, "FAUCET_CAP": pay2.FAUCET_CAP, "MIN_WORK": pay2.MIN_WORK, "MAX_WORK": pay2.MAX_WORK,
+                      "HOLD": pay2.HOLD, "PAUSE_MAX": pay2.PAUSE_MAX, "FUND_PERIOD": pay2.FUND_PERIOD, "CLOCK_SLACK": pay2.CLOCK_SLACK,
+                      "MAX_TERMS": pay2.MAX_TERMS, "TOKEN_AHEAD": pay2.TOKEN_AHEAD, "TOKEN_LIFE": pay2.TOKEN_LIFE, "JOB_LEN": pay2.JOB_LEN,
+                      "BALANCE_LEN": pay2.BALANCE_LEN, "BIND_LEN": pay2.BIND_LEN, "REP_LEN": pay2.REP_LEN, "KEY_DELAY": oidc2.KEY_DELAY,
+                      "KEY_TTL": oidc2.KEY_TTL, "K_HDR": oidc2.K_HDR, "MAX_JWT": oidc2.MAX_JWT, "LATE": oidc2.LATE, "T_JWT": oidc2.T_JWT,
+                      "CHUNK": oidc2.CHUNK, "GITHUB": oidc2.GITHUB, "GITLAB": oidc2.GITLAB, "TOKEN": str(pay2.TOKEN), "TOKEN_2022": str(T22),
+                      "ATA_PROGRAM": str(pay2.ATA_PROGRAM), "SYSTEM": str(pay2.SYSTEM), "USDC_DEVNET": str(pay2.USDC_DEVNET)},
+        "errors": {str(code): words for code, words in pay2.ERRORS.items()},
+        "issuers": {str(i): {"issuer": oidc2.ISSUERS[i], "jwks": oidc2.JWKS[i]} for i in sorted(oidc2.ISSUERS)},
+        "addresses": {
+            "auth": str(pay2.auth_pda()), "vault(mint)": str(pay2.vault_pda(k["mint"])), "faucet_mint": str(pay2.faucet_mint()),
+            "balance(owner, authority, mint)": str(bal), "faucet_balance(owner)": str(faucet_bal), "baltok(balance)": str(pay2.baltok_pda(bal)),
+            "job(repo, issue, balance)": str(job_bal), "job(repo, issue, funder)": str(job_wallet), "bind(payee)": str(pay2.bind_pda(AUTHOR)),
+            "rep(payee)": str(pay2.rep_pda(AUTHOR)), "pair(payee, owner id)": str(pay2.pair_pda(AUTHOR, OWNER)),
+            "pair(payee, funder)": str(pay2.pair_pda(AUTHOR, k["funder"])), "rate(repo)": str(pay2.rate_pda(REPO)), "pause": str(pay2.pause_pda()),
+            "ata(address, mint)": str(pay2.ata(k["address"], k["mint"])), "ata(address, mint22) token-2022": str(pay2.ata(k["address"], k["mint22"], T22)),
+            "fee_account(mint)": str(pay2.ata(pay2.FEE_OWNER, k["mint"])), "token(payer, token_id)": str(oidc2.token_pda(k["payer"], TID)),
+            "key(github, n2048)": str(key2048), "key(gitlab, n4096)": str(key4096),
+        },
+        "audiences": {
+            "fund": fund_aud, "fund tests, 30 days": pay2.fund_audience(ISSUE, AMOUNT, pay2.TESTS, th_tests, faucet_bal, 30 * 86_400),
+            "pay to an address": pay_aud, "pay, no address": pay_aud_none, "bind": pay2.bind_audience(k["wallet"]),
+            "rotate": oidc2.rotate_audience(oidc2.GITHUB, N2048), "rotate 4096": oidc2.rotate_audience(oidc2.GITLAB, N4096),
+            "named_balance(fund)": str(pay2.named_balance(fund_aud)),
+            "destination(bind, pay to an address)": str(pay2.destination(bind, pay_aud)),
+            "destination(no bind, pay to an address)": str(pay2.destination(None, pay_aud)),
+            "destination(no bind, pay, no address)": pay2.destination(None, pay_aud_none),
+        },
+        "terms": {"json": terms.decode(), "hash": th.hex(), "json tests": terms_tests.decode(), "hash tests": th_tests.hex(),
+                  # the client's own encoder, on text the terms never hold: every character that must be written as an escape
+                  "odd": ODD, "json odd": pay2.terms_json(ODD).decode()},
+        "hashes": {"wf_repo_hash": pay2.wf_repo_hash(WF_REPO).hex(), "funder_key(wallet)": pay2.funder_key(k["funder"]).hex(),
+                   "funder_key(owner id)": pay2.funder_key(OWNER).hex(), "token_id(jwt)": oidc2.token_id(JWT).hex(),
+                   "key_hash(n2048)": oidc2.key_hash(N2048).hex(), "key_hash(n4096)": oidc2.key_hash(N4096).hex()},
+        "fees": {str(a): pay2.fee_of(a) for a in (0, 1, 50_000, 1_000_000, 2_000_000, 5_000_000, 20_000_000, 500_000_000)},
+        "oidc": {"step_plan": {"2048": oidc2.step_plan(2048), "4096": oidc2.step_plan(4096)},
+                 "key_params": {hex(n): {"n0inv": oidc2.key_params(n)[0], "r2": oidc2.key_params(n)[1].hex()} for n in (N2048, N4096, N2048_B)},
+                 "jwks": jwks, "jwks_keys": [[kid, hex(n)] for kid, n in oidc2.jwks_keys(jwks)]},
+        "instructions": {
+            "oidc.write (first chunk)": ix(oidc2.write_ixs(k["payer"], TID, JWT)[0]),
+            "oidc.write (last chunk)": ix(oidc2.write_ixs(k["payer"], TID, JWT)[-1]),
+            "oidc.step": ix(oidc2.step_ix(k["payer"], TID, key2048, 8)),
+            "oidc.close": ix(oidc2.close_ix(k["payer"], TID)),
+            "oidc.register_key": ix(oidc2.register_key_ix(k["payer"], oidc2.GITHUB, N2048)),
+            "oidc.register_key (attested, 4096)": ix(oidc2.register_key_ix(k["payer"], oidc2.GITLAB, N4096, k["attest"])),
+            "oidc.key_params": ix(oidc2.key_params_ix(k["payer"], oidc2.GITHUB, N2048)),
+            "oidc.key_params (4096)": ix(oidc2.key_params_ix(k["payer"], oidc2.GITLAB, N4096)),
+            "oidc.refresh": ix(oidc2.refresh_ix(k["payer"], oidc2.GITHUB, N2048, k["attest"])),
+            "oidc.approve": ix(oidc2.approve_ix(oidc2.GUARDIAN, oidc2.GITLAB, N4096)),
+            "oidc.revoke": ix(oidc2.revoke_ix(oidc2.GUARDIAN, oidc2.GITHUB, N2048)),
+            "pay.open_balance": ix(pay2.open_balance_ix(k["authority"], OWNER, k["mint"])),
+            "pay.open_balance (cap, spenders)": ix(open_ix),
+            "pay.open_balance (token-2022, four spenders)": ix(pay2.open_balance_ix(k["authority"], OWNER, k["mint22"], 0, [1, 2, 3, 2 ** 64 - 1], T22)),
+            "pay.set_balance": ix(pay2.set_balance_ix(k["authority"], bal, CAP, SPENDERS)),
+            "pay.set_balance (no cap, nobody)": ix(pay2.set_balance_ix(k["authority"], bal)),
+            "pay.withdraw (everything)": ix(pay2.withdraw_ix(k["authority"], bal, k["mint"])),
+            "pay.withdraw (amount, token account)": ix(pay2.withdraw_ix(k["authority"], bal, k["mint"], AMOUNT, k["dest_token"])),
+            "pay.withdraw (token-2022)": ix(pay2.withdraw_ix(k["authority"], bal22, k["mint22"], 0, None, T22)),
+            "pay.fund_balance": ix(pay2.fund_balance_ix(k["relayer"], k["token_account"], k["key"], bal, k["mint"], REPO, ISSUE, terms)),
+            "pay.fund_balance (faucet)": ix(pay2.fund_balance_ix(k["relayer"], k["token_account"], k["key"], faucet_bal, pay2.faucet_mint(), REPO, ISSUE, terms)),
+            "pay.fund_wallet merge": ix(pay2.fund_wallet_ix(k["funder"], k["funder_token"], k["mint"], REPO, ISSUE, AMOUNT, WF_REPO, WF_SHA, terms)),
+            "pay.fund_wallet tests (token-2022)": ix(pay2.fund_wallet_ix(k["funder"], k["funder_token"], k["mint22"], REPO, ISSUE, AMOUNT, WF_REPO, WF_SHA,
+                                                                       terms_tests, pay2.TESTS, 7 * 86_400, T22)),
+            "pay.pay (a Balance's job, to a wallet)": ix(pay2.pay_ix(k["relayer"], k["token_account"], k["key"], job_bal, j_bal, AUTHOR, k["wallet"])),
+            "pay.pay (a Balance's job, held)": ix(pay2.pay_ix(k["relayer"], k["token_account"], k["key"], job_bal, j_bal, AUTHOR, None)),
+            "pay.pay (a wallet's job, token account)": ix(pay2.pay_ix(k["relayer"], k["token_account"], k["key"], job_wallet, j_wallet, AUTHOR, k["wallet"],
+                                                                      k["dest_token"])),
+            "pay.settle": ix(pay2.settle_ix(k["relayer"], job_wallet, j_wallet, k["wallet"])),
+            "pay.refund (a Balance's job)": ix(pay2.refund_ix(k["relayer"], job_bal, j_bal)),
+            "pay.refund (a wallet's job)": ix(pay2.refund_ix(k["relayer"], job_wallet, j_wallet)),
+            "pay.refund (a wallet's job, token account)": ix(pay2.refund_ix(k["relayer"], job_wallet, j_wallet, k["dest_token"])),
+            "pay.bind": ix(pay2.bind_ix(k["relayer"], k["token_account"], k["key"], AUTHOR)),
+            "pay.pause": ix(pay2.pause_ix(pay2.GUARDIAN, k["payer"], 3 * 86_400)),
+            "pay.pause (lift)": ix(pay2.pause_ix(pay2.GUARDIAN, k["payer"], 0)),
+            "pay.init_faucet": ix(pay2.init_faucet_ix(k["payer"])),
+            "pay.faucet_open": ix(pay2.faucet_open_ix(k["relayer"], k["token_account"], k["key"], OWNER, REPO)),
+            "create_ata": ix(pay2.create_ata_ix(k["relayer"], k["address"], k["mint"])),
+            "create_ata (token-2022)": ix(pay2.create_ata_ix(k["relayer"], k["address"], k["mint22"], T22)),
+            "token.transfer_checked": ix(transfer_checked_ix(wallet_tok, k["mint"], pay2.baltok_pda(bal), k["authority"], AMOUNT, 6)),
+        },
+        "accounts": {name: {"data": data.hex(), "reader": name.split(" ")[0], "read": plain(readers[name.split(" ")[0]](data))}
+                     for name, data in accounts.items()}
+        | {"job (not a job)": {"data": bytes(319).hex(), "reader": "job", "read": plain(pay2.read_job(bytes(319)))},
+           "balance (another version)": {"data": bytes(160).hex(), "reader": "balance", "read": plain(pay2.read_balance(bytes(160)))},
+           "bind (none)": {"data": None, "reader": "bind", "read": plain(pay2.read_bind(None))},
+           "rep (none)": {"data": None, "reader": "rep", "read": plain(pay2.read_rep(None))},
+           "pause (none)": {"data": None, "reader": "pause", "read": pay2.read_pause(None)},
+           "rate (none)": {"data": None, "reader": "rate", "read": plain(pay2.read_rate(None))},
+           "token (verified)": {"data": token.hex(), "reader": "token", "read": plain(oidc2.read_token(token))},
+           "token (stepping)": {"data": unverified.hex(), "reader": "token", "read": plain(oidc2.read_token(unverified))},
+           "token (too short)": {"data": bytes(625).hex(), "reader": "token", "read": plain(oidc2.read_token(bytes(625)))}},
+        "keys": {name: {"data": data.hex() if data is not None else None, "now": now, "read": plain(oidc2.read_key(data)),
+                        "usable": list(oidc2.key_usable(oidc2.read_key(data), now))} for name, (data, now) in keys.items()},
+        # What the site asks a wallet to sign, for the wallet K2["authority"] and the GitHub owner OWNER: the unsigned
+        # legacy transaction as solders serialises it (the fee payer first, then each kind of account in key order).
+        "transactions": {
+            "open a balance": tx([open_ix], k["authority"]),
+            "open a balance and put money in": tx([open_ix, transfer_checked_ix(wallet_tok, k["mint"], pay2.baltok_pda(bal), k["authority"], AMOUNT, 6)],
+                                                  k["authority"]),
+            "add money": tx([transfer_checked_ix(wallet_tok, k["mint"], pay2.baltok_pda(bal), k["authority"], AMOUNT, 6)], k["authority"]),
+            "add money (token-2022, 9 decimals)": tx([transfer_checked_ix(wallet_tok22, k["mint22"], pay2.baltok_pda(bal22), k["authority"], 3 * 10 ** 9, 9, T22)],
+                                                     k["authority"]),
+            "set who may spend": tx([pay2.set_balance_ix(k["authority"], bal, CAP, SPENDERS)], k["authority"]),
+            "take everything back": tx([pay2.create_ata_ix(k["authority"], k["authority"], k["mint"]), pay2.withdraw_ix(k["authority"], bal, k["mint"])],
+                                       k["authority"]),
+            "take an amount back": tx([pay2.create_ata_ix(k["authority"], k["authority"], k["mint"]),
+                                       pay2.withdraw_ix(k["authority"], bal, k["mint"], AMOUNT)], k["authority"]),
+            "a wallet funds a job": tx([pay2.fund_wallet_ix(k["funder"], pay2.ata(k["funder"], k["mint"]), k["mint"], REPO, ISSUE, AMOUNT, WF_REPO, WF_SHA,
+                                                            terms)], k["funder"]),
+        },
+        "layouts": {
+            "job (320 bytes)": "0 state u8 (1 open, 3 held) | 1 mode u8 | 2 kind u8 (0 wallet, 1 Balance) | 3 bump | 6 token_program u8 (0 Token, 1 Token-2022) | "
+                               "7 faucet u8 | 8 repo_id u64 | 16 issue u64 | 24 amount u64 | 32 deadline i64 | 48 hold_until i64 | 56 payee u64 | "
+                               "64 funder_id u64 | 72 not_before i64 | 80 owner_id u64 | 88 source[32] | 120 refund_to[32] | 152 rent_to[32] | 184 mint[32] | "
+                               "216 terms[32] | 248 wf_repo_hash[32] | 280 wf_sha[40]",
+            "balance (160 bytes)": "0 version u8 (1) | 1 bump | 2 faucet u8 | 8 owner_id u64 | 16 authority[32] | 48 mint[32] | 80 cap_per_job u64 (0: none) | "
+                                   "88 last_iat i64 | 96 spenders [u64; 4] (0: empty) | 128 spent u64",
+            "bind (56 bytes)": "0 version u8 (1) | 1 bump | 8 github user id u64 | 16 wallet[32] | 48 iat i64",
+            "rep (64 bytes)": "0 paid u32 | 4 funders u32 | 8 total u64 | 16 test_paid u32 | 20 self_paid u32 | 32 test_total u64 | 40 first i64 | 48 last i64",
+            "pause (8 bytes)": "0 until i64", "rate (16 bytes)": "0 last use i64 | 8 last iat i64",
+            "token (626 + jwt bytes)": "as the first deployment's",
+            "key (40 + 8 * limbs bytes)": "0 state u8 (1 ready) | 1 issuer u8 | 2 limbs u8 (64 or 128) | 3 bump u8 | 4 n0inv u32 | 8 active_at i64 | "
+                                          "16 expires_at i64 | 24 flags u8 (1 approved, 2 revoked, 4 genesis) | 40 n (LE limbs) | then r2 (LE limbs)",
         },
     }
 

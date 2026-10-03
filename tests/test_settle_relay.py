@@ -322,7 +322,7 @@ def test_captured_tokens_replay_in_order_with_the_clock_set_to_each(tmp_path):
 
 
 def test_knos_claim_does_the_five_steps_with_gh_and_waits_for_the_money(env):
-    """`knos claim <address>`: the repository, the workflow file, the run and the wait, with nothing but a gh login."""
+    """`knos claim --v1 <address>`: the repository, the workflow file, the run and the wait, with nothing but a gh login."""
     import base64 as b64mod
 
     from knos import claim as claiming
@@ -347,7 +347,7 @@ def test_knos_claim_does_the_five_steps_with_gh_and_waits_for_the_money(env):
             have.add(f"repos/{args[2]}")
             return ""
         if args[:3] == ("api", "-X", "PUT"):
-            assert b64mod.b64decode(json.loads(inp)["content"]) == (ROOT / "examples" / "knos-claim.yml").read_bytes()
+            assert b64mod.b64decode(json.loads(inp)["content"]) == claiming.TEMPLATE_V1.read_bytes() and args[3].endswith(claiming.WORKFLOW_V1)
             have.add(args[3])
             return "{}"
         if args[:2] == ("workflow", "run"):
@@ -360,7 +360,7 @@ def test_knos_claim_does_the_five_steps_with_gh_and_waits_for_the_money(env):
     got = claiming.claim(str(wallet), gh=gh, ledger=ledger, say=said.append, sleep=lambda s: None)
     assert got["arrived"] and got["created"] and got["repo"] == "mona/knos-claim" and got["due"][0][1] == waiting
     assert said[0] == f"{waiting / 1e6:,.2f} USDC is waiting for mona." and said[-1] == f"Sent {waiting / 1e6:,.2f} USDC to {wallet}."
-    assert ("workflow", "run", "knos-claim.yml", "-R", "mona/knos-claim", "-f", f"address={wallet}") in calls
+    assert ("workflow", "run", "knos-claim-v1.yml", "-R", "mona/knos-claim", "-f", f"address={wallet}") in calls
     assert pay.read_due(c.data(pay.due_pda(AUTHOR, pay.faucet_mint()))) == 0
     # nothing due: it says so before touching GitHub any further; a repository someone else owns is refused; so is a bad address
     calls.clear()
@@ -369,5 +369,7 @@ def test_knos_claim_does_the_five_steps_with_gh_and_waits_for_the_money(env):
     assert calls == [("api", "user")]
     with pytest.raises(claiming.Cannot, match="not a Solana address"):
         claiming.claim("0xabc", gh=gh, ledger=ledger)
-    # the workflow file the command installs is the example, byte for byte
+    # the first deployment's claim workflow has a file of its own (it asks GitHub for a `knos:claim:` token); the one
+    # `knos claim` installs for the second deployment is the example, byte for byte
+    assert b"audience=knos:claim:$ADDRESS" in claiming.TEMPLATE_V1.read_bytes()
     assert claiming.TEMPLATE.read_bytes() == (ROOT / "examples" / "knos-claim.yml").read_bytes()

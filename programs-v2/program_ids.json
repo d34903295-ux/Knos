@@ -1,0 +1,14 @@
+{
+  "knos_oidc": "FkwZdsYCmzicJMtHLTkPK76bYNVG4WNwkWJBiVWNtF3W",
+  "knos_pay": "5y7iWJ1VAMJjnnWbbdo2a2PsWJEwTExSNpzrvQSEnS8k",
+  "rotate_sha": "6ddf031b64febecfcd510763ecee37637a8047fa",
+  "claim_sha": "80e796d341f65060767939c4e65a38ede5fa1ac8",
+  "guardian": "AT1aKj1DpgaWerxmS4YjDkNpWPNUtCCKVDvxLhFxg5Jc",
+  "guardian_multisig": "EwqWNR3XwE9RMsJQdH7pZJSx4WERXCKLQdBpMnr8jFx5",
+  "upgrade_authority": "CKCrTBN542pVhizxuSPVg8tvdnPooNxt9B7o97VuTjz2",
+  "upgrade_multisig": "9HcsMEo2o6zZu9t1kbFWpnyKn7hiHaZYYFwNHZSpmWqK",
+  "fee_owner": "4G3cznCnwCUPBCZwzKiLupjdgB5pSoCcGWNGuFv4TYFo",
+  "squads_program": "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf",
+  "attest_owner_id": 142920951,
+  "attest_repo_ids": [1353152983, 1401432540]
+}

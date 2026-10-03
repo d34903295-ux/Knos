@@ -1,62 +1,137 @@
 # Knos compared
 
-What each alternative does, read from its own code and pages on 2 Oct 2026 (MergePay's mainnet claim and fee from
-its site, [mergepay.fun](https://mergepay.fun), the same day). Where we could not confirm something, it
-says so. Knos is on devnet; several of these handle real money today, and that is their advantage.
+What each alternative does, read from its own code, pages and chain on 2 Oct 2026. The Knos row is the second
+deployment (`programs-v2`). Knos is on Solana devnet and its money is test USDC; several of the others move real
+money today. Where another product is ahead, this page says so.
 
-## Paying for a pull request
+## Paying for a merged pull request
 
-| | who decides the payment | who could take or redirect the money | what the worker needs before starting | funding step | fee | where |
-|---|---|---|---|---|---|---|
-| **Knos 0.3.11** | GitHub's signature that a maintainer merged the pull request and that the Knos check held at the merged commit (or that the funder's checks passed), verified by a program on chain | nobody: no admin, no upgrade authority, issuer keys fixed in the binary and rotated only on GitHub's own signature | a GitHub account. No wallet, no stake, no sign-up | one comment on the issue: `/knos bounty 20` | 2.5%, at least 0.05 USDC, only when paid; fixed in the program | Solana devnet, test USDC |
-| **MergePay** | GitHub's OIDC signature, verified on chain (the same idea, on an EVM chain) | its owner: issuer keys are proposed by the contract owner and become active after a 3-day delay, so the owner can register a key of their own and sign anything | a GitHub account; links a wallet later with a `workflow_dispatch` token | not confirmed from the code we read | none (its site, 2 Oct 2026) | Arc (EVM); its site says mainnet since 30 Sep 2026; repository created 23 Sep 2026 |
-| **GH Bounty** | AI validators score the pull request, then the bounty's creator signs the payout | the creator, who must sign `resolve_bounty` | a wallet and a 0.035 SOL stake, locked 14 days | post on its site and deposit SOL | the site says 2.5%; the program pays the full amount | Solana mainnet; SOL only |
-| **Octasol** | the maintainer signs `complete_bounty` | the maintainer | a wallet | install a GitHub App, set up escrow | none in the contract | Solana; its site was down when read |
-| **Algora** | the maintainer awards it by hand after merge | the funder decides whether to pay; the payment goes through Algora | an Algora account with payouts set up | on Algora or by a bot command | 9% (its pricing page) | fiat; 120 countries |
-| **GitHub Sponsors** | the sponsor | the payment goes through GitHub | a Sponsors profile in a supported country | on GitHub | 0% from personal accounts, up to 6% from organisations | fiat; not tied to any piece of work |
+| | who holds the money | what releases it | what is verified, and by whom | time from merge to paid | fee | who can change the rules | chain |
+|---|---|---|---|---|---|---|---|
+| **GitHub's own controls** (rulesets, required checks, required reviews, merge queue, the February and June 2026 pull request limits, Copilot code review) | Nobody. There is no money in them. | Nothing. They gate a merge, not a payment. | GitHub checks, before a merge, what the repository requires: named status checks (from a named app if set), approving reviews, code-owner review. A merge queue keeps those checks satisfied. Copilot code review can count as an approval when an admin turns that on (preview, off by default). | Not applicable. | None. | Repository and organisation admins. They set the rules and decide who may bypass them. | None. |
+| **MergePay** | A contract on Arc. Anyone funds an issue from a wallet (`fund(...)`, native USDC). | A GitHub-signed token from its pinned workflow, relayed to `award()`. The award then waits for the payee to link a wallet; unlinked after 180 days, it goes back to the funders. | On chain, by the contract: GitHub's RSA signature, the issuer, expiry, `event_name`, the audience, `repository_id` and the workflow's ref. That the pull request was merged is decided by the workflow's own `if:`, not by a signed claim. There is no test or check condition. | 9 seconds on its one award (merged 07:56:18, awarded 07:56:27 UTC, 24 Sep 2026). Its site says 4.5 seconds. | No platform fee. A relayer fee the funder sets: 0.03 USDC by default, 1 USDC at most. | One key. `owner()` is the relayer's hot wallet, the key its relay service signs with (read on chain, 2 Oct 2026). It can propose a signing key, active after 3 days (funders may refund while one is pending), revoke a key at once, and transfer ownership. It cannot take escrowed money. A multisig owner is an open item on its roadmap. | Arc mainnet (chain id 5042) since 24 Sep 2026. Real USDC. |
+| **Bounty boards** (Algora, Opire, BountyHub, TaskBounty) | Algora: its pages do not say the money is held before the work; the funder pays through Stripe when rewarding. Opire: nobody; the creator pays the developer through Stripe after accepting. BountyHub: the board, when the creator pays in advance. TaskBounty: not stated. | A person. Algora: the maintainer clicks Reward, or sets up auto-pay on merge. Opire and BountyHub: the bounty's creator decides whether the pull request meets the issue. TaskBounty: a run of the repository's tests and a new regression test in its own sandbox. | Nothing is signed by a third party. On Algora, Opire and BountyHub a person judges. TaskBounty runs tests in a sandbox it operates. | Algora: payout typically 1 to 3 business days after the payment. TaskBounty: 1 to 2 business days by bank, at once in USDC. Opire and BountyHub: not published. | Algora 9%. Opire 4% plus Stripe's fees. BountyHub 10%. TaskBounty 20%. | The board, through its terms, and the person paying. | None: Stripe, and PayPal on BountyHub. TaskBounty can pay out USDC on Base or Solana. |
+| **Knos** (second deployment) | A Solana program (`knos-pay`). A job's money sits in the program's vault. A repository owner's prefunded balance sits in a token account the program controls; only the wallet that opened it can withdraw it. | A GitHub-signed token from the workflow commit fixed at funding. The author is paid in the transaction that verifies the proof. No veto and no review window after the merge. With no proof by the deadline the money goes back, and that needs no token. | On chain: GitHub's RSA signature (`knos-oidc`), then the repository id, the workflow file and its commit, the issue, the payee's GitHub id, the head commit and the hash of the terms fixed at funding (`knos-pay`). In that workflow, on a GitHub-hosted runner in the repository the job names: that the pull request was merged, that every check named in the terms concluded `success` at its head commit, and that its changed files are inside the paths the terms allow. GitHub signs that this workflow ran there; it does not sign what the workflow read. | No waiting period: paid in the transaction that verifies the proof. Before it come one GitHub Actions job and the relay, which reports how long it took; that time is measured, not promised ([BENCH.md](BENCH.md)). | 2.5%, at least 0.05 USDC, only when someone is paid. Nothing on a refund. | Knos, only through a multisig with a public 48-hour delay, until an outside review; then the programs are made immutable. A second multisig, the guardian, can approve or revoke a signing key and pause new funding for at most 7 days. It cannot add a key or move money. No instruction changes a job's terms after funding. | Solana devnet. Test USDC. |
 
-What is different about Knos, in one line each:
+## Where the others are ahead
 
-- **Against MergePay**, which had the idea of verifying GitHub's signature on chain and of paying a GitHub id a week
-  earlier ([DISCLOSURE.md](DISCLOSURE.md)): Knos removes the owner. There is no key-registration role at all, the
-  programs are immutable, and new keys come in on GitHub's signature. It also verifies GitLab (RSA-4096), checks
-  every pull request's claims before a merge can pay, ships a judge with a sandbox for bounties paid on tests, and
-  gives other programs a dependency-free crate to read a verified token. MergePay is ahead in one way that matters:
-  its site says it is on a mainnet, and Knos is not.
-- **Against GH Bounty and Octasol**: nobody signs the payout. A person decides by merging, which they were going to
-  do anyway; the money then moves on GitHub's signature.
-- **Against Algora and Sponsors**: the money is committed up front in a program, not promised; the worker needs no
-  account anywhere; and the fee is 2.5% against Algora's 9%.
-- **Where Knos is behind**: it is devnet only; it has not been audited; no outside repository has funded a bounty
-  through it; a bounty's refund waits for its deadline (14 days by default); and the idea of GitHub's signature on
-  chain is not Knos's alone.
+- **MergePay** is on a mainnet and moves real USDC, since 24 Sep 2026. It charges no platform fee. Its one award
+  landed 9 seconds after the merge. A new signing key waits 3 days there, and funders may take their money back
+  while a key change is pending; on Knos the wait is 1 day and there is no early refund. It also came before
+  Knos: it verified GitHub's signature on a chain a week before Knos did so on Solana
+  ([DISCLOSURE.md](DISCLOSURE.md)).
+- **Bounty boards** pay ordinary money to bank accounts. Algora's pricing page says 120 countries and regions, and
+  its home page says 100+ customers. Nobody on a board needs a wallet.
+- **GitHub's own controls** are free, built in and already trusted by every repository that uses them. There is
+  nothing to install.
 
-Sources: MergePay, [github.com/codeswithroh/mergepay](https://github.com/codeswithroh/mergepay) (its contracts and
-README; 25 commits, 23–30 Sep 2026). GH Bounty, [ghbounty.com](https://www.ghbounty.com) and
-[github.com/Ghbounty/GhBounty](https://github.com/Ghbounty/GhBounty): `contracts/solana/programs/ghbounty_escrow/src/lib.rs`
-(`ResolveBounty` needs `creator: Signer`; payout of the full `bounty.amount`), `src/constants.rs`
-(`MIN_STAKE_LAMPORTS = 35_000_000`, 14-day lock). Octasol,
-[github.com/Octasol/octasol_contract](https://github.com/Octasol/octasol_contract) (`CompleteBounty` with
-`has_one = maintainer`) and octasol.io (TLS failed; plain HTTP said the domain had expired). Algora,
-[algora.io/pricing](https://algora.io/pricing). GitHub Sponsors,
-[docs.github.com](https://docs.github.com/en/sponsors/getting-started-with-github-sponsors/about-github-sponsors).
+## Where Knos differs
 
-## Telling whether a pull request's claims are true
+- **Checks are part of the payment condition.** The checks the funder named must have concluded `success` at the
+  head commit of the merged pull request, and its changed files must stay inside the paths the funder allowed.
+  Both are fixed at funding: the terms are logged on chain and their hash is stored with the job. MergePay's
+  condition is the merge alone. On the boards a person judges.
+- **The workflow is pinned by commit.** The program compares `job_workflow_sha`. MergePay's contract compares the
+  workflow's ref, and its default ref is a tag (`@refs/tags/v1`, its `/api/config`).
+- **No `pull_request_target`.** From 2 Nov 2026 GitHub blocks workflows triggered by `pull_request_target` in public
+  repositories unless an admin adds a policy that allows it
+  ([GitHub docs](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)).
+  MergePay's contract accepts an award only from that event (`EVENT_MERGE` in `MergePay.sol`). Knos reads a
+  merge from the `push` the merge makes.
+- **Signing keys.** A new key needs GitHub's own signature, from a workflow at a fixed commit run in one of two
+  repositories Knos owns. It then waits a day and needs the guardian's approval. Every key expires 30 days after
+  it was last attested, and the guardian can revoke one. MergePay's owner proposes a key, and its keys do not
+  expire.
+- **Funding by comment.** A repository owner tops up a balance from a wallet once; after that one comment funds an
+  issue. On MergePay each funding is a wallet transaction.
+- **Solana, and GitLab.** `knos-oidc` also verifies GitLab CI tokens, and any Solana program can read a verified
+  token ([OIDC.md](OIDC.md)).
 
-| | what it does | what it costs | what it cannot do |
-|---|---|---|---|
-| **Knos check** (`check.yml` alone, `prove / check` with bounties, and the paste box on the site) | compares the description's "tests pass" with GitHub's record of the head commit; applies the repo's CONTRIBUTING rules; remembers what a repo's history made required; runs none of the pull request's code | free, no money or chain involved | judge design or style. It reports facts |
-| **CodeRabbit** | an LLM reviews the diff and comments | $12 to $48 a seat a month ([Sacra](https://sacra.com/c/coderabbit/)) | be held to anything: it is an opinion |
-| **GitHub's own limits** (restrict who may open pull requests, cap open pull requests per outside user; Feb and Jun 2026) | keeps volume down | free | tell a true claim from a false one |
-| **Required CI** (a branch ruleset) | blocks the merge while a check fails | free | say anything about what the description claimed, or pay anyone |
-| **Vouching** (e.g. Ghostty's) | maintainers vouch for people before their pull requests are accepted | free | scale to strangers, which is where bounties come from |
+Both records are small. MergePay's feed shows 4 bounties funded (2.25 USDC) and one award (0.47 USDC, to its own
+author, on its own repository), read 2 Oct 2026. Knos's first deployment shows 11 bounties funded and 6 paid, every
+payment Knos's own account paying itself in test money (measured with `scripts/network_stats.py` on devnet,
+2 Oct 2026, 19:56 UTC).
 
-## Verifying an OIDC token on a chain
+## Where Knos is behind
 
-We searched GitHub and the web on 2 Oct 2026 for a Solana program that verifies an OIDC or RS256 token on chain and
-found none. On EVM chains there is MergePay (above) and a draft proposal for a standard
-([ERC proposal, GitHub Actions attestation verification](https://ethereum-magicians.org/t/erc-proposal-github-actions-attestation-verification/27661)).
-Sui's zkLogin and Aptos Keyless verify OIDC tokens for wallet login with zero-knowledge proofs and a trusted set of
-keys maintained by the chain's validators; they answer "who is this user", not "what did this workflow do", and are
-not callable as a general fact-checker by other programs in the way a token account here is. That last sentence is
-our reading of their designs, not a tested claim.
+- It is on devnet. No real money has moved.
+- There has been no outside review. Until there is one, Knos can change the second deployment through its
+  multisig, after a public 48-hour delay.
+- It charges 2.5%. MergePay charges no platform fee.
+- No merge-to-paid time for the second deployment is published here. MergePay has shown 9 seconds. On the first
+  deployment the median from the funding transaction to the payment, over its 6 payments, was 159 seconds (same
+  measurement); [BENCH.md](BENCH.md) says where that time goes.
+- A refund waits for the deadline.
+- The payee needs a Solana address. The boards pay bank accounts.
+- No outside repository has funded a task through it.
+
+## What GitHub's own controls can and cannot do
+
+They can block a merge:
+
+- A ruleset can require named status checks, and name the app that must report them. It can require a number of
+  approvals, a code owner's approval, and an approval from someone other than the last person to push
+  ([available rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)).
+- A merge queue keeps required checks satisfied on a busy branch. It is available in public repositories owned by
+  an organisation, and in private ones on GitHub Enterprise Cloud
+  ([merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)).
+- Since [13 Feb 2026](https://github.blog/changelog/2026-02-13-new-repository-settings-for-configuring-pull-request-access/)
+  a repository can turn pull requests off, or accept them from collaborators only. Since
+  [17 Jun 2026](https://github.blog/changelog/2026-06-17-limit-open-pull-requests-for-users-without-write-access/)
+  it can cap the open pull requests of each user without write access. Drafts do not count.
+- Since [1 Sep 2026](https://github.blog/changelog/2026-09-01-copilot-code-review-can-now-approve-pull-requests/)
+  Copilot code review can approve a pull request, and that approval counts toward the required number. It is a
+  public preview and off by default.
+
+None of them moves money. None makes a payment conditional on a merge, and none lets a stranger count on being
+paid. The request for a bounty on issues has been open since 6 Jul 2021
+([community discussion 4517](https://github.com/orgs/community/discussions/4517)). GitHub Sponsors pays a person
+or an organisation, once or monthly, and is not tied to an issue or a merge
+([GitHub Sponsors](https://docs.github.com/en/sponsors/getting-started-with-github-sponsors/about-github-sponsors)).
+
+Knos uses these controls; it does not replace them. When a funder names no checks, a job's terms take the default
+branch's required status checks. The free Knos check is one more status a ruleset can require.
+
+## The buyer's real question
+
+Do I need an escrow at all?
+
+When better review or better CI is all a team needs, no. GitHub's required checks and the free Knos check are
+enough, and the escrow adds nothing. A team that pays its own engineers already has a contract and a payroll; a
+merge does not need to move money.
+
+The escrow matters only when the person doing the work is not someone the buyer already pays: an outside
+contributor, a stranger with an agent, a contractor with no contract. That person asks whether the money exists
+and whether it can be taken back after the work is accepted. The buyer asks what exactly is being bought. The
+escrow answers the first: the money is committed before the work and cannot be vetoed after the merge. The terms
+answer the second: these checks, these paths, this deadline, fixed when the money went in.
+
+## Other programs that verify GitHub's signature on a chain
+
+On Solana we found none. Searches of crates.io on 2 Oct 2026 for `solana rs256` and `zklogin solana` returned no
+crate, and web searches found no program that verifies an RS256, JWT or OIDC token on chain.
+
+Elsewhere: MergePay (above) on Arc. `github-zktls` checks a Sigstore attestation of a GitHub Actions run in zero
+knowledge on Base Sepolia; its README carries a notice dated 24 Aug 2026 that the construction "does not provide
+the security it claims" ([repository](https://github.com/amiller/github-zktls)). Juno verifies GitHub Actions tokens
+inside an Internet Computer canister, to authorise deployments, not payments
+([write-up, 23 Feb 2026](https://daviddalbusco.com/blog/building-a-github-actions-integration-with-oidc-authentication)).
+
+## Sources
+
+All read on 2 Oct 2026.
+
+- MergePay: [repository](https://github.com/codeswithroh/mergepay) (`contracts/src/MergePay.sol`,
+  `.github/workflows/award.yml`, README; first commit 23 Sep 2026, "Deploy to Arc mainnet" 24 Sep 2026);
+  [site](https://mergepay.fun); its live [feed](https://mergepay.codeswithroh.workers.dev/api/feed) and
+  [config](https://mergepay.codeswithroh.workers.dev/api/config); `owner()` read from `https://rpc.mainnet.arc.io`
+  for contract `0xcff79B144833b36ca53b310C1Ad7854AF9Ff9EeD`.
+- Algora: [pricing](https://algora.io/pricing), [home page](https://algora.io),
+  [payments](https://algora.io/docs/payments), [bounty workflow](https://docs.algora.io/bounties/workflow). On
+  2 Oct 2026 the pricing, payments and workflow pages loaded for us through one route and returned "page not found"
+  through two others; the home page loaded every time and now leads with hiring. Treat Algora's figures as its
+  last published ones.
+- Opire: [terms of service](https://opire.dev/terms-of-service), last updated 24 Aug 2024.
+- BountyHub: [bountyhub.dev](https://www.bountyhub.dev/).
+- TaskBounty: [for agents](https://www.task-bounty.com/for-agents).
+- Knos: this repository; the second deployment's addresses are in `programs-v2/program_ids.json`.

@@ -1,5 +1,130 @@
 # Changelog
 
+## 0.3.12 (October 2026)
+
+**The first deployment was made immutable too early.** 0.3.10 deployed two programs and removed their upgrade
+authority the same day, before anyone outside had read them. Three outside reviews then found defects that cannot
+be patched there. 0.3.12 does not touch it: `programs/` is byte for byte what was deployed, and the bounties funded
+on it finish on it. Everything new is a second pair of programs, `programs-v2`, with new addresses. It stays
+changeable until an outside review, only through a multisig with a public 48-hour delay, and is then made immutable.
+
+What the reviews found in the first deployment, and what the second does instead:
+
+| the defect | the second deployment |
+|---|---|
+| A funder could merge a pull request and then veto, taking the money back. | No veto and no review window. A maintainer says no before merging (`/knos reject`); once the pay token exists the payment is final. |
+| A merge payment's condition was what the description claimed. It was not fixed on chain. | Terms fixed at funding: the checks that must have passed at the merged commit and the paths that may change. The funding transaction logs them, the bounty stores their hash, and a payment must carry it. |
+| A payment was credited to the author's GitHub id inside the program and claimed later, in a second step. | Paid straight to a wallet in the paying instruction. With no wallet known, the bounty is held for that person for 180 days and then returns to the funder. |
+| A signing key the program trusted never expired and could not be revoked. | A key expires 30 days after it was last attested, and a guardian can revoke it. Revoking a key also stops the payments that depend on tokens it signed. |
+| A new key was admitted on a GitHub-signed token from any repository that called the rotate workflow. A hosted runner with a custom image can carry a standard label in a paid organisation, so that token said less than it seemed to. | The attestation counts only from two repositories of one personal account, started by the schedule or by hand. The key then waits a day and needs the guardian's approval. |
+| Real money needed a wallet transaction for every bounty. | A balance: a wallet sets money aside for one GitHub owner, with a cap per bounty and up to four accounts that may spend it by comment. Unspent money goes back only to that wallet. |
+| Only classic SPL tokens. | SPL Token and Token-2022 mints. A mint that could tax or block a payout is refused when money enters. |
+| The public record did not tell real money from test money or self-payment. | It counts them apart, and counts distinct funders. |
+| Nothing could be done about a fault. | A guardian can pause new funding for at most 7 days at a time. The pause does not reach payments, refunds, withdrawals or wallet bindings, and the guardian cannot add a key or move money. |
+
+### If you fund work
+
+- **`/knos fund <amount> [checks: a, b] [paths: glob, ...] [days N] [reserve N]`** on an issue (`/knos bounty` still
+  works). The reply states the terms in plain sentences before any money moves. With no checks named, the terms
+  take the default branch's required checks, else the checks that ran on its latest commit. A repository with no
+  checks is told so: "your merge alone is the acceptance".
+- **Six states of evidence.** At the merge each required check is passed, failed, skipped, pending, absent or
+  unreadable at the pull request's last commit. Only passed for all of them is acceptance. A check of the same name
+  from another app does not count, and neither do Knos's own jobs.
+- **`/knos reject [reason]`** on a pull request, before merging: it does not take the bounty.
+- **Payment without a merge ("tests mode") is offered only for a black-box check:** the submission runs as a
+  separate process and only its output is compared. Everything else is funded in merge mode. The reason is measured
+  in [docs/TAMPER.md](docs/TAMPER.md): of 63 cheating pull requests, plain CI passed 56, in-process acceptance
+  tests 7 and the black-box check none.
+- **`/knos tip <amount>`** on a merged pull request: a small bounty funded and paid at once.
+- **A pull request merged before the bounty was funded is not paid.** A pay token must be issued after the funding.
+- On devnet a faucet in the program mints the test USDC, so one comment is still all it takes.
+
+### If you do the work
+
+- **Paid to a wallet.** The wallet bound to your GitHub account, else the address in your own
+  `/knos address <address>` comment on the pull request. Binding is by hand only: create a repository from the
+  template `drexthealpha/knos-claim`, run its "knos claim" workflow from the Actions tab and paste your address
+  yourself, or run `knos claim <address>`, which does both. The program takes only a run started by hand, and no
+  link, repository description or push carries an address in, because an address in a link could be someone else's.
+- **`/knos take`** reserves an unassigned funded issue for the bounty's `reserve` days; **`/knos release`** gives it
+  back. An assigned issue pays only its assignee's pull request.
+- **A coding agent's pull request pays a person only on an act GitHub authenticates:** the issue's assignee, a
+  maintainer's `/knos pay @login`, or `/knos mine` from a person named in the pull request's assignees. 0.3.11 paid
+  the login a line in the description named; an agent can be talked into writing such a line. Those lines are now
+  shown as a hint and decide nothing. An edited comment never counts.
+- **`/knos settle`** tries a merged pull request's payment again. **`/knos status`** says what is in escrow.
+- **Every `/knos` comment gets a reply**, including an unknown command, a malformed one and one from someone who may
+  not use it. The reply says what was understood and what to type instead.
+
+### If you install it
+
+- **One workflow file for the whole payment flow**, `.github/workflows/knos.yml`: comments and new issues, the push
+  a merge makes, a run by hand. A second, optional file puts the check on every pull request.
+- **No `pull_request_target`.** From 2 Nov 2026 GitHub blocks workflows it triggers on public repositories unless an
+  admin allows them, and a fork's `pull_request` run gets no token. A merge is now read from the push it makes.
+- **The workflows are published at one commit of `drexthealpha/knos-workflows`** and install the judge as the exact
+  PyPI release. They take no inputs, so a calling repository cannot change which code judges. A bounty records
+  that commit and is paid only by it.
+- **The check's memory is an issue.** Since 26 Jun 2026 GitHub denies cache saves to the runs that could write it,
+  so what the check learned is kept as comments in an issue labelled `knos-memory`, written by GitHub Actions and
+  read by every run. Comments by anyone else, and edited ones, are ignored.
+- **Private repositories.** With a relay key in the repository's secrets the job carries its own tokens to Solana,
+  and nothing is posted in public.
+- **Install routes**, each tested: a plugin for Claude Code and Codex, an extension for Gemini CLI, links for Cursor
+  and VS Code, the free check as a GitHub Action, the JavaScript client, the Rust interface crate
+  ([docs/INSTALL.md](docs/INSTALL.md)).
+- **One gate for a release.** `release.yml` runs the whole test workflow on the tagged commit before anything is
+  published, and every publishing job needs it. PyPI takes the upload by trusted publishing first, and by the
+  repository secret `PYPI_API_TOKEN` when that does not work; with neither the job fails and names both.
+- **No cache in a job that signs or holds a secret.** A cache written by a run of pull request code could be read by
+  a job that signs, so these jobs install with `enable-cache: false`. A test fails if one does not.
+- **Node 24.** GitHub removed Node 20 from Actions runners on 23 Sep 2026. Every pinned action that runs on Node is now a
+  release that runs on Node 24, and `scripts/action_pins.json` names each by its commit.
+
+### For other programs
+
+- `knos-oidc-interface` reads a token of either deployment (`Token::read`, `v2::read`); IDLs for both in `idl/`.
+- The verifier's arithmetic and claim reader are unchanged, byte for byte, between the deployments.
+
+### Corrections to what 0.3.11 said
+
+- **"Nobody can change it" and "no admin" are true of the first deployment only.** The second can be changed by
+  Knos, through the multisig, after 48 hours, until an outside review. Today every key of that multisig is the
+  founder's.
+- **17.8% is "a failed check of any kind"**, not "failed CI": 147 of 826 repositories. Counting only a failed test,
+  build, lint or type-check job, by its name, it is 80 of 826, 9.7%. Both are published under those names.
+- **The index is not "rebuilt every 6 hours".** A scan is scheduled every 6 hours and replaces the published list
+  only when it has finished. Before, a run that counted too few pull requests ended green and published nothing;
+  now it fails in the open.
+- **RSA-4096 tokens above about 5,000 bytes could not be verified by 0.3.11's client.** Its last step ran out of
+  compute units. The plan is now 2, 3, 3, 3, 4 and 1 squarings, and every size up to 8,192 bytes verifies, on both
+  deployments ([docs/BENCH.md](docs/BENCH.md)).
+- **The history.** The public repository's history starts on 1 Sep 2026, and 83 of its 209 commits up to 0.3.11
+  predate the hackathon ([docs/DISCLOSURE.md](docs/DISCLOSURE.md) has the counts and the commands).
+- **The market.** The unsourced figure for agent spending is gone; [docs/MARKET.md](docs/MARKET.md) is bottom-up
+  with every input labelled.
+
+### Measured
+
+- The tamper benchmark now has three sample repositories, in Python, JavaScript and Ruby: 63 cheating pull
+  requests. Plain CI passed 56, the in-process judge 7, the black-box check none ([docs/TAMPER.md](docs/TAMPER.md)).
+- Of 241 merged agent pull requests whose description said tests pass, 30 had a failed check at the head commit
+  ([docs/BENCH.md](docs/BENCH.md), "Merged anyway").
+- Compute units of every instruction of the second deployment, four random walks of 2,500 steps over its escrow,
+  and the first deployment's record on devnet are in [docs/BENCH.md](docs/BENCH.md).
+
+### From outside
+
+Three pull requests by another GitHub account, `jaystay-bot`, written for bounties Knos funded on this repository:
+`knos_bounties` says what each bounty is about (#32), a repository's own record in the Agent PR Index on the site
+(#33), and a Ruby runner for the judge (#34).
+
+### Not done
+
+No outside review. No mainnet. No real money has moved, and by 3 Oct 2026 no outside repository had funded a task.
+[docs/SECURITY.md](docs/SECURITY.md) lists every known limit.
+
 ## 0.3.11 (2 Oct 2026)
 
 No change to the two programs: they are immutable, and `programs/` is byte for byte what was deployed.

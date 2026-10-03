@@ -4,9 +4,9 @@
 Question: of PRs authored by AI coding agents whose PR body claims tests/CI
 pass, what share had CI FAILING at the PR's head SHA?
 
-Read-only: only `gh api -X GET` calls. Every API response is cached under
-~/.cache/knos-agent-pr-ci/ so reruns are cheap; each invocation stops after --max-seconds and can
-be re-run to resume.
+Read-only: only `gh api -X GET` calls. Every answer GitHub would give again is cached under
+~/.cache/knos-agent-pr-ci/ so reruns are cheap (a server error or a rate limit is not an answer and
+is asked again); each invocation stops after --max-seconds and can be re-run to resume.
 
 Usage (from this directory):
     py agent_pr_ci.py collect   # search phase (Search API, 30 req/min)
@@ -102,13 +102,57 @@ def time_left():
     return ARGS.max_seconds - (time.time() - START)
 
 
-def gh_get(path, params=None, kind="core"):
+# An answer GitHub will give again for the same request: the pull request, the commit or the repository is gone or
+# blocked. Any other failure (a server error, no network, a rate limit) says nothing about the request: it is not
+# kept, so the next run asks again.
+_GONE = re.compile(r"HTTP (404|410|422|451)\b")
+_NO_ANSWER = re.compile(r"HTTP 5\d\d|error connecting|connection re(set|fused)|timeout|timed out|\bEOF\b|TLS handshake|"
+                        r"not JSON", re.I)
+
+
+def _gh(cmd):
+    """One `gh` call: (exit code, stdout, stderr). The only place the network is touched; the tests replace it."""
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    return p.returncode, p.stdout or "", p.stderr or ""
+
+
+def _now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _cached(fn, max_age):
+    """The kept answer in `fn`, or None: no file, a file cut short by a killed run, or one older than `max_age`."""
+    try:
+        with open(fn, encoding="utf-8") as f:
+            got = json.load(f)
+        if max_age is not None and (_now() - dt.datetime.fromisoformat(got["fetched"])).total_seconds() > max_age:
+            return None
+        return got["resp"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _core_reset():
+    """Seconds until the hourly core budget is back, when it is used up; None when it is not (the refusal was a
+    secondary limit) or GitHub does not say. Reading rate_limit does not count against the budget."""
+    code, out, _ = _gh(["gh", "api", "-X", "GET", "rate_limit"])
+    try:
+        core = json.loads(out)["resources"]["core"]
+        return max(1, core["reset"] - time.time()) + 5 if code == 0 and not core["remaining"] else None
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def gh_get(path, params=None, kind="core", max_age=None):
+    """GET `path` through `gh api`, answered from the disk cache when it has the answer (and, with `max_age`, the
+    answer is at most that many seconds old). {"ok": True, "json": ...} or {"ok": False, "error": ...}; a failure
+    that says nothing about the request also carries "transient": True and is not kept."""
     key = path + "?" + "&".join(f"{k}={v}" for k, v in sorted((params or {}).items()))
     h = hashlib.sha1(key.encode()).hexdigest()
     fn = os.path.join(CACHE, kind, h[:2], h + ".json")
-    if os.path.exists(fn):
-        with open(fn, encoding="utf-8") as f:
-            return json.load(f)["resp"]
+    hit = _cached(fn, max_age)
+    if hit is not None:
+        return hit
     if time_left() < 15:
         raise OutOfTime()
     cmd = ["gh", "api", "-X", "GET", path, "-H", "Accept: application/vnd.github+json"]
@@ -118,29 +162,61 @@ def gh_get(path, params=None, kind="core"):
     for attempt in range(6):
         if kind == "search":
             _search_slot()  # 30 req/min search limit; complex OR queries trip secondary limits faster
-        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
-        if p.returncode == 0:
-            resp = {"ok": True, "json": json.loads(p.stdout or "null")}
+        code, out, err = _gh(cmd)
+        if code == 0:
+            try:
+                body = json.loads(out or "null")
+            except ValueError:
+                code, out, err = 1, "", "the answer was cut off (not JSON)"
+        if code == 0:
+            if kind == "search" and isinstance(body, dict) and body.get("incomplete_results") and attempt < 2:
+                time.sleep(5)   # GitHub ran out of time on the query and returned what it had: ask twice more, then
+                continue        # take the page as it is (scan_agent counts it as cut short)
+            resp = {"ok": True, "json": body}
             break
-        err = (p.stderr or "") + (p.stdout or "")[:500]
+        err = err + out[:500]
         if re.search(r"rate limit|HTTP 429|secondary", err, re.I):
             wait = min(90, 20 * (attempt + 1))
+            if kind == "core" and not re.search("secondary", err, re.I):
+                wait = _core_reset() or wait   # the hourly budget is spent: it comes back at a known time, wait for it
             if time_left() < wait + 15:
                 raise OutOfTime()
-            print(f"  rate-limited, sleeping {wait}s", file=sys.stderr)
+            print(f"  rate-limited, sleeping {wait:.0f}s", file=sys.stderr)
             time.sleep(wait)
             continue
-        if re.search(r"HTTP 5\d\d", err) and attempt < 3:
+        if _NO_ANSWER.search(err) and attempt < 3:
             time.sleep(5)
             continue
         resp = {"ok": False, "error": err.strip()[:300]}
+        if kind == "search" or not _GONE.search(err):
+            resp["transient"] = True
         break
     if resp is None:
         raise OutOfTime()
-    os.makedirs(os.path.dirname(fn), exist_ok=True)
-    with open(fn, "w", encoding="utf-8") as f:
-        json.dump({"key": key, "fetched": dt.datetime.now(dt.timezone.utc).isoformat(), "resp": resp}, f)
+    if not resp.get("transient"):
+        os.makedirs(os.path.dirname(fn), exist_ok=True)
+        tmp = f"{fn}.{os.getpid()}.{__import__('threading').get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"key": key, "fetched": _now().isoformat(), "resp": resp}, f)
+        os.replace(tmp, fn)   # in one step: a run killed here leaves the old answer or none, never half of one
     return resp
+
+
+def prune(days):
+    """Forget the answers read more than `days` days ago; returns how many. With `days` longer than the scan's window
+    they are all about pull requests that have left it, so the cache a scheduled run carries stays one window large."""
+    cutoff, gone = time.time() - days * 86400, 0
+    for kind in ("core", "search"):
+        for folder, _, names in os.walk(os.path.join(CACHE, kind)):
+            for name in names:
+                fn = os.path.join(folder, name)
+                try:
+                    if os.path.getmtime(fn) < cutoff:
+                        os.remove(fn)
+                        gone += 1
+                except OSError:
+                    pass
+    return gone
 
 
 # ---- config (frozen window so reruns reproduce) ------------------------------
@@ -205,18 +281,20 @@ FAIL_CONCL = {"failure", "timed_out", "startup_failure"}
 OK_CONCL = {"success", "neutral", "skipped"}
 
 
-def classify(c):
+def classify(c, max_age=None):
+    """What CI said at the pull request's head commit. `max_age`: read GitHub again where the kept answer is older
+    than that many seconds (a verdict that was not final when it was read)."""
     # the combined status of refs/pull/N/head names the head SHA: one core call fewer than GET pulls/N
-    st = gh_get(f"repos/{c['repo']}/commits/refs/pull/{c['number']}/head/status")
+    st = gh_get(f"repos/{c['repo']}/commits/refs/pull/{c['number']}/head/status", max_age=max_age)
     if not st["ok"]:
-        return {"class": "error", "detail": st["error"][:120]}
+        return {"class": "error", "detail": st["error"][:120], "transient": bool(st.get("transient"))}
     sha = st["json"]["sha"]
     out = {"sha": sha}
     runs, page = [], 1
     while True:
-        r = gh_get(f"repos/{c['repo']}/commits/{sha}/check-runs", {"per_page": 100, "page": page})
+        r = gh_get(f"repos/{c['repo']}/commits/{sha}/check-runs", {"per_page": 100, "page": page}, max_age=max_age)
         if not r["ok"]:
-            out.update({"class": "error", "detail": r["error"][:120]})
+            out.update({"class": "error", "detail": r["error"][:120], "transient": bool(r.get("transient"))})
             return out
         runs += r["json"]["check_runs"]
         if len(r["json"]["check_runs"]) < 100 or page >= 5:
@@ -225,7 +303,7 @@ def classify(c):
     statuses = st["json"]["statuses"]
     suites = []
     if not runs and not statuses:  # only then can a suite awaiting approval change the verdict
-        su = gh_get(f"repos/{c['repo']}/commits/{sha}/check-suites", {"per_page": 100})
+        su = gh_get(f"repos/{c['repo']}/commits/{sha}/check-suites", {"per_page": 100}, max_age=max_age)
         suites = su["json"]["check_suites"] if su["ok"] else []
 
     agent_runs = [x for x in runs if AGENT_RUN_RE.match(x["name"].strip())]
@@ -254,6 +332,22 @@ def classify(c):
     return out
 
 
+# A verdict that can still change: CI has not finished, has not started, or waits for a maintainer's approval. The
+# answers behind it are kept on disk like any other, so a later run would repeat it for ever; instead it is read
+# again once it is RECHECK_AFTER old, for as long as the pull request is RECHECK_DAYS young.
+UNSETTLED = ("pending", "no-ci", "blocked-awaiting-approval")
+RECHECK_AFTER = 5 * 3600
+RECHECK_DAYS = 14
+
+
+def _young(c, now=None):
+    try:
+        made = dt.datetime.fromisoformat(str(c.get("created_at", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (now or _now()) - made < dt.timedelta(days=RECHECK_DAYS)
+
+
 def run_checks(cands, workers=8):
     """Classify every claimed PR; 8 concurrent gh processes (core API only)."""
     from concurrent.futures import ThreadPoolExecutor
@@ -261,7 +355,10 @@ def run_checks(cands, workers=8):
 
     def one(c):
         try:
-            c.update(classify(c))
+            got = classify(c)
+            if got.get("class") in UNSETTLED and _young(c):
+                got = classify(c, max_age=RECHECK_AFTER)
+            c.update(got)
             return True
         except OutOfTime:
             return False
@@ -284,11 +381,17 @@ def excluded_self(item):
 
 
 def scan_windows(end, days, width):
-    """Newest-first [a, b] date windows of `width` days covering `days` days ending at `end`."""
-    out, b = [], dt.date.fromisoformat(end)
-    stop = b - dt.timedelta(days=days - 1)
-    while b >= stop:
-        a = max(stop, b - dt.timedelta(days=width - 1))
+    """Newest-first [a, b] date windows of at most `width` days covering exactly the `days` days ending at `end`.
+
+    The windows are cut at fixed calendar boundaries (every `width` days, counted from day 1), not counted back from
+    `end`. So when `end` moves on by a day, every window but the newest and the oldest is the same query as the day
+    before: its search pages and the verdicts behind them are already on disk, and a scheduled run has only the new
+    day's pull requests to read. Counted back from `end`, every window moved every day and every run started again."""
+    last = dt.date.fromisoformat(end)
+    first = last - dt.timedelta(days=days - 1)
+    out, b = [], last
+    while b >= first:
+        a = max(first, dt.date.fromordinal(b.toordinal() - b.toordinal() % width))
         out.append((a.isoformat(), b.isoformat()))
         b = a - dt.timedelta(days=1)
     return out
@@ -300,19 +403,26 @@ SCAN_WIDTH = {"copilot": 5, "devin": 1, "claude-bot": 5, "claude-code": 1, "code
 
 def scan_agent(agent, qual, end, days, per_agent):
     """One agent's windows, newest first, up to 10 pages of 100 each (GitHub's 1,000-result cap is per query, so
-    narrow windows reach past it), until `per_agent` claimed, non-self-repo PRs are kept."""
-    kept, seen, n = [], set(), {"hits": 0, "excluded": 0, "no_claim": 0}
+    narrow windows reach past it), until `per_agent` claimed, non-self-repo PRs are kept. Returns (kept, counts,
+    finished): `finished` is False when a query was refused or the time ran out, so what was kept is the newest part
+    of the sample and not all of it."""
+    kept, seen, n = [], set(), {"hits": 0, "excluded": 0, "no_claim": 0, "cut_short": 0}
     for a, b in scan_windows(end, days, SCAN_WIDTH.get(agent, 3)):
         q = f"is:pr {qual} created:{a}..{b} {CLAIM_SEARCH}"
         for page in range(1, 11):
             if len(kept) >= per_agent:
-                return kept, n
-            r = gh_get("search/issues", {"q": q, "per_page": 100, "page": page,
-                                          "sort": "created", "order": "desc"}, kind="search")
+                return kept, n, True
+            try:
+                r = gh_get("search/issues", {"q": q, "per_page": 100, "page": page,
+                                              "sort": "created", "order": "desc"}, kind="search")
+            except OutOfTime:
+                print(f"out of time searching {agent}: {a}..{b} page {page}", file=sys.stderr)
+                return kept, n, False
             if not r["ok"]:
                 print("search error:", q, r["error"], file=sys.stderr)
-                break
+                return kept, n, False
             items = r["json"]["items"]
+            n["cut_short"] += bool(r["json"].get("incomplete_results"))   # a page GitHub ran out of time on
             for it in items:
                 repo = it["repository_url"].split("/repos/")[1]
                 k = f"{repo}#{it['number']}".lower()
@@ -332,18 +442,19 @@ def scan_agent(agent, qual, end, days, per_agent):
                              "phrase": phrase, "claim_line": ctx})
             if len(items) < 100:
                 break
-    return kept, n
+    return kept, n, True
 
 
 def scan_collect(end, days, per_agent):
     """All agents concurrently (the search limit is shared; gh_get backs off on it). A PR found under two agents'
-    queries counts once, for the first agent listed. Returns (kept, counts)."""
+    queries counts once, for the first agent listed. Returns (kept, counts, unfinished): the agents whose search did
+    not finish. What the others found is kept either way."""
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=len(AGENTS)) as ex:
         res = list(ex.map(lambda aq: scan_agent(aq[0], aq[1], end, days, per_agent.get(aq[0], 0)
                                                     if isinstance(per_agent, dict) else per_agent), AGENTS))
-    kept, seen, n = [], set(), {"hits": 0, "excluded": 0, "no_claim": 0}
-    for rows, cnt in res:
+    kept, seen, n = [], set(), {"hits": 0, "excluded": 0, "no_claim": 0, "cut_short": 0}
+    for rows, cnt, _ in res:
         for k in n:
             n[k] += cnt[k]
         for r in rows:
@@ -351,7 +462,7 @@ def scan_collect(end, days, per_agent):
             if key not in seen:
                 seen.add(key)
                 kept.append(r)
-    return kept, n
+    return kept, n, [name for (name, _), (_, _, finished) in zip(AGENTS, res) if not finished]
 
 CLASSES = ["failed", "passed", "other", "pending", "no-ci", "blocked-awaiting-approval", "error"]
 

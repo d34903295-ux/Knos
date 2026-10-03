@@ -15,6 +15,10 @@ that history makes required.
                   scoped repo=... and agent=...: every later proof for that repo or by that agent must run
                   `tamper:<pattern>` (required_for / tamper_checks_required)
 
+    lessons(), export_lessons(), import_lessons()   what the judge learned, as JSON lines, so it can travel between
+                  runs on GitHub (knos.proof.memory keeps them in the repository's `knos-memory` issue). They are
+                  loaded into a Sibyl store and read from there; nothing decides from the lines themselves.
+
 `NullStore` keeps nothing: the same engine with no memory, which is what a plain hook amounts to.
 """
 
@@ -36,6 +40,9 @@ class NullStore:
     def all(self, category: str) -> list[dict]:
         return []
 
+    def rows(self, category: str) -> list[tuple[str, dict]]:
+        return []
+
 
 class SibylStore:
     """The repo's Sibyl store (the same one Knos's memory uses), through the public MemoryClient API."""
@@ -45,8 +52,9 @@ class SibylStore:
 
     @classmethod
     def local(cls, root, tenant_id: str = "knos-judge") -> "SibylStore":
-        """Sibyl's own local store at <root>/sibyl.db: what prove.yml's judge keeps between runs in the caller repo's
-        Actions cache. Offline: no secret, no network, no Sibyl service on the runner."""
+        """Sibyl's own local store at <root>/sibyl.db: the judge's memory during a run on GitHub. Between runs its
+        lessons travel in the repository's `knos-memory` issue (knos.proof.memory). No secret, and no Sibyl service
+        on the runner."""
         from .. import store
         return cls(store.local(root, tenant_id))
 
@@ -72,7 +80,8 @@ class SibylStore:
         finally:
             self._release()
 
-    def all(self, category: str) -> list[dict]:
+    def rows(self, category: str) -> list[tuple[str, dict]]:
+        """(name, body) of every entity in a category."""
         try:
             rows = self.client.list_entities(category, status="active", limit=10000)
         finally:
@@ -86,8 +95,11 @@ class SibylStore:
                 except ValueError:
                     continue
             if isinstance(body, dict):
-                out.append(body)
+                out.append((str(row.get("name") or ""), body))
         return out
+
+    def all(self, category: str) -> list[dict]:
+        return [body for _name, body in self.rows(category)]
 
 
 @dataclass
@@ -203,7 +215,63 @@ def tamper_checks_required(store, repo=None, agent=None) -> set[str]:
     return {r["require"] for r in required_for(store, repo, agent)}
 
 
-# ---- a delivery against what the buyer told us before (Sibyl) ---------------------------------------------------
+# ---- what the judge learned, to carry between runs (knos.proof.memory) -------------------------------------------
+
+LESSONS = ("tamper", "proof_rule", "repo_rule")
+
+
+def lesson(row) -> dict | None:
+    """`row` when it is a lesson as `lessons` writes them, else None. A CONTRIBUTING rule is never one: it is read
+    from the base branch's own file in every run, so nothing carried between runs can stand in for that file."""
+    if not isinstance(row, dict) or row.get("category") not in LESSONS or not isinstance(row.get("body"), dict):
+        return None
+    name, body = row.get("name"), row["body"]
+    if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{24}", name) or len(json.dumps(body)) > 8000:
+        return None
+    if row["category"] == "repo_rule":
+        ok = body.get("origin") != "contributing" and isinstance(body.get("kind"), str) and body.get("id") == name
+    elif row["category"] == "tamper":
+        ok = all(isinstance(body.get(k), str) for k in ("repo", "agent", "pattern"))
+    else:
+        ok = isinstance(body.get("when"), str) and isinstance(body.get("require"), str)
+        if ok and body["when"] == "tamper":     # the rule's name is made of what it says: one cannot pose as another
+            scope = body.get("scope")
+            ok = (scope in ("repo", "agent") and isinstance(body.get(scope), str) and body["require"].startswith("tamper:")
+                  and name == _id("tamper", scope, body[scope], body["require"][len("tamper:"):]))
+    return {"category": row["category"], "name": name, "body": body} if ok else None
+
+
+def lessons(store) -> list[dict]:
+    """What the judge learned, as {"category", "name", "body"} rows a later run can load: each tamper it caught, each
+    check that made required, and each rule a rejection taught."""
+    rows = getattr(store, "rows", None)
+    found = [lesson({"category": c, "name": name, "body": body}) for c in LESSONS for name, body in (rows(c) if rows else [])]
+    return sorted((x for x in found if x), key=lambda x: (x["category"], x["name"]))
+
+
+def export_lessons(store) -> str:
+    """The lessons as JSON lines, one lesson a line. Takes a store, or the rows `lessons` gave."""
+    rows = store if isinstance(store, list) else lessons(store)
+    return "".join(json.dumps(x, sort_keys=True, separators=(",", ":")) + "\n" for x in rows)
+
+
+def import_lessons(store, lines) -> int:
+    """Load lessons (JSON lines as text, or the rows themselves) into the store; returns how many were lessons.
+    Each is kept under its own name, so loading the same lessons twice changes nothing. A line that is not a
+    lesson is skipped. Into a NullStore this keeps nothing: the lines are not a memory of their own."""
+    n = 0
+    for line in (lines.splitlines() if isinstance(lines, str) else lines or []):
+        if isinstance(line, str):
+            try:
+                line = json.loads(line) if line.strip() else None
+            except ValueError:
+                continue
+        row = lesson(line)
+        if row:
+            store.put(row["category"], row["name"], row["body"])
+            n += 1
+    return n
+
 
 # ---- a PR against the repo's own rules: CONTRIBUTING.md and past rejections (Sibyl) ------------------------------
 

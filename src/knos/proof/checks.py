@@ -7,6 +7,13 @@
     deleted   each path is gone from disk and from git
     author    HEAD's author is the one .knos/proof.toml names, and no AI attribution trailers
     custom    any [[check]] in .knos/proof.toml: a command that must exit 0
+
+A command (a [[check]]'s `run`, or `tests`) goes to the shell as written, with one exception: when its first word is
+`python` or `python3`, that word is replaced by the full path of the interpreter Knos itself is running under (for
+`tests` in a Python project: the fresh virtual environment's). The bare name means whatever PATH finds first: on
+Windows that is the Microsoft Store alias, which runs nothing and exits 9009, and elsewhere it can be a system Python
+without the project's packages. So `run = "python scripts/check.py"` means the same on every machine. Only the first
+word is replaced; write the interpreter's path yourself to choose another one.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -39,9 +47,26 @@ class Result:
                                          default=str).encode()).hexdigest()
 
 
+_PYTHON_FIRST = re.compile(r"\s*python3?(?=\s|$)")   # the first word, exactly: not python3.12, pythonw or python-config
+
+
+def with_python(command: str, exe: str | None = None) -> str:
+    """`command` with a first word of `python` or `python3` replaced by an interpreter's full path, quoted for the
+    shell that will run it: the interpreter Knos is running under, or `exe` (a fresh venv's). Any other command comes
+    back unchanged, and so does every later word: a `python` after `&&` or in a pipe is the repository's own business."""
+    exe = exe or sys.executable
+    m = _PYTHON_FIRST.match(command)
+    if not m or not exe:
+        return command
+    # cmd.exe keeps everything between double quotes (a Windows path cannot contain one); sh needs shlex's quoting
+    return (f'"{exe}"' if os.name == "nt" else shlex.quote(exe)) + command[m.end():]
+
+
 def _run(cmd, cwd: Path, timeout: float = 280, env: dict | None = None) -> tuple[int, str]:
     try:
-        got = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
+        # errors="replace": a command's output in another encoding (a Windows code page, a binary dump) is still a
+        # result to report, never a crash of the check that ran it
+        got = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, errors="replace", timeout=timeout,
                              shell=isinstance(cmd, str), env=env)
         return got.returncode, (got.stdout + got.stderr)[-2000:]
     except subprocess.TimeoutExpired:
@@ -83,7 +108,7 @@ def tests(repo: Path, command: str | None = None, install: str | None = None) ->
     if not command:
         return Result("tests", False, "no test command: set tests = \"...\" in .knos/proof.toml")
     if not python:
-        code, out = _run(command, repo, 280)
+        code, out = _run(with_python(command), repo, 280)
         tail = out.strip().splitlines()[-1] if out.strip() else ""
         return Result("tests", code == 0, f"`{command}`: {tail}", {"command": command, "exit": code, "head": head(repo)})
     venv = Path(tempfile.mkdtemp(prefix="knos-proof-venv-"))
@@ -106,7 +131,7 @@ def tests(repo: Path, command: str | None = None, install: str | None = None) ->
             return Result("tests", False, f"the project does not install in a fresh venv: {out[-300:]}",
                           {"install": spec, "exit": code})
         env = {**os.environ, "VIRTUAL_ENV": str(venv), "PATH": str(py.parent) + os.pathsep + os.environ.get("PATH", "")}
-        code, out = _run(command, repo, 280, env)
+        code, out = _run(with_python(command, str(py)), repo, 280, env)   # `python -m pytest`: the fresh venv's python
         tail = out.strip().splitlines()[-1] if out.strip() else ""
         return Result("tests", code == 0, f"`{command}` in a fresh venv: {tail}", {"command": command, "exit": code,
                                                                                     "head": head(repo)})
@@ -223,6 +248,8 @@ def author(repo: Path, expected: str | None) -> Result:
 
 
 def custom(repo: Path, name: str, command: str) -> Result:
-    code, out = _run(command, repo, 280)
+    """A [[check]]: its `run` command must exit 0. The evidence keeps the command as the repository wrote it (the same
+    on every machine); what ran is that with a leading `python` made this interpreter (with_python)."""
+    code, out = _run(with_python(command), repo, 280)
     return Result(f"custom:{name}", code == 0, f"`{command}` exited {code}: {out.strip()[-160:]}",
                   {"command": command, "exit": code})

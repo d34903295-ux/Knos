@@ -117,6 +117,47 @@ def github_claims(**over) -> dict:
     return c
 
 
+def gitlab_claims(**over) -> dict:
+    """The claims of a GitLab CI ID token, with the names GitLab documents. `groups_direct` (the user's groups,
+    up to 200 of them) is what makes a real one long."""
+    c = {"namespace_id": "72", "namespace_path": "my-group", "project_id": "20", "project_path": "my-group/my-project",
+         "user_id": "1", "user_login": "sample-user", "user_email": "sample-user@example.com", "user_access_level": "owner",
+         "user_identities": [{"provider": "github", "extern_uid": "2435223452345"}], "pipeline_id": "574",
+         "pipeline_source": "push", "job_id": "302", "ref": "feature-branch-1", "ref_type": "branch",
+         "ref_path": "refs/heads/feature-branch-1", "ref_protected": "false", "groups_direct": ["my-group/my-subgroup"],
+         "environment": "test-environment2", "environment_protected": "false", "deployment_tier": "testing",
+         "environment_action": "start", "runner_id": 1, "runner_environment": "gitlab-hosted", "sha": "d" * 40,
+         "project_visibility": "public", "ci_config_ref_uri": "gitlab.com/my-group/my-project//.gitlab-ci.yml@refs/heads/main",
+         "ci_config_sha": "e" * 40, "jti": "235b3a54-b797-45c7-ae9a-f72d7bc6ef5b", "iat": NOW, "nbf": NOW - 5, "exp": NOW + 300,
+         "iss": oidc.ISSUERS[oidc.GITLAB], "sub": "project_path:my-group/my-project:ref_type:branch:ref:feature-branch-1",
+         "aud": "x"}
+    c.update(over)
+    return c
+
+
+def jwt_size(key, payload_bytes: int) -> int:
+    """How long sign_jwt's token is for a payload of this many bytes, without signing (a 4096-bit signature is slow here)."""
+    head = len(b64(json.dumps({"typ": "JWT", "alg": "RS256", "x5t": "abc", "kid": "k"}, separators=(",", ":")).encode()))
+    return head + 1 + (payload_bytes * 4 + 2) // 3 + 1 + (modulus(key).bit_length() // 8 * 4 + 2) // 3
+
+
+def sized_jwt(key, claims: dict, size: int, grow: str = "groups_direct") -> str:
+    """`claims` signed as a token of `size` bytes, or one under (base64 skips every fourth length): the list claim
+    `grow` gets more entries, as a GitLab user in more groups would have."""
+    def length(c: dict) -> int:
+        return jwt_size(key, len(json.dumps(c, separators=(",", ":"))))
+
+    c = dict(claims, **{grow: list(claims[grow])})
+    assert length(c) <= size, f"these claims are already {length(c)} bytes as a token"
+    while length(dict(c, **{grow: c[grow] + [f"group-{len(c[grow]):03}/team"]})) <= size:
+        c[grow].append(f"group-{len(c[grow]):03}/team")
+    while length(dict(c, **{grow: c[grow][:-1] + [c[grow][-1] + "s"]})) <= size:
+        c[grow][-1] += "s"
+    jwt = sign_jwt(key, c)
+    assert length(c) == len(jwt) and size - 1 <= len(jwt) <= size
+    return jwt
+
+
 class Chain:
     def __init__(self, pay_build: str = "knos_pay_test.so", oidc_build: str = "knos_oidc_test.so"):
         """The two programs in LiteSVM. A build is a file in tests/fixtures (the test builds, which trust the seed

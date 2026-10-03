@@ -14,7 +14,8 @@ changed for the first time it is copied to <file>.knos-backup.
 Knos before 0.3.10 also installed a memory MCP server and edit hooks (now in drexthealpha/knos-labs). `knos init`
 removes those entries, so an upgrade does not leave a host calling commands that no longer exist. A server named
 `knos` that runs `... mcp` with a command that still exists is left as it is (it starts this server); any other is
-an older one, or points at a command that is gone, and is replaced.
+an older one, or points at a command that is gone, and is replaced. Such a `knos` that Claude Code keeps for one
+project (projects.<path>.mcpServers in ~/.claude.json, where it wins over the user's) is removed.
 """
 
 from __future__ import annotations
@@ -158,7 +159,7 @@ def _set(host: str, install: bool) -> Path | None:
     if install:
         entry = {"type": "command", "command": hook_cmd(host), "timeout": 600}
         if host == "codex":
-            entry["statusMessage"] = "Knos: proving what you said is done"
+            entry["statusMessage"] = "Knos: checking what you said is done"
         hooks.setdefault("Stop", []).append({"hooks": [entry]})
     if hooks:
         data["hooks"] = hooks
@@ -326,6 +327,25 @@ def _legacy_json() -> list[tuple[Path, str]]:
             (Path(os.environ.get("OPENCODE_CONFIG") or xdg / "opencode" / "opencode.json"), "mcp")]
 
 
+def _remove_project_servers(path: Path) -> list[str]:
+    """Claude Code keeps a server added for one project (`claude mcp add` without --scope) under
+    projects.<path>.mcpServers, and in that project it wins over the user's: an older install's `knos` there, or one
+    whose command is gone, would fail to start (spawn ... ENOENT) whatever `knos init` registered. Those are taken out;
+    a project's working knos server is left as it is."""
+    try:
+        data = _load(path)
+    except Unreadable:
+        return []
+    projects = data.get("projects")
+    stale = [p for p, v in projects.items() if isinstance(v, dict) and isinstance(v.get("mcpServers"), dict)
+             and "knos" in v["mcpServers"] and not _works(v["mcpServers"]["knos"])] if isinstance(projects, dict) else []
+    for p in stale:
+        projects[p]["mcpServers"].pop("knos")
+    if stale:
+        _save(path, data)
+    return [f"the knos MCP server of the project {p} in {path}" for p in stale]
+
+
 def remove_legacy() -> list[str]:
     """Take out the `knos` MCP server entries and the edit hooks earlier versions installed. Returns what it removed.
     An entry that starts this product's server is not one of them (see _works); `undo` removes the one this install
@@ -341,6 +361,7 @@ def remove_legacy() -> list[str]:
             servers.pop("knos")
             _save(path, data)
             gone.append(f"the knos MCP server in {path}")
+    gone += _remove_project_servers(Path.home() / ".claude.json")
     codex = codex_config()
     try:
         text = _read_text(codex)

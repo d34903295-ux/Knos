@@ -95,6 +95,22 @@ def test_the_interface_crate_names_the_deployed_program_and_depends_on_nothing()
     assert 'knos-oidc-interface = { path = "../../crates/knos-oidc-interface" }' in gate and "knos_oidc" not in gate
 
 
+def test_the_interface_crate_names_the_second_deployment_too():
+    """`v2::ID` is the second deployment's address (programs-v2/program_ids.json); `ID`, the first constant in the
+    file and the one `Token::read` checks, stays the first deployment's."""
+    ids = json.loads(_read("programs-v2", "program_ids.json"))
+    lib = (CRATE / "src" / "lib.rs").read_text(encoding="utf-8")
+    v2 = lib.split("pub mod v2 {")[1].split("\n}\n")[0]
+    assert re.search(r'pub const ID_STR: &str = "(\w+)";', v2).group(1) == ids["knos_oidc"]
+    body = re.search(r"pub const ID: \[u8; 32\] = \[(.*?)\];", v2, re.S).group(1)
+    assert bytes(int(x, 16) for x in re.findall(r"0x([0-9a-f]{2})", body)) == bytes(Pubkey.from_string(ids["knos_oidc"]))
+    assert lib.index("pub const ID: [u8; 32]") < lib.index("pub mod v2 {") and lib.count("pub const ID: [u8; 32]") == 2
+    assert "pub fn read(owner: &[u8; 32], data: &'a [u8], now: i64) -> Result<Token<'a>, Error> { Self::read_from(&ID, owner, data, now) }" in lib
+    assert "Token::read_from(&ID, owner, data, now)" in v2
+    readme = (CRATE / "README.md").read_text(encoding="utf-8")
+    assert ids["knos_oidc"] in readme and "idl/knos_oidc_v2.json" in readme
+
+
 def test_the_interface_fixture_is_what_knos_oidc_writes():
     """crates/knos-oidc-interface/tests/fixtures: a token account verified by the test build of knos-oidc, regenerated
     here byte for byte (nothing in it is random), and the claims the crate's tests expect are the ones in its bytes."""
@@ -106,3 +122,12 @@ def test_the_interface_fixture_is_what_knos_oidc_writes():
     tok = oidc.read_token((CRATE / "tests" / "fixtures" / "verified_token.bin").read_bytes())
     assert tok.verified and (tok.issuer, tok.exp, tok.claims()) == (want["issuer"], want["exp"], want["claims"])
     assert want["owner"] == str(oidc.OIDC_ID) and want["exp"] == want["now"] + 300
+    # the second deployment's fixture: the same token from the same payer, so the same bytes but the key's address
+    from knos.settle.v2 import oidc as oidc2
+    want2 = json.loads((CRATE / "tests" / "fixtures" / "verified_token_v2.json").read_text(encoding="utf-8"))
+    first, second = (CRATE / "tests" / "fixtures" / "verified_token.bin").read_bytes(), (CRATE / "tests" / "fixtures" / "verified_token_v2.bin").read_bytes()
+    tok2 = oidc2.read_token(second)
+    assert tok2.verified and (tok2.issuer, tok2.exp, tok2.claims(), tok2.payer) == (tok.issuer, tok.exp, tok.claims(), tok.payer)
+    assert want2["owner"] == str(oidc2.OIDC_ID) != want["owner"] and want2["claims"] == want["claims"]
+    assert len(first) == len(second) and [i for i in range(len(first)) if first[i] != second[i]][0] >= 18
+    assert first[:18] == second[:18] and first[50:] == second[50:] and tok2.key != tok.key

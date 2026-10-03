@@ -1,6 +1,6 @@
 [package]
 name = "knos-oidc-interface"
-version = "0.3.11"
+version = "0.3.12"
 edition = "2021"
 license = "MIT"
 description = "Read a GitHub Actions or GitLab CI OIDC token that the knos-oidc program verified on Solana. No dependencies."

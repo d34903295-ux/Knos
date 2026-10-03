@@ -1,0 +1,14 @@
+{
+  "name": "knos",
+  "description": "Knos for coding agents: the Stop hook and the knos MCP server, as one plugin.",
+  "owner": {
+    "name": "drexthealpha",
+    "url": "https://github.com/drexthealpha"
+  },
+  "plugins": [
+    {
+      "name": "knos",
+      "source": "./plugin"
+    }
+  ]
+}
