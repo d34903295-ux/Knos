@@ -747,6 +747,7 @@ const BAL = await k.balance(7000001, WALLET, USDC), BALTOK = await k.baltok(BAL)
   await visit(page, "#claim=mona");
   await settled("#due-result");
   check("account: a link to one account reads it on arrival", (await page.inputValue("#due-login")) === "mona" && (await text(page, "#due-result")).includes("Paid at " + OTHER_WALLET));
+  check("account: first deployment held line not present when account has none", !(await text(page, "#due-result")).includes("The first deployment holds"));
 
   // bind a wallet once, by hand: a plain template link with no address in it, then the Actions tab, or `knos claim`
   const steps = await text(page, "#bind-steps");
